@@ -27,11 +27,7 @@
 ### 1. 安装依赖
 
 ```bash
-# 确保Python 3.8+ 和 pip 已安装
-pip install flask requests edge-tts pydub
-
-# 安装ffmpeg (用于音频格式转换)
-sudo apt update && sudo apt install ffmpeg -y
+pip install flask requests edge-tts
 ```
 
 ### 2. 部署

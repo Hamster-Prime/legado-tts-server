@@ -6,7 +6,6 @@ from datetime import datetime
 from flask import Flask, request, Response, render_template_string, jsonify
 import requests
 import edge_tts
-from pydub import AudioSegment
 
 app = Flask(__name__)
 CONFIG_FILE = '/opt/doubao-tts/config.json'
@@ -98,17 +97,13 @@ def synthesize_doubao(text, voice, speed_ratio=1.0):
         return None, "未配置火山引擎AppID或Token"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer; {config['access_token']}"}
     payload = {"app": {"appid": config["appid"], "token": "placeholder", "cluster": config.get("cluster", "volcano_tts")},
-               "user": {"uid": "legado_user"}, "audio": {"voice_type": voice, "encoding": "pcm", "speed_ratio": speed_ratio, "rate": 24000},
+               "user": {"uid": "legado_user"}, "audio": {"voice_type": voice, "encoding": "mp3", "speed_ratio": speed_ratio},
                "request": {"reqid": str(uuid.uuid4()), "text": text, "operation": "query"}}
     try:
         resp = requests.post("https://openspeech.bytedance.com/api/v1/tts", headers=headers, json=payload, timeout=30)
         result = resp.json()
         if result.get("code") != 3000: return None, f"火山引擎API错误: {result.get('message', 'Unknown')}"
-        pcm_data = base64.b64decode(result.get("data", ""))
-        audio_seg = AudioSegment(data=pcm_data, sample_width=2, frame_rate=24000, channels=1)
-        mp3_buffer = io.BytesIO()
-        audio_seg.export(mp3_buffer, format="mp3")
-        return mp3_buffer.getvalue(), None
+        return base64.b64decode(result.get("data", "")), None
     except Exception as e: return None, str(e)
 
 def tencent_sign(secret_key, date, service, string_to_sign):

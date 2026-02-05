@@ -327,7 +327,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f5}
 </div>
 <div id="edge-settings" style="display:{% if provider == 'edge' %}block{% else %}none{% endif %}">
 <div class="form-group"><label>默认音色</label><select id="edge-voice"></select></div>
-<p style="color:#666;font-size:12px;margin-top:8px">Edge TTS 免费使用，无需配置API密钥</p>
 </div>
 <button class="btn btn-primary" onclick="saveConfig()">保存设置</button>
 </div>

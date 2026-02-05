@@ -285,6 +285,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f5}
 <div class="card">
 <h2>服务商选择</h2>
 <div class="provider-select">
+<div class="provider-btn {% if provider == 'edge' %}active{% endif %}" data-provider="edge" onclick="setProvider('edge')">
+<strong>Edge</strong><br>
+<span class="status status-ok">免费</span>
+</div>
 <div class="provider-btn {% if provider == 'doubao' %}active{% endif %}" data-provider="doubao" onclick="setProvider('doubao')">
 <strong>火山引擎</strong><br>
 <span class="status {% if has_doubao %}status-ok{% else %}status-error{% endif %}">{% if has_doubao %}已配置{% else %}未配置{% endif %}</span>
@@ -292,10 +296,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f5}
 <div class="provider-btn {% if provider == 'tencent' %}active{% endif %}" data-provider="tencent" onclick="setProvider('tencent')">
 <strong>腾讯云</strong><br>
 <span class="status {% if has_tencent %}status-ok{% else %}status-error{% endif %}">{% if has_tencent %}已配置{% else %}未配置{% endif %}</span>
-</div>
-<div class="provider-btn {% if provider == 'edge' %}active{% endif %}" data-provider="edge" onclick="setProvider('edge')">
-<strong>Edge</strong><br>
-<span class="status status-ok">免费</span>
 </div>
 </div>
 </div>

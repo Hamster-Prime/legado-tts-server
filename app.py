@@ -322,6 +322,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <p style="color:#666;margin-bottom:12px">复制以下配置到开源阅读的朗读引擎，即可使用上方选择的音色。</p>
         <div class="code-block" id="legado-config"></div>
+        <button class="btn" onclick="importToLegado()" style="margin-top:12px">一键导入到开源阅读</button>
     </div>
     <div class="card">
         <h2>API 设置</h2>
@@ -424,6 +425,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const lb = String.fromCharCode(123,123), rb = String.fromCharCode(125,125);
         const config = "名称: TTS服务\\nurl: http://" + serverIp + "/speech/stream,{\\"method\\":\\"POST\\",\\"body\\":{\\"text\\":\\"" + lb + "speakText" + rb + "\\",\\"voice\\":\\"" + voice + "\\",\\"rate\\":\\"" + lb + "String(speakSpeed)" + rb + "%\\"},\\"headers\\":{\\"Content-Type\\":\\"application/json\\"}}\\nContent-Type: audio/mp3\\n并发率: 0";
         elements.legadoConfig.textContent = config;
+    }
+
+    window.importToLegado = function() {
+        const voice = elements.voiceSelect.value;
+        if (!voice) { showToast('请先选择音色'); return; }
+        const lb = '{{', rb = '}}';
+        const ttsConfig = {
+            name: 'TTS服务',
+            url: `http://${serverIp}/speech/stream,{"method":"POST","body":{"text":"${lb}speakText${rb}","voice":"${voice}","rate":"${lb}String(speakSpeed)${rb}%"},"headers":{"Content-Type":"application/json"}}`,
+            contentType: 'audio/mp3',
+            concurrentRate: '0'
+        };
+        const json = JSON.stringify([ttsConfig]);
+        const encoded = btoa(unescape(encodeURIComponent(json)));
+        window.location.href = 'legado://import/httpTTS?json=' + encoded;
     }
 
     window.setProvider = function(provider) {

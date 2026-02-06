@@ -304,6 +304,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
     <div class="card">
+        <h2>使用统计</h2>
+        <div class="stat-grid">
+            <div class="stat-item"><div class="stat-value" id="total-chars">-</div><div class="stat-label">总字符</div></div>
+            <div class="stat-item"><div class="stat-value" id="total-requests">-</div><div class="stat-label">总请求</div></div>
+            <div class="stat-item"><div class="stat-value" id="today-chars">-</div><div class="stat-label">今日字符</div></div>
+            <div class="stat-item"><div class="stat-value" id="today-requests">-</div><div class="stat-label">今日请求</div></div>
+        </div>
+    </div>
+    <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="margin:0">开源阅读配置</h2>
             <div style="display:flex;align-items:center;gap:8px">
@@ -327,15 +336,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div id="api-settings-footer">
             <button class="btn" onclick="saveConfig()" style="display:none;">保存设置</button>
             <p id="api-note" style="color:#666;font-size:12px;margin-top:12px;display:none;"></p>
-        </div>
-    </div>
-    <div class="card">
-        <h2>使用统计</h2>
-        <div class="stat-grid">
-            <div class="stat-item"><div class="stat-value" id="total-chars">-</div><div class="stat-label">总字符</div></div>
-            <div class="stat-item"><div class="stat-value" id="total-requests">-</div><div class="stat-label">总请求</div></div>
-            <div class="stat-item"><div class="stat-value" id="today-chars">-</div><div class="stat-label">今日字符</div></div>
-            <div class="stat-item"><div class="stat-value" id="today-requests">-</div><div class="stat-label">今日请求</div></div>
         </div>
     </div>
     <div class="card">

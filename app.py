@@ -423,17 +423,28 @@ document.addEventListener('DOMContentLoaded', () => {
         const voice = elements.voiceSelect.value;
         if (!voice) return;
         const lb = String.fromCharCode(123,123), rb = String.fromCharCode(125,125);
-        const config = "名称: TTS服务\\nurl: http://" + serverIp + "/speech/stream,{\\"method\\":\\"POST\\",\\"body\\":{\\"text\\":\\"" + lb + "speakText" + rb + "\\",\\"voice\\":\\"" + voice + "\\",\\"rate\\":\\"" + lb + "String(speakSpeed)" + rb + "%\\"},\\"headers\\":{\\"Content-Type\\":\\"application/json\\"}}\\nContent-Type: audio/mp3\\n并发率: 0";
+        const bsl = String.fromCharCode(92);
+        const q = bsl + String.fromCharCode(34);
+        const nl = String.fromCharCode(10);
+        const config = '{' + nl + '  "concurrentRate": "0",' + nl + '  "contentType": "audio/mp3",' + nl + '  "name": "TTS服务",' + nl + '  "url": "http://' + serverIp + '/speech/stream,{' + q + 'method' + q + ':' + q + 'POST' + q + ',' + q + 'body' + q + ':{' + q + 'text' + q + ':' + q + lb + 'speakText' + rb + q + ',' + q + 'voice' + q + ':' + q + voice + q + ',' + q + 'rate' + q + ':' + q + lb + 'String(speakSpeed)' + rb + '%' + q + '},' + q + 'headers' + q + ':{' + q + 'Content-Type' + q + ':' + q + 'application/json' + q + '}}"' + nl + '}';
         elements.legadoConfig.textContent = config;
     }
 
     window.copyConfig = function() {
         const text = elements.legadoConfig.textContent;
-        navigator.clipboard.writeText(text).then(() => {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand('copy');
             showToast('已复制到剪切板');
-        }).catch(() => {
+        } catch (e) {
             showToast('复制失败，请手动复制');
-        });
+        }
+        document.body.removeChild(textarea);
     }
 
     window.setProvider = function(provider) {

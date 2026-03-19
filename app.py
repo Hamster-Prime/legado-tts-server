@@ -169,13 +169,31 @@ def synthesize_xiaomi(text, voice, speed_ratio=1.0):
     if not api_key:
         return None, "未配置小米API Key"
     
-    # 处理语速：小米API不直接支持语速参数，通过style标签控制
-    style = ""
-    if speed_ratio > 1.0:
-        style = "<style>加快语速</style>"
-    elif speed_ratio < 1.0:
-        style = "<style>减慢语速</style>"
+    # 处理语速：小米API不直接支持语速参数，通过更精细的style标签控制
+    style_tags = []
+    # 默认添加语速适中，解决默认过快的问题
+    if abs(speed_ratio - 1.0) < 0.05:
+        # 接近正常速度
+        style_tags.append("语速适中 吐字清晰 节奏稳定")
+    elif speed_ratio > 1.0:
+        # 加快语速，根据比例调整描述
+        if speed_ratio >= 1.8:
+            style_tags.append("语速很快 节奏紧凑")
+        elif speed_ratio >= 1.4:
+            style_tags.append("语速偏快 表达流畅")
+        else:
+            style_tags.append("语速稍快 自然流畅")
+    else:
+        # 减慢语速，根据比例调整描述
+        if speed_ratio <= 0.5:
+            style_tags.append("语速很慢 咬字清晰")
+        elif speed_ratio <= 0.8:
+            style_tags.append("语速偏慢 语气舒缓")
+        else:
+            style_tags.append("语速稍慢 清晰稳重")
     
+    # 组合style标签
+    style = f"<style>{' '.join(style_tags)}</style>" if style_tags else ""
     text_with_style = style + text
     
     headers = {

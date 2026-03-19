@@ -16,7 +16,8 @@ DEFAULT_CONFIG = {
     'default_voice': 'zh-CN-XiaoxiaoNeural', 'cluster': 'volcano_tts',
     'tencent_secret_id': '', 'tencent_secret_key': '',
     'tencent_voice': '501002', 'tencent_region': 'ap-guangzhou',
-    'edge_voice': 'zh-CN-XiaoxiaoNeural'
+    'edge_voice': 'zh-CN-XiaoxiaoNeural',
+    'xiaomi_api_key': '', 'xiaomi_voice': 'mimo_default'
 }
 
 DOUBAO_VOICES = [
@@ -44,6 +45,12 @@ EDGE_VOICES = [
     {"id": "zh-CN-YunyeNeural", "name": "云野 - 男声"}, {"id": "zh-CN-YunzeNeural", "name": "云泽 - 男声"},
 ]
 
+XIAOMI_VOICES = [
+    {"id": "mimo_default", "name": "MiMo默认语音"},
+    {"id": "default_zh", "name": "中文女声"},
+    {"id": "default_eh", "name": "英文女声"},
+]
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f:
@@ -60,14 +67,16 @@ def save_config(config):
 
 def load_stats():
     if not os.path.exists(STATS_FILE):
-        return {p: {'total_chars':0,'total_requests':0,'history':[]} for p in ['doubao', 'tencent', 'edge']}
+        return {p: {'total_chars':0,'total_requests':0,'history':[]} for p in ['doubao', 'tencent', 'edge', 'xiaomi']}
     with open(STATS_FILE, 'r') as f:
         data = json.load(f)
         # Compatibility for old formats
         if 'doubao' not in data or isinstance(data.get('doubao'), int):
-             data = {p: {'total_chars':0,'total_requests':0,'history':[]} for p in ['doubao', 'tencent', 'edge']}
+             data = {p: {'total_chars':0,'total_requests':0,'history':[]} for p in ['doubao', 'tencent', 'edge', 'xiaomi']}
         if 'edge' not in data: # Add edge if missing
             data['edge'] = {'total_chars':0,'total_requests':0,'history':[]}
+        if 'xiaomi' not in data: # Add xiaomi if missing
+            data['xiaomi'] = {'total_chars':0,'total_requests':0,'history':[]}
         return data
 
 def save_stats(stats):
@@ -154,6 +163,51 @@ def synthesize_edge(text, voice, rate='+0%'):
     except Exception as e:
         return None, str(e)
 
+def synthesize_xiaomi(text, voice, speed_ratio=1.0):
+    config = load_config()
+    api_key = config.get('xiaomi_api_key', '')
+    if not api_key:
+        return None, "未配置小米API Key"
+    
+    # 处理语速：小米API不直接支持语速参数，通过style标签控制
+    style = ""
+    if speed_ratio > 1.0:
+        style = "<style>加快语速</style>"
+    elif speed_ratio < 1.0:
+        style = "<style>减慢语速</style>"
+    
+    text_with_style = style + text
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    payload = {
+        "model": "mimo-v2-tts",
+        "messages": [
+            {"role": "user", "content": text_with_style},
+            {"role": "assistant", "content": text_with_style}
+        ],
+        "audio": {
+            "format": "mp3",
+            "voice": voice
+        }
+    }
+    
+    try:
+        resp = requests.post("https://api.xiaomimimo.com/v1/chat/completions", headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()
+        if 'choices' in result and len(result['choices']) > 0:
+            message = result['choices'][0]['message']
+            if 'audio' in message and 'data' in message['audio']:
+                audio_data = base64.b64decode(message['audio']['data'])
+                return audio_data, None
+        return None, f"小米API返回错误: {resp.text}"
+    except Exception as e:
+        return None, str(e)
+
 @app.route('/speech/stream', methods=['POST'])
 def speech_stream():
     try:
@@ -183,6 +237,10 @@ def speech_stream():
             provider = 'doubao'
             speed_ratio = max(0.2, min(3.0, 1.0 + pct / 100))
             audio, error = synthesize_doubao(text, voice, speed_ratio)
+        elif voice in ['mimo_default', 'default_zh', 'default_eh'] or voice.startswith('mimo_'):
+            provider = 'xiaomi'
+            speed_ratio = max(0.2, min(3.0, 1.0 + pct / 100))
+            audio, error = synthesize_xiaomi(text, voice, speed_ratio)
 
         if audio:
             update_stats(len(text), provider)
@@ -197,7 +255,7 @@ def api_config():
     if request.method == 'POST':
         data = request.json
         # Only update keys that are present in the request and don't contain mask
-        for key in ['provider', 'default_voice', 'tencent_voice', 'edge_voice']:
+        for key in ['provider', 'default_voice', 'tencent_voice', 'edge_voice', 'xiaomi_voice']:
              if key in data: config[key] = data[key]
         # Handle masked keys separately to avoid overwriting with '***'
         if 'appid' in data and '***' not in data['appid']:
@@ -208,6 +266,8 @@ def api_config():
             config['tencent_secret_id'] = data['tencent_secret_id']
         if 'tencent_secret_key' in data and '***' not in data['tencent_secret_key']:
             config['tencent_secret_key'] = data['tencent_secret_key']
+        if 'xiaomi_api_key' in data and '***' not in data['xiaomi_api_key']:
+            config['xiaomi_api_key'] = data['xiaomi_api_key']
         save_config(config)
         return jsonify({'status': 'ok'})
     else: # GET request
@@ -215,6 +275,8 @@ def api_config():
         safe_config = config.copy()
         if safe_config.get('access_token'): safe_config['access_token'] = '***'
         if safe_config.get('tencent_secret_key'): safe_config['tencent_secret_key'] = '***'
+        xiaomi_key = safe_config.get('xiaomi_api_key', '')
+        if len(xiaomi_key) > 10: safe_config['xiaomi_api_key'] = f"{xiaomi_key[:6]}***{xiaomi_key[-4:]}"
         appid = safe_config.get('appid', '')
         if len(appid) > 6: safe_config['appid'] = f"{appid[:3]}***{appid[-3:]}"
         sid = safe_config.get('tencent_secret_id', '')
@@ -230,6 +292,7 @@ def api_voices():
     provider = request.args.get('provider')
     if provider == 'tencent': return jsonify(TENCENT_VOICES)
     if provider == 'doubao': return jsonify(DOUBAO_VOICES)
+    if provider == 'xiaomi': return jsonify(XIAOMI_VOICES)
     return jsonify(EDGE_VOICES) # Default to Edge
 
 @app.route('/')
@@ -240,17 +303,22 @@ def index():
     if len(appid) > 6: appid = f"{appid[:3]}***{appid[-3:]}"
     sid = config.get('tencent_secret_id', '')
     if len(sid) > 10: sid = f"{sid[:6]}***{sid[-4:]}"
+    xiaomi_key = config.get('xiaomi_api_key', '')
+    if len(xiaomi_key) > 10: xiaomi_key = f"{xiaomi_key[:6]}***{xiaomi_key[-4:]}"
     
     return render_template_string(HTML_TEMPLATE,
         server_ip=request.host.split(':')[0],
         provider=config.get('provider', 'edge'),
         has_token=bool(config.get('access_token')),
         has_tencent_key=bool(config.get('tencent_secret_key')),
+        has_xiaomi_key=bool(config.get('xiaomi_api_key')),
         default_voice=config.get('default_voice'),
         tencent_voice=config.get('tencent_voice'),
         edge_voice=config.get('edge_voice'),
+        xiaomi_voice=config.get('xiaomi_voice'),
         appid=appid,
-        tencent_secret_id=sid
+        tencent_secret_id=sid,
+        xiaomi_api_key=xiaomi_key
     )
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -268,7 +336,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         h1, h2 { margin-bottom: 16px; font-weight: 600; }
         h1 { text-align: center; font-size: 28px; }
         h2 { font-size: 20px; }
-        .provider-select { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+        .provider-select { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
         .provider-btn { padding: 12px; border: 2px solid var(--border-color); border-radius: 8px; cursor: pointer; text-align: center; background: var(--card-bg); transition: all 0.2s ease; }
         .provider-btn.active { border-color: var(--primary-color); background: #e7f1ff; box-shadow: 0 0 0 2px rgba(0,123,255,0.2); }
         .provider-btn strong { display: block; font-size: 16px; }
@@ -304,6 +372,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <strong>腾讯云</strong>
                 <div class="status" id="tencent-status"></div>
             </div>
+            <div class="provider-btn" data-provider="xiaomi" onclick="setProvider('xiaomi')">
+                <strong>小米MiMo</strong>
+                <div class="status" id="xiaomi-status"></div>
+            </div>
         </div>
     </div>
     <div class="card">
@@ -337,6 +409,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="form-group"><label>SecretId</label><input type="text" id="tencent-secret-id" value="{{ tencent_secret_id }}"></div>
             <div class="form-group"><label>SecretKey</label><input type="password" id="tencent-secret-key" placeholder=""></div>
         </div>
+        <div id="xiaomi-settings" style="display:none;">
+            <div class="form-group"><label>API Key</label><input type="password" id="xiaomi-api-key" value="{{ xiaomi_api_key }}" placeholder="请输入小米MiMo API Key"></div>
+        </div>
         <div id="api-settings-footer">
             <button class="btn" onclick="saveConfig()" style="display:none;">保存设置</button>
             <p id="api-note" style="color:#666;font-size:12px;margin-top:12px;display:none;"></p>
@@ -357,30 +432,36 @@ HTML_TEMPLATE_JS = """
 document.addEventListener('DOMContentLoaded', () => {
     const serverIp = '{{ server_ip }}';
     let currentProvider = '{{ provider }}';
-    const defaultVoices = { doubao: '{{ default_voice }}', tencent: '{{ tencent_voice }}', edge: '{{ edge_voice }}' };
+    const defaultVoices = { doubao: '{{ default_voice }}', tencent: '{{ tencent_voice }}', edge: '{{ edge_voice }}', xiaomi: '{{ xiaomi_voice }}' };
     let allStats = {};
 
     const elements = {
         doubaoStatus: document.getElementById('doubao-status'),
         tencentStatus: document.getElementById('tencent-status'),
+        xiaomiStatus: document.getElementById('xiaomi-status'),
         voiceSelect: document.getElementById('voice-select'),
         legadoConfig: document.getElementById('legado-config'),
         doubaoSettings: document.getElementById('doubao-settings'),
         tencentSettings: document.getElementById('tencent-settings'),
+        xiaomiSettings: document.getElementById('xiaomi-settings'),
         apiSettingsFooter: document.getElementById('api-settings-footer'),
         saveButton: document.querySelector('#api-settings-footer button'),
         apiNote: document.getElementById('api-note'),
         accessTokenInput: document.getElementById('access-token'),
         tencentKeyInput: document.getElementById('tencent-secret-key'),
+        xiaomiKeyInput: document.getElementById('xiaomi-api-key'),
     };
     
-    function setConfigStatus(hasDoubao, hasTencent) {
+    function setConfigStatus(hasDoubao, hasTencent, hasXiaomi) {
         elements.doubaoStatus.textContent = hasDoubao ? '已配置' : '未配置';
         elements.doubaoStatus.className = 'status ' + (hasDoubao ? 'status-ok' : 'status-error');
         elements.tencentStatus.textContent = hasTencent ? '已配置' : '未配置';
         elements.tencentStatus.className = 'status ' + (hasTencent ? 'status-ok' : 'status-error');
+        elements.xiaomiStatus.textContent = hasXiaomi ? '已配置' : '未配置';
+        elements.xiaomiStatus.className = 'status ' + (hasXiaomi ? 'status-ok' : 'status-error');
         elements.accessTokenInput.placeholder = hasDoubao ? '已配置，留空保持不变' : '请输入 Access Token';
         elements.tencentKeyInput.placeholder = hasTencent ? '已配置，留空保持不变' : '请输入 SecretKey';
+        elements.xiaomiKeyInput.placeholder = hasXiaomi ? '已配置，留空保持不变' : '请输入小米MiMo API Key';
     }
 
     async function loadStats() {
@@ -456,6 +537,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         elements.doubaoSettings.style.display = provider === 'doubao' ? 'block' : 'none';
         elements.tencentSettings.style.display = provider === 'tencent' ? 'block' : 'none';
+        elements.xiaomiSettings.style.display = provider === 'xiaomi' ? 'block' : 'none';
         
         if (provider === 'edge') {
             elements.saveButton.style.display = 'none';
@@ -482,6 +564,9 @@ document.addEventListener('DOMContentLoaded', () => {
             data.tencent_secret_id = document.getElementById('tencent-secret-id').value;
             data.tencent_secret_key = elements.tencentKeyInput.value || '***';
             data.tencent_voice = newDefault;
+        } else if (currentProvider === 'xiaomi') {
+            data.xiaomi_api_key = elements.xiaomiKeyInput.value || '***';
+            data.xiaomi_voice = newDefault;
         }
         await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
         showToast('设置已保存');
@@ -509,7 +594,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Initial Load
-    setConfigStatus({{ 'true' if has_token else 'false' }}, {{ 'true' if has_tencent_key else 'false' }});
+    setConfigStatus({{ 'true' if has_token else 'false' }}, {{ 'true' if has_tencent_key else 'false' }}, {{ 'true' if has_xiaomi_key else 'false' }});
     loadStats();
     window.setProvider(currentProvider);
 });

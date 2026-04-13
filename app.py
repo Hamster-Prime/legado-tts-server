@@ -15,6 +15,7 @@ import time
 import asyncio
 import io
 import logging
+import atexit
 try:
     import fcntl
 except ImportError:
@@ -69,6 +70,21 @@ _http_session.mount('http://', requests.adapters.HTTPAdapter(**_adapter_kwargs))
 
 # Thread pool for async edge-tts execution
 _edge_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='edge-tts')
+
+
+def _shutdown_edge_executor():
+    global _edge_executor
+    if _edge_executor is None:
+        return
+    executor = _edge_executor
+    _edge_executor = None
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        executor.shutdown(wait=False)
+
+
+atexit.register(_shutdown_edge_executor)
 
 DEFAULT_CONFIG = {
     'provider': 'edge',

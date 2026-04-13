@@ -1,0 +1,16 @@
+services:
+  tts:
+    build: .
+    ports:
+      - "${PORT:-80}:80"
+    volumes:
+      - tts-data:/opt/doubao-tts
+    environment:
+      - PORT=80
+      - CONFIG_FILE=/opt/doubao-tts/config.json
+      - STATS_FILE=/opt/doubao-tts/stats.json
+      - MAX_TEXT_LENGTH=5000
+    restart: unless-stopped
+
+volumes:
+  tts-data:

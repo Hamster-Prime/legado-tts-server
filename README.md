@@ -87,8 +87,41 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now legado-tts
 ```
 
-### 方法三：Docker (计划中)
-*Docker 镜像构建支持即将推出...*
+### 方法三：Docker
+
+```bash
+# 构建镜像
+docker build -t legado-tts .
+
+# 运行
+docker run -d \
+  --name legado-tts \
+  -p 80:80 \
+  -v tts-data:/opt/doubao-tts \
+  legado-tts
+```
+
+### 方法四：Docker Compose
+
+```bash
+# 启动
+docker compose up -d
+
+# 查看日志
+docker compose logs -f
+
+# 停止
+docker compose down
+```
+
+环境变量：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PORT` | `80` | 服务端口 |
+| `CONFIG_FILE` | `/opt/doubao-tts/config.json` | 配置文件路径 |
+| `STATS_FILE` | `/opt/doubao-tts/stats.json` | 统计文件路径 |
+| `MAX_TEXT_LENGTH` | `5000` | 单次合成最大文本长度 |
 
 ---
 
@@ -110,6 +143,11 @@ sudo systemctl enable --now legado-tts
 ---
 
 ## 🔌 API 文档
+
+### 健康检查
+`GET /health`
+
+返回服务状态和时间戳。
 
 ### 语音合成接口
 `POST /speech/stream`

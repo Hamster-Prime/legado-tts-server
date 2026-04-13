@@ -15,7 +15,10 @@ import time
 import asyncio
 import io
 import logging
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
@@ -218,12 +221,45 @@ def load_stats():
     return data
 
 
+def _apply_stats_update(stats, chars, provider):
+    ps = stats.get(provider, dict(_empty_provider_stats))
+    ps['total_chars'] = ps.get('total_chars', 0) + chars
+    ps['total_requests'] = ps.get('total_requests', 0) + 1
+    today = datetime.now().strftime('%Y-%m-%d')
+    history = ps.get('history', [])
+    day_entry = next((d for d in history if d.get('date') == today), None)
+    if day_entry:
+        day_entry['chars'] = day_entry.get('chars', 0) + chars
+        day_entry['requests'] = day_entry.get('requests', 0) + 1
+    else:
+        history.append({'date': today, 'chars': chars, 'requests': 1})
+    ps['history'] = history[-30:]
+    stats[provider] = ps
+    return stats
+
+
+def _update_stats_with_retry(chars, provider, retries=3, delay=0.1):
+    for attempt in range(1, retries + 1):
+        try:
+            stats = load_stats()
+            _write_json(STATS_FILE, _apply_stats_update(stats, chars, provider))
+            return
+        except OSError as e:
+            if attempt == retries:
+                raise
+            log.warning("Stats update retry %d/%d after error: %s", attempt, retries, e)
+            time.sleep(delay * attempt)
+
+
 def update_stats(chars, provider):
     if not provider:
         return
     try:
         os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
-        with open(STATS_FILE, 'r+', encoding='utf-8') as f:
+        if fcntl is None:
+            _update_stats_with_retry(chars, provider)
+            return
+        with open(STATS_FILE, 'a+', encoding='utf-8') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
                 try:
@@ -232,19 +268,7 @@ def update_stats(chars, provider):
                     stats = json.loads(raw) if raw.strip() else {}
                 except (json.JSONDecodeError, ValueError):
                     stats = {}
-                ps = stats.get(provider, dict(_empty_provider_stats))
-                ps['total_chars'] = ps.get('total_chars', 0) + chars
-                ps['total_requests'] = ps.get('total_requests', 0) + 1
-                today = datetime.now().strftime('%Y-%m-%d')
-                history = ps.get('history', [])
-                day_entry = next((d for d in history if d.get('date') == today), None)
-                if day_entry:
-                    day_entry['chars'] = day_entry.get('chars', 0) + chars
-                    day_entry['requests'] = day_entry.get('requests', 0) + 1
-                else:
-                    history.append({'date': today, 'chars': chars, 'requests': 1})
-                ps['history'] = history[-30:]
-                stats[provider] = ps
+                stats = _apply_stats_update(stats, chars, provider)
                 f.seek(0)
                 f.truncate()
                 json.dump(stats, f, indent=2, ensure_ascii=False)

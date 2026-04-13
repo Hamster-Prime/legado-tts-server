@@ -226,28 +226,33 @@ def update_stats(chars, provider):
         with open(STATS_FILE, 'r+', encoding='utf-8') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
+                try:
+                    f.seek(0)
+                    raw = f.read()
+                    stats = json.loads(raw) if raw.strip() else {}
+                except (json.JSONDecodeError, ValueError):
+                    stats = {}
+                ps = stats.get(provider, dict(_empty_provider_stats))
+                ps['total_chars'] = ps.get('total_chars', 0) + chars
+                ps['total_requests'] = ps.get('total_requests', 0) + 1
+                today = datetime.now().strftime('%Y-%m-%d')
+                history = ps.get('history', [])
+                day_entry = next((d for d in history if d.get('date') == today), None)
+                if day_entry:
+                    day_entry['chars'] = day_entry.get('chars', 0) + chars
+                    day_entry['requests'] = day_entry.get('requests', 0) + 1
+                else:
+                    history.append({'date': today, 'chars': chars, 'requests': 1})
+                ps['history'] = history[-30:]
+                stats[provider] = ps
                 f.seek(0)
-                raw = f.read()
-                stats = json.loads(raw) if raw.strip() else {}
-            except (json.JSONDecodeError, ValueError):
-                stats = {}
-            ps = stats.get(provider, dict(_empty_provider_stats))
-            ps['total_chars'] = ps.get('total_chars', 0) + chars
-            ps['total_requests'] = ps.get('total_requests', 0) + 1
-            today = datetime.now().strftime('%Y-%m-%d')
-            history = ps.get('history', [])
-            day_entry = next((d for d in history if d.get('date') == today), None)
-            if day_entry:
-                day_entry['chars'] = day_entry.get('chars', 0) + chars
-                day_entry['requests'] = day_entry.get('requests', 0) + 1
-            else:
-                history.append({'date': today, 'chars': chars, 'requests': 1})
-            ps['history'] = history[-30:]
-            stats[provider] = ps
-            f.seek(0)
-            f.truncate()
-            json.dump(stats, f, indent=2, ensure_ascii=False)
-            fcntl.flock(f, fcntl.LOCK_UN)
+                f.truncate()
+                json.dump(stats, f, indent=2, ensure_ascii=False)
+            finally:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+                except OSError:
+                    pass
     except Exception as e:
         log.error("Failed to update stats: %s", e)
 

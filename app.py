@@ -499,6 +499,7 @@ DEFAULT_CONFIG = {
     'fishaudio_voice': 'fish-animated',
     'fishaudio_reference_id': '',
     'pronunciation_dict': {},  # custom word->replacement mapping
+    'voice_favorites': [],  # list of voice IDs the user has bookmarked
 }
 
 # ──────────────────────────────────────────────
@@ -1659,6 +1660,38 @@ def api_pronunciation():
         config['pronunciation_dict'] = pdict
         save_config(config)
         return jsonify({'status': 'ok', 'count': len(pdict)})
+
+
+@app.route('/api/favorites', methods=['GET', 'POST', 'DELETE'])
+def api_favorites():
+    """Manage voice favorites. GET=list, POST=add, DELETE=remove."""
+    err = _check_admin()
+    if err:
+        return err
+    config = load_config()
+    favs = config.get('voice_favorites', [])
+    if not isinstance(favs, list):
+        favs = []
+    if request.method == 'GET':
+        return jsonify({'favorites': favs, 'count': len(favs)})
+    data = request.get_json(silent=True) or {}
+    voice_id = str(data.get('voice', '')).strip()
+    if not voice_id:
+        return _error_response('Missing voice parameter', 400)
+    if request.method == 'POST':
+        if voice_id not in favs:
+            favs.append(voice_id)
+            if len(favs) > 50:
+                favs = favs[-50:]
+        config['voice_favorites'] = favs
+        save_config(config)
+        return jsonify({'status': 'ok', 'favorites': favs, 'count': len(favs)})
+    # DELETE
+    if voice_id in favs:
+        favs.remove(voice_id)
+    config['voice_favorites'] = favs
+    save_config(config)
+    return jsonify({'status': 'ok', 'favorites': favs, 'count': len(favs)})
 
 
 @app.route('/api/stats', methods=['GET', 'DELETE'])

@@ -1394,3 +1394,46 @@ class TestAPIKeys:
         """Whitelisted IPs should bypass rate limiting."""
         import app as app_module
         assert '127.0.0.1' in app_module.RATE_LIMIT_WHITELIST
+
+
+class TestVoiceFavorites:
+    """Test voice favorites API."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        import app as app_module
+        self.app = app_module.app
+        self.app.config['TESTING'] = True
+        self.client = self.app.test_client()
+        self.orig_config = app_module.CONFIG_FILE
+        app_module.CONFIG_FILE = str(tmp_path / 'config.json')
+        yield
+        app_module.CONFIG_FILE = self.orig_config
+
+    def test_get_favorites(self):
+        r = self.client.get('/api/favorites')
+        assert r.status_code == 200
+        data = r.get_json()
+        assert 'favorites' in data
+        assert isinstance(data['favorites'], list)
+
+    def test_add_favorite(self):
+        before = self.client.get('/api/favorites').get_json()['count']
+        r = self.client.post('/api/favorites', json={'voice': 'zh-CN-XiaoxiaoNeural'})
+        assert r.status_code == 200
+        after = r.get_json()['count']
+        assert after >= before + 1
+
+    def test_remove_favorite(self):
+        self.client.post('/api/favorites', json={'voice': 'test-remove-voice'})
+        before = self.client.get('/api/favorites').get_json()['count']
+        self.client.delete('/api/favorites', json={'voice': 'test-remove-voice'})
+        after = self.client.get('/api/favorites').get_json()['count']
+        assert after <= before
+
+    def test_no_duplicate_favorites(self):
+        self.client.post('/api/favorites', json={'voice': 'zh-CN-YunxiNeural'})
+        count1 = self.client.get('/api/favorites').get_json()['count']
+        self.client.post('/api/favorites', json={'voice': 'zh-CN-YunxiNeural'})
+        count2 = self.client.get('/api/favorites').get_json()['count']
+        assert count1 == count2

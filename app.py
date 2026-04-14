@@ -208,10 +208,12 @@ CONFIG_FILE = os.environ.get('CONFIG_FILE', '/opt/doubao-tts/config.json')
 STATS_FILE = os.environ.get('STATS_FILE', '/opt/doubao-tts/stats.json')
 MAX_TEXT_LENGTH = int(os.environ.get('MAX_TEXT_LENGTH', '5000'))
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
+TEXT_NORMALIZE = os.environ.get('TEXT_NORMALIZE', '1') == '1'  # enable text normalization
 AUDIO_CACHE_SIZE = int(os.environ.get('AUDIO_CACHE_SIZE', '100'))  # max cached items
 AUDIO_CACHE_MAX_MB = int(os.environ.get('AUDIO_CACHE_MAX_MB', '200'))  # max cache memory MB
 CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', '500'))  # chars per chunk for long text
 RATE_LIMIT_RPM = int(os.environ.get('RATE_LIMIT_RPM', '120'))  # requests per minute, 0=unlimited
+RATE_LIMIT_WHITELIST = set(filter(None, os.environ.get('RATE_LIMIT_WHITELIST', '127.0.0.1,::1').split(',')))
 ADMIN_TOKEN = os.environ.get('ADMIN_TOKEN', '')  # protect config/stats/cache endpoints
 ALLOW_SSML = os.environ.get('ALLOW_SSML', '1') == '1'  # allow SSML input
 FALLBACK_TO_EDGE = os.environ.get('FALLBACK_TO_EDGE', '1') == '1'  # auto-fallback to Edge on failure
@@ -292,6 +294,15 @@ def _check_rate_limit(ip):
     global _rate_limits, _rate_limits_cleanup
     if RATE_LIMIT_RPM <= 0:
         return False
+    # Whitelist IPs bypass rate limiting
+    if ip in RATE_LIMIT_WHITELIST:
+        return False
+    # Authenticated requests (valid ADMIN_TOKEN) bypass rate limiting
+    if ADMIN_TOKEN:
+        auth = request.headers.get('Authorization', '')
+        token = request.args.get('token', '')
+        if auth == f'Bearer {ADMIN_TOKEN}' or token == ADMIN_TOKEN:
+            return False
     now = time.time()
     cutoff = now - 60
     with _rate_lock:
@@ -997,8 +1008,9 @@ def _clean_text(text):
     text = re.sub(r'(?<=\S)[ \t]+', ' ', text)
     text = re.sub(r'^[ \t]+', '', text, flags=re.MULTILINE)
     text = text.strip()
-    # Text normalization for better TTS
-    text = _normalize_text(text)
+    # Text normalization for better TTS (configurable)
+    if TEXT_NORMALIZE:
+        text = _normalize_text(text)
     # Apply custom pronunciation dictionary
     text = _apply_pronunciation_dict(text)
     return text

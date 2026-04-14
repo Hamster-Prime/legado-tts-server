@@ -1468,3 +1468,8 @@ class TestStreaming:
             'text': 'test', 'voice': 'invalid-voice-xyz'
         })
         assert r.status_code == 400
+
+    def test_rate_limit_headers_present(self):
+        r = self.client.get('/health')
+        assert 'X-RateLimit-Limit' in r.headers
+        assert 'X-RateLimit-Remaining' in r.headers

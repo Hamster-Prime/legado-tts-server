@@ -167,6 +167,7 @@ def handle_500(e):
 def _before_request():
     request._start_time = time.time()
     request._request_id = request.headers.get('X-Request-ID', uuid.uuid4().hex[:12])
+    request._rate_limit_info = {'limit': RATE_LIMIT_RPM, 'remaining': -1, 'reset': -1}
 
 
 @app.after_request
@@ -198,6 +199,12 @@ def _after_request(response):
     response.headers['X-Response-Time'] = str(int(rt_ms)) + 'ms'
     response.headers['X-Request-ID'] = getattr(request, '_request_id', '')
     response.headers['X-Content-Type-Options'] = 'nosniff'
+    # Rate limit headers
+    rl_info = getattr(request, '_rate_limit_info', None)
+    if rl_info:
+        response.headers['X-RateLimit-Limit'] = str(rl_info.get('limit', ''))
+        response.headers['X-RateLimit-Remaining'] = str(rl_info.get('remaining', ''))
+        response.headers['X-RateLimit-Reset'] = str(rl_info.get('reset', ''))
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Server'] = f'Legado-TTS/{__version__}'
     return response
@@ -293,29 +300,37 @@ def _cache_info():
 
 
 def _check_rate_limit(ip):
-    """Return True if rate limit exceeded, False otherwise."""
+    """Return True if rate limit exceeded, False otherwise.
+    Sets request._rate_limit_info for response headers."""
     global _rate_limits, _rate_limits_cleanup
     if RATE_LIMIT_RPM <= 0:
+        request._rate_limit_info = {'limit': 0, 'remaining': -1, 'reset': -1}
         return False
     # Whitelist IPs bypass rate limiting
     if ip in RATE_LIMIT_WHITELIST:
+        request._rate_limit_info = {'limit': 0, 'remaining': -1, 'reset': -1}
         return False
     # Authenticated requests (valid ADMIN_TOKEN) bypass rate limiting
     if ADMIN_TOKEN:
         auth = request.headers.get('Authorization', '')
         token = request.args.get('token', '')
         if auth == f'Bearer {ADMIN_TOKEN}' or token == ADMIN_TOKEN:
+            request._rate_limit_info = {'limit': 0, 'remaining': -1, 'reset': -1}
             return False
     now = time.time()
     cutoff = now - 60
     with _rate_lock:
         times = _rate_limits.get(ip, [])
         times = [t for t in times if t > cutoff]
+        remaining = max(0, RATE_LIMIT_RPM - len(times) - 1)
+        reset_at = int(times[0] + 60) if times else int(now + 60)
         if len(times) >= RATE_LIMIT_RPM:
             _rate_limits[ip] = times
+            request._rate_limit_info = {'limit': RATE_LIMIT_RPM, 'remaining': 0, 'reset': reset_at}
             return True
         times.append(now)
         _rate_limits[ip] = times
+        request._rate_limit_info = {'limit': RATE_LIMIT_RPM, 'remaining': remaining, 'reset': reset_at}
         # Evict stale IPs periodically (every 100 checks) to prevent memory leak
         _rate_limits_cleanup += 1
         if _rate_limits_cleanup >= 100:

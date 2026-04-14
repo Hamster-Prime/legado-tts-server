@@ -36,7 +36,7 @@ import edge_tts
 import gzip
 import functools
 
-__version__ = '1.7.0'
+__version__ = '1.8.0'
 
 def gzipped(f):
     """Decorator to gzip responses for clients that support it."""
@@ -1540,6 +1540,13 @@ def api_info():
         },
         'cache': _cache_info(),
         'providers': ALL_PROVIDERS,
+        'provider_status': {
+            'edge': {'configured': True, 'note': '免费，无需配置'},
+            'doubao': {'configured': bool(config.get('access_token')), 'note': '需要access_token'},
+            'tencent': {'configured': bool(config.get('tencent_secret_id')), 'note': '需要secret_id+key'},
+            'xiaomi': {'configured': bool(config.get('xiaomi_api_key')), 'note': '需要api_key'},
+            'fishaudio': {'configured': bool(config.get('fishaudio_api_key')), 'note': '需要api_key'},
+        },
         'admin_protected': bool(ADMIN_TOKEN),
         'ffmpeg_available': _FFMPEG_AVAILABLE,
     })

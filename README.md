@@ -4,7 +4,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![Version](https://img.shields.io/badge/version-1.7.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.8.0-green.svg)
 ![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
@@ -116,7 +116,7 @@ sudo systemctl enable --now legado-tts
 | `AUDIO_CACHE_SIZE` | `100` | 缓存最大条目数 |
 | `AUDIO_CACHE_MAX_MB` | `200` | 缓存最大内存(MB) |
 | `RATE_LIMIT_RPM` | `120` | 每IP每分钟请求限制(0=不限) |
-| `RATE_LIMIT_WHITELIST` | `127.0.0.1,::1` | 限流白名单IP |
+| `RATE_LIMIT_WHITELIST` | `1.8.0.0.1,::1` | 限流白名单IP |
 | `ADMIN_TOKEN` | `""` | 管理API认证Token |
 | `API_KEYS` | `""` | TTS访问密钥(逗号分隔) |
 | `API_KEYS_REQUIRED` | `0` | 强制API密钥认证(1=是) |

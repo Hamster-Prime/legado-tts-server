@@ -82,6 +82,22 @@ class TestParseRate:
     def test_float_rate(self):
         assert parse_rate('33.5%') == 33.5
 
+    def test_speed_presets_english(self):
+        assert parse_rate('fast') == 20
+        assert parse_rate('slow') == -15
+        assert parse_rate('normal') == 0
+        assert parse_rate('very-fast') == 40
+
+    def test_speed_presets_chinese(self):
+        assert parse_rate('快速') == 20
+        assert parse_rate('慢速') == -15
+        assert parse_rate('正常') == 0
+
+    def test_speed_presets_multiplier(self):
+        assert parse_rate('1.5x') == 50
+        assert parse_rate('2x') == 100
+        assert parse_rate('0.75x') == -25
+
 
 class TestConfigIO:
     def test_write_and_read(self):

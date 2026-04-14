@@ -687,7 +687,7 @@ def synthesize_doubao(text, voice, speed_ratio=1.0):
     def _do():
         resp = _http_session.post(
             "https://openspeech.bytedance.com/api/v1/tts",
-            headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+            headers=headers, json=payload, timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT))
         result = resp.json()
         if result.get("code") != 3000:
             return None, f"火山引擎API错误: {result.get('message', 'Unknown')}"
@@ -738,7 +738,7 @@ def synthesize_tencent(text, voice, speed=0):
             'X-TC-Action': act, 'X-TC-Timestamp': str(ts),
             'X-TC-Version': ver, 'X-TC-Region': region}
     def _do():
-        resp = _http_session.post(f'https://{host}', headers=hdrs, data=payload, timeout=REQUEST_TIMEOUT)
+        resp = _http_session.post(f'https://{host}', headers=hdrs, data=payload, timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT))
         result = resp.json()
         if 'Response' in result and 'Audio' in result['Response']:
             return base64.b64decode(result['Response']['Audio']), None
@@ -806,7 +806,7 @@ def synthesize_fishaudio(text, voice):
     def _do():
         resp = _http_session.post(
             "https://api.fish.audio/v1/tts",
-            headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+            headers=headers, json=payload, timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT))
         if resp.status_code != 200:
             return None, f"Fish Audio API错误 ({resp.status_code}): {resp.text[:200]}"
         return resp.content, None
@@ -847,7 +847,7 @@ def synthesize_xiaomi(text, voice, speed_ratio=1.0):
     def _do():
         resp = _http_session.post(
             "https://api.xiaomimimo.com/v1/chat/completions",
-            headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+            headers=headers, json=payload, timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT))
         resp.raise_for_status()
         result = resp.json()
         choices = result.get('choices', [])
@@ -885,10 +885,20 @@ def resolve_provider(voice):
     return None
 
 
+# Speed presets for easy configuration
+_SPEED_PRESETS = {
+    'very-slow': -30, 'slow': -15, 'normal': 0, 'fast': 20, 'very-fast': 40,
+    '很慢': -30, '慢速': -15, '正常': 0, '快速': 20, '很快': 40,
+    '0.5x': -50, '0.75x': -25, '1x': 0, '1.25x': 25, '1.5x': 50, '2x': 100,
+}
+
 def parse_rate(rate_str):
-    """Parse rate string ('+50%', '-20%') to float percentage."""
+    """Parse rate string ('+50%', '-20%', 'fast', '快速', '1.5x') to float percentage."""
+    s = str(rate_str).strip().lower()
+    if s in _SPEED_PRESETS:
+        return float(_SPEED_PRESETS[s])
     try:
-        return float(str(rate_str).replace('%', '').replace('+', '').strip())
+        return float(s.replace('%', '').replace('+', '').strip())
     except (ValueError, TypeError):
         return 0.0
 

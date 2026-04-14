@@ -16,6 +16,7 @@ import asyncio
 import io
 import logging
 import atexit
+import signal
 import re
 import threading
 import subprocess
@@ -1831,7 +1832,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
     <div class="card">
-        <div class="row"><h2>开源阅读配置</h2><div style="display:flex;align-items:center;gap:8px"><label for="voice-select" style="font-weight:500">音色</label><select id="voice-select" onchange="updateLegadoConfig()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px"></select><button class="btn" onclick="previewVoice()" style="padding:4px 10px;font-size:12px">▶ 试听</button></div></div>
+        <div class="row"><h2>开源阅读配置</h2><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><label for="voice-search" style="font-weight:500">音色</label><input id="voice-search" placeholder="搜索音色..." oninput="filterVoices()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;width:120px"><select id="voice-select" onchange="updateLegadoConfig()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px"></select><button class="btn" onclick="previewVoice()" style="padding:4px 10px;font-size:12px">▶ 试听</button></div></div>
         <p style="color:#666;margin-bottom:12px">复制以下配置到开源阅读的朗读引擎，即可使用上方选择的音色。</p>
         <div class="code" id="legado-config"></div>
         <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
@@ -1941,7 +1942,7 @@ document.addEventListener('DOMContentLoaded',()=>{
         }catch(e){}
     };
 
-    const loadVoices=async p=>{try{const r=await fetch('/api/voices?provider='+p);const vs=await r.json();const sel=$('voice-select');sel.innerHTML='';vs.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;if(v.id===dv[p])o.selected=true;sel.appendChild(o)});updateLegadoConfig()}catch(e){}};
+    const loadVoices=async p=>{try{const r=await fetch('/api/voices?provider='+p);const vs=await r.json();_allVoiceOptions=vs;const sel=$('voice-select');sel.innerHTML='';vs.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;if(v.id===dv[p])o.selected=true;sel.appendChild(o)});if($('voice-search'))$('voice-search').value='';updateLegadoConfig()}catch(e){}};
 
     window.updateLegadoConfig=()=>{const v=$('voice-select').value;if(!v)return;const q='"',lb=String.fromCharCode(123,123),rb=String.fromCharCode(125,125);$('legado-config').textContent='{\\n  "concurrentRate": "0",\\n  "contentType": "audio/mpeg",\\n  "name": "TTS服务",\\n  "url": "http://'+IP+'/speech/stream,{'+q+'method'+q+':'+q+'POST'+q+','+q+'body'+q+':{'+q+'text'+q+':'+q+lb+'speakText'+rb+q+','+q+'voice'+q+':'+q+v+q+','+q+'rate'+q+':'+q+lb+'String(speakSpeed)'+rb+'%'+q+'},'+q+'headers'+q+':{'+q+'Content-Type'+q+':'+q+'application/json'+q+'}}"\\n}'};
 
@@ -1955,6 +1956,8 @@ document.addEventListener('DOMContentLoaded',()=>{
     window.testTTS=async()=>{const b=$('test-btn');b.disabled=true;b.textContent='合成中...';try{const r=await fetch('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:$('test-text').value,voice:$('voice-select').value,rate:'0%'})});if(r.ok){const bl=await r.blob();const p=$('audio-player');if(p._u)URL.revokeObjectURL(p._u);p._u=URL.createObjectURL(bl);p.src=p._u;p.play()}else toast('TTS失败: '+await r.text())}catch(e){toast('请求错误: '+e.message)}finally{b.disabled=false;b.textContent='播放测试'}};
 
     window.previewVoice=async()=>{const v=$('voice-select').value;if(!v){toast('请先选择音色');return}try{const r=await fetch('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'你好，我是您的朗读助手，很高兴认识您。',voice:v,rate:'0%'})});if(r.ok){const bl=await r.blob();const p=$('audio-player');if(p._u)URL.revokeObjectURL(p._u);p._u=URL.createObjectURL(bl);p.src=p._u;p.play()}else toast('试听失败')}catch(e){toast('试听失败: '+e.message)}};
+    let _allVoiceOptions=[];
+    window.filterVoices=()=>{const q=$('voice-search').value.toLowerCase();const sel=$('voice-select');const cur=sel.value;sel.innerHTML='';_allVoiceOptions.filter(v=>!q||v.name.toLowerCase().includes(q)||v.id.toLowerCase().includes(q)).forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;if(v.id===cur)o.selected=true;sel.appendChild(o)});updateLegadoConfig()};
 
     window.testConfig=async()=>{const b=$('test-cfg-btn');b.disabled=true;b.textContent='测试中...';try{const r=await fetch('/api/config/test',{method:'POST'});const d=await r.json();toast(d.ok?'✅ 连接成功！'+(d.audio_size||0)+'字节':'❌ 失败: '+(d.error||'未知'))}catch(e){toast('请求错误: '+e.message)}finally{b.disabled=false;b.textContent='测试连接'}};
 
@@ -2070,7 +2073,39 @@ def batch_speech():
                         status=500, mimetype='application/json')
 
 
+def _graceful_shutdown():
+    """Flush stats and clean up on shutdown."""
+    log.info("Shutting down gracefully...")
+    # Save current stats
+    try:
+        with _metrics_lock:
+            stats = _read_json(STATS_FILE, {})
+            stats['_last_shutdown'] = datetime.now().isoformat()
+            _write_json(STATS_FILE, stats)
+    except Exception as e:
+        log.warning("Failed to save stats on shutdown: %s", e)
+    # Close SSE subscribers
+    with _sse_lock:
+        for q in _sse_subscribers:
+            try:
+                q.put(None)
+            except Exception:
+                pass
+        _sse_subscribers.clear()
+    log.info("Shutdown complete.")
+
+atexit.register(_graceful_shutdown)
+
+
 if __name__ == '__main__':
+    def _signal_handler(sig, frame):
+        log.info("Received signal %s, shutting down...", sig)
+        _graceful_shutdown()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
     os.makedirs(os.path.dirname(CONFIG_FILE) or '.', exist_ok=True)
     port = int(os.environ.get('PORT', '80'))
     log.info("Legado TTS Server v%s starting on port %d", __version__, port)

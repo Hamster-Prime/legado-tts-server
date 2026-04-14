@@ -130,6 +130,7 @@ sudo systemctl enable --now legado-tts
 | `WEBHOOK_URL` | `""` | Webhook通知URL |
 | `WEBHOOK_EVENTS` | `error` | Webhook事件类型 |
 | `USE_GUNICORN` | `1` | Docker中使用gunicorn(1=是) |
+| `DAILY_CHAR_QUOTA` | `0` | 每IP每日字符配额(0=不限) |
 
 ---
 

@@ -4,11 +4,9 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![Status](https://img.shields.io/badge/status-active-success.svg)
+![Version](https://img.shields.io/badge/version-1.6.0-green.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
-
-[特性](#-特性) • [安装](#-安装) • [部署](#-部署) • [使用指南](#-使用指南) • [API 文档](#-api-文档)
 
 </div>
 
@@ -16,105 +14,66 @@
 
 ## ✨ 特性
 
-Legado TTS Server 是一个轻量级的语音合成中间件，旨在为阅读类APP提供高质量、多源的TTS服务。
-
-- **🎯 多源聚合**：同时支持 **Edge TTS** (免费高质量)、**火山引擎** (Doubao)、**腾讯云** TTS、**小米MiMo** TTS。
-- **🧠 智能路由**：单一接口，后端根据音色参数自动分发请求，无需在APP端切换引擎。
-- **💻 可视化管理**：提供优雅的 Web 管理界面，支持配置、测试、状态监控。
-- **🔌 一键集成**：支持一键复制配置到开源阅读，无缝对接。
-- **📊 流量统计**：实时监控各服务商的调用量和字符数。
-- **🔒 安全隐私**：敏感密钥自动掩码显示，防止泄露。
+- **🎯 多源聚合**：Edge TTS (免费)、火山引擎、腾讯云、小米MiMo、Fish Audio
+- **🧠 智能路由**：单一接口，根据音色参数自动分发
+- **🔗 OpenAI 兼容**：`/v1/audio/speech` + `/v1/models`，支持 MP3/WAV/OGG 输出
+- **📦 长文本分块**：自动按句子边界拆分，逐段合成再拼接
+- **🔊 SSML 支持**：Edge TTS 原生 SSML 1.0 语法（可通过 `ALLOW_SSML` 关闭）
+- **📦 批量合成**：`/api/speech/batch` 一次请求合成最多 20 段文本
+- **💾 智能缓存**：双限制 LRU（条目数 + 内存大小），避免重复合成
+- **🛡️ 安全保护**：ADMIN_TOKEN 管理接口认证 + IP 滑动窗口限流
+- **📊 Prometheus 监控**：`/metrics` 导出请求数、字符数、缓存命中率、P95 响应时间
+- **⚡ Gzip 压缩**：所有 HTML/JSON/TEXT 响应自动压缩
+- **🔗 Legado 订阅**：`/api/legado/subscribe` 一键生成订阅链接
+- **💻 Web 管理界面**：配置、测试、统计、实时系统状态面板（每 30 秒刷新）
+- **🎧 多格式输出**：MP3 / WAV / OGG（需 FFmpeg）
+- **🔄 自动故障转移**：主 Provider 失败时自动 fallback 到 Edge TTS
+- **📖 发音词典**：自定义词语发音替换，解决生僻字/专有名词误读
+- **📡 实时监控**：SSE 事件流 + 审计日志，WebUI 实时活动面板
+- **🔍 音色别名**：支持 OpenAI 音色名称、中文名称、自定义别名
+- **💾 配置导出/导入**：一键备份和迁移配置
 
 ## 🎧 支持音色
 
-### 1. Edge TTS (免费 & 推荐)
-微软提供的免费高质量神经与网络语音，无需配置 Key 即可使用。
-- **20+ 种中文音色**：包括晓晓、云希、云健、晓伊等热门音色。
-- **风格多样**：支持新闻、客服、助理、聊天等多种说话风格。
-
-### 2. 火山引擎 (字节跳动)
-提供极其自然的拟人化语音。
-- **8 种精品音色**：灿灿、思思、贴心女生、鸡汤妹妹等。
-- **特点**：情感丰富，适合小说朗读。
-
-### 3. 腾讯云 TTS
-- **7 种基础音色**：智菊、智斌等。
-- **特点**：稳定，支持长文本。
-
-### 4. 小米MiMo TTS
-小米自研的新一代语音合成大模型，支持风格控制、方言和歌声合成。
-- **3 种官方音色**：MiMo默认语音、中文女声、英文女声。
-- **特点**：自然度高，支持情绪控制、多种方言、角色扮演和歌声合成，当前限时免费。
+| 服务商 | 音色数 | 说明 |
+|--------|--------|------|
+| Edge TTS | 36+ | 免费，中/英/日/韩/粤语/台湾腔 |
+| 火山引擎 | 8 | 灿灿、思思、贴心女生等 |
+| 腾讯云 | 7 | 智菊、智斌、智兰等 |
+| 小米 MiMo | 3 | 风格控制、方言、歌声合成 |
+| Fish Audio | 5 | 高质量多语言 + 声音克隆 |
 
 ---
 
 ## 🛠 安装
 
-### 环境要求
-- Python 3.8+
-- Linux / Windows / macOS
-
-### 1. 克隆仓库
 ```bash
 git clone https://github.com/Hamster-Prime/legado-tts-server.git
 cd legado-tts-server
-```
-
-### 2. 安装依赖
-```bash
 pip install -r requirements.txt
-# 或者直接安装
-pip install flask requests edge-tts openai
+python3 app.py
 ```
-
----
 
 ## 🚀 部署
 
-### 方法一：直接运行 (开发/测试)
+### Docker
 ```bash
-python3 app.py
+docker build -t legado-tts .
+docker run -d --name legado-tts -p 80:80 -v tts-data:/opt/doubao-tts legado-tts
 ```
-服务将在 `http://0.0.0.0:80` 启动。
 
-### 方法二：Systemd 托管 (推荐 Linux 生产环境)
+### Docker Compose
+```bash
+docker compose up -d
+```
 
-1. 编辑 `legado-tts.service` 文件，根据实际路径修改 `WorkingDirectory` 和 `ExecStart`。
-2. 复制服务文件并启动：
+### Systemd
 ```bash
 sudo cp legado-tts.service /etc/systemd/system/
-sudo systemctl daemon-reload
 sudo systemctl enable --now legado-tts
 ```
 
-### 方法三：Docker
-
-```bash
-# 构建镜像
-docker build -t legado-tts .
-
-# 运行
-docker run -d \
-  --name legado-tts \
-  -p 80:80 \
-  -v tts-data:/opt/doubao-tts \
-  legado-tts
-```
-
-### 方法四：Docker Compose
-
-```bash
-# 启动
-docker compose up -d
-
-# 查看日志
-docker compose logs -f
-
-# 停止
-docker compose down
-```
-
-环境变量：
+### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -122,51 +81,74 @@ docker compose down
 | `CONFIG_FILE` | `/opt/doubao-tts/config.json` | 配置文件路径 |
 | `STATS_FILE` | `/opt/doubao-tts/stats.json` | 统计文件路径 |
 | `MAX_TEXT_LENGTH` | `5000` | 单次合成最大文本长度 |
-
----
-
-## 📖 使用指南
-
-### 1. 访问管理界面
-在浏览器打开 `http://你的服务器IP`。
-
-### 2. 配置服务商
-- **Edge TTS**：开箱即用，无需配置。
-- **火山/腾讯云**：在 "API 设置" 卡片中填入对应的 `AppID` / `SecretID` 和 `Token` / `Key`。
-- **小米MiMo**：在 "API 设置" 卡片中填入从 [小米开放平台](https://platform.xiaomimimo.com/) 获取的 `API Key`。
-
-### 3. 导入到开源阅读
-1. 在网页上的 **"开源阅读配置"** 区域，选择你喜欢的默认音色。
-2. 点击 **"复制配置"** 按钮。
-3. 打开开源阅读 APP -> **朗读引擎** -> **网络导入** -> 粘贴配置。
+| `CHUNK_SIZE` | `500` | 长文本分块大小(字符) |
+| `AUDIO_CACHE_SIZE` | `100` | 缓存最大条目数 |
+| `AUDIO_CACHE_MAX_MB` | `200` | 缓存最大内存(MB) |
+| `RATE_LIMIT_RPM` | `120` | 每IP每分钟请求限制(0=不限) |
+| `ADMIN_TOKEN` | `""` | 管理API认证Token |
+| `ALLOW_SSML` | `1` | 允许SSML输入(1=是/0=否) |
+| `LOG_LEVEL` | `INFO` | 日志级别 |
+| `FALLBACK_TO_EDGE` | `1` | 启用自动故障转移(1=是/0=否) |
+| `REQUEST_TIMEOUT` | `30` | 单次Provider请求超时(秒) |
+| `AUDIT_LOG_SIZE` | `200` | 审计日志保留条数 |
 
 ---
 
 ## 🔌 API 文档
 
-### 健康检查
-`GET /health`
-
-返回服务状态和时间戳。
-
-### 语音合成接口
+### Legado TTS 接口
 `POST /speech/stream`
 
-后端会自动根据 `voice` 参数判断使用哪个服务商。
+```json
+{"text": "需要朗读的文本", "voice": "zh-CN-XiaoxiaoNeural", "rate": "+50%"}
+```
 
-**请求参数 (JSON):**
+### OpenAI 兼容接口
+`POST /v1/audio/speech`
 
-| 字段 | 类型 | 说明 | 示例 |
-| :--- | :--- | :--- | :--- |
-| `text` | string | **必填**，需要朗读的文本 | "你好，世界" |
-| `voice` | string | **必填**，音色ID | "zh-CN-XiaoxiaoNeural" |
-| `rate` | string | 语速 (可选) | "+0%" |
+```json
+{"model": "tts-1", "input": "Hello", "voice": "zh-CN-XiaoxiaoNeural", "speed": 1.5, "response_format": "mp3"}
+```
 
-**路由规则:**
-- `voice` 包含 "Neural" -> **Edge TTS**
-- `voice` 为纯数字 -> **腾讯云**
-- `voice` 以 "zh_" 开头 -> **火山引擎**
-- `voice` 为 `mimo_default` / `default_zh` / `default_eh` 或以 "mimo_" 开头 -> **小米MiMo TTS**
+### 批量合成
+`POST /api/speech/batch`
+
+```json
+{"voice": "zh-CN-XiaoxiaoNeural", "texts": ["你好", "世界"], "rate": "0%"}
+```
+
+返回：
+```json
+{"results": [{"text": "你好", "audio": "base64...", "error": null}, ...]}
+```
+
+### Legado 订阅
+- `GET /api/legado/config?voice=xxx` — 生成 Legado 配置 JSON
+- `GET /api/legado/subscribe?voice=xxx&auto=true` — 生成订阅链接
+
+### Prometheus 监控
+`GET /metrics` — 导出 `tts_requests_total`、`tts_chars_total`、`tts_cache_hit_ratio`、`tts_response_time_ms_p95` 等
+
+### 管理接口 (需要 ADMIN_TOKEN)
+- `GET/POST /api/config` — 获取/修改配置
+- `POST /api/config/test` — 测试当前配置
+- `DELETE /api/stats` — 重置统计
+- `DELETE /api/cache/clear` — 清除缓存
+- `GET/POST /api/config/export` — 导出配置
+- `POST /api/config/import` — 导入配置
+- `GET/POST/DELETE /api/pronunciation` — 管理发音词典
+- `GET /api/audit` — 查看请求审计日志
+- `GET /api/events` — SSE 实时事件流
+- `GET /api/voices/edge/live` — 动态获取 Edge TTS 全部语音
+
+### 音频路由规则
+| 规则 | Provider |
+|------|----------|
+| `voice` 包含 `Neural` 且有 `-` | Edge TTS |
+| `voice` 为纯数字 1-999999 | 腾讯云 |
+| `voice` 以 `zh_` 开头 | 火山引擎 |
+| `voice` 为 `mimo_*` / `default_zh` / `default_eh` | 小米 MiMo |
+| `voice` 以 `fish-` 开头或为 `custom` | Fish Audio |
 
 ---
 

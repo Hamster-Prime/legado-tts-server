@@ -16,6 +16,11 @@ import asyncio
 import io
 import logging
 import atexit
+import re
+import threading
+import subprocess
+import shutil
+from collections import OrderedDict
 try:
     import fcntl
 except ImportError:
@@ -23,12 +28,85 @@ except ImportError:
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Flask, request, Response, render_template_string, jsonify
+from flask import Flask, request, Response, render_template_string, jsonify, after_this_request
 from flask_cors import CORS
 import requests
 import edge_tts
+import gzip
+import functools
 
-__version__ = '1.2.0'
+__version__ = '1.6.0'
+
+def gzipped(f):
+    """Decorator to gzip responses for clients that support it."""
+    @functools.wraps(f)
+    def view_func(*args, **kwargs):
+        @after_this_request
+        def zipper(response):
+            accept_encoding = request.headers.get('Accept-Encoding', '')
+            if 'gzip' not in accept_encoding.lower():
+                return response
+            if (response.status_code < 200 or response.status_code >= 300 or
+                'Content-Encoding' in response.headers):
+                return response
+            # Don't compress small responses or audio
+            if response.content_length is not None and response.content_length < 1000:
+                return response
+            if response.content_type and response.content_type.startswith('audio/'):
+                return response
+            # Compress response
+            gzip_buffer = io.BytesIO()
+            gzip_file = gzip.GzipFile(mode='wb', compresslevel=6, fileobj=gzip_buffer)
+            gzip_file.write(response.data)
+            gzip_file.close()
+            response.data = gzip_buffer.getvalue()
+            response.headers['Content-Encoding'] = 'gzip'
+            response.headers['Content-Length'] = str(len(response.data))
+            return response
+        return f(*args, **kwargs)
+    return view_func
+
+
+# Metrics
+_metrics = {
+    'requests_total': 0,
+    'requests_success': 0,
+    'requests_failed': 0,
+    'chars_total': 0,
+    'cache_hits_total': 0,
+    'response_time_ms': [],
+    '_start_time': time.time(),
+}
+_metrics_lock = threading.Lock()
+
+# ──────────────────────────────────────────────
+# Request audit log (ring buffer of recent requests)
+AUDIT_LOG_SIZE = int(os.environ.get('AUDIT_LOG_SIZE', '200'))
+_audit_log = []  # list of dicts
+_audit_lock = threading.Lock()
+
+def _audit_record(method, path, status, provider=None, voice=None, chars=0, ms=0, ip=''):
+    """Append a request record to the audit ring buffer."""
+    rec = {
+        'ts': datetime.now().isoformat(),
+        'method': method,
+        'path': path,
+        'status': status,
+        'provider': provider,
+        'voice': voice,
+        'chars': chars,
+        'ms': round(ms, 1),
+        'ip': ip,
+    }
+    with _audit_lock:
+        _audit_log.append(rec)
+        if len(_audit_log) > AUDIT_LOG_SIZE:
+            del _audit_log[:len(_audit_log) - AUDIT_LOG_SIZE]
+    # Publish to SSE subscribers
+    try:
+        _sse_publish('tts_request', rec)
+    except Exception:
+        pass
 
 # ──────────────────────────────────────────────
 # Logging
@@ -47,8 +125,47 @@ app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {"origins": "*"},
     r"/speech/*": {"origins": "*"},
+    r"/v1/*": {"origins": "*"},
     r"/health": {"origins": "*"},
+    r"/metrics": {"origins": "*"},
 })
+
+
+@app.before_request
+def _before_request():
+    request._start_time = time.time()
+
+
+@app.after_request
+def _after_request(response):
+    rt_ms = (time.time() - request._start_time) * 1000
+    if '/speech/stream' in request.path or '/v1/audio/speech' in request.path or '/api/speech/batch' in request.path:
+        with _metrics_lock:
+            _metrics['requests_total'] += 1
+            if 200 <= response.status_code < 300:
+                _metrics['requests_success'] += 1
+            else:
+                _metrics['requests_failed'] += 1
+            _metrics['response_time_ms'].append(int(rt_ms))
+            # Keep last 1000 samples
+            if len(_metrics['response_time_ms']) > 1000:
+                _metrics['response_time_ms'].pop(0)
+        # Audit log for TTS requests
+        _audit_record(
+            method=request.method,
+            path=request.path,
+            status=response.status_code,
+            provider=getattr(request, '_tts_provider', None),
+            voice=getattr(request, '_tts_voice', None),
+            chars=getattr(request, '_tts_chars', 0),
+            ms=rt_ms,
+            ip=request.remote_addr or '',
+        )
+    response.headers['X-Response-Time'] = str(int(rt_ms)) + 'ms'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Server'] = f'Legado-TTS/{__version__}'
+    return response
 
 # ──────────────────────────────────────────────
 # Configuration
@@ -57,6 +174,14 @@ CONFIG_FILE = os.environ.get('CONFIG_FILE', '/opt/doubao-tts/config.json')
 STATS_FILE = os.environ.get('STATS_FILE', '/opt/doubao-tts/stats.json')
 MAX_TEXT_LENGTH = int(os.environ.get('MAX_TEXT_LENGTH', '5000'))
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
+AUDIO_CACHE_SIZE = int(os.environ.get('AUDIO_CACHE_SIZE', '100'))  # max cached items
+AUDIO_CACHE_MAX_MB = int(os.environ.get('AUDIO_CACHE_MAX_MB', '200'))  # max cache memory MB
+CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', '500'))  # chars per chunk for long text
+RATE_LIMIT_RPM = int(os.environ.get('RATE_LIMIT_RPM', '120'))  # requests per minute, 0=unlimited
+ADMIN_TOKEN = os.environ.get('ADMIN_TOKEN', '')  # protect config/stats/cache endpoints
+ALLOW_SSML = os.environ.get('ALLOW_SSML', '1') == '1'  # allow SSML input
+FALLBACK_TO_EDGE = os.environ.get('FALLBACK_TO_EDGE', '1') == '1'  # auto-fallback to Edge on failure
+REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))  # seconds per provider request
 
 if LOG_LEVEL != 'INFO':
     log.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
@@ -70,6 +195,149 @@ _http_session.mount('http://', requests.adapters.HTTPAdapter(**_adapter_kwargs))
 
 # Thread pool for async edge-tts execution
 _edge_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='edge-tts')
+
+# LRU audio cache: key=(text,voice,rate_pct) -> bytes
+_audio_cache: OrderedDict = OrderedDict()
+_audio_cache_lock = threading.Lock()
+_audio_cache_bytes = 0  # total bytes in cache
+
+# Rate limiter: sliding window per IP
+_rate_limits: dict = {}  # ip -> list of timestamps
+_rate_lock = threading.Lock()
+_rate_limits_cleanup = 0  # counter to periodically clean up stale IPs
+
+
+def _cache_get(key):
+    with _audio_cache_lock:
+        if key in _audio_cache:
+            _audio_cache.move_to_end(key)
+            return _audio_cache[key]
+    return None
+
+
+def _cache_put(key, data):
+    global _audio_cache_bytes
+    max_bytes = AUDIO_CACHE_MAX_MB * 1024 * 1024
+    data_size = len(data)
+    with _audio_cache_lock:
+        if key in _audio_cache:
+            _audio_cache_bytes -= len(_audio_cache[key])
+            _audio_cache.move_to_end(key)
+        else:
+            if len(_audio_cache) >= AUDIO_CACHE_SIZE:
+                evicted = _audio_cache.popitem(last=False)
+                _audio_cache_bytes -= len(evicted[1])
+        while _audio_cache_bytes + data_size > max_bytes and _audio_cache:
+            evicted = _audio_cache.popitem(last=False)
+            _audio_cache_bytes -= len(evicted[1])
+        _audio_cache[key] = data
+        _audio_cache_bytes += data_size
+
+
+def _cache_clear():
+    global _audio_cache_bytes
+    with _audio_cache_lock:
+        _audio_cache.clear()
+        _audio_cache_bytes = 0
+
+
+def _cache_info():
+    with _audio_cache_lock:
+        return {
+            'count': len(_audio_cache),
+            'bytes': _audio_cache_bytes,
+            'max_items': AUDIO_CACHE_SIZE,
+            'max_mb': AUDIO_CACHE_MAX_MB,
+        }
+
+
+def _check_rate_limit(ip):
+    """Return True if rate limit exceeded, False otherwise."""
+    global _rate_limits, _rate_limits_cleanup
+    if RATE_LIMIT_RPM <= 0:
+        return False
+    now = time.time()
+    cutoff = now - 60
+    with _rate_lock:
+        times = _rate_limits.get(ip, [])
+        times = [t for t in times if t > cutoff]
+        if len(times) >= RATE_LIMIT_RPM:
+            _rate_limits[ip] = times
+            return True
+        times.append(now)
+        _rate_limits[ip] = times
+        # Evict stale IPs periodically (every 100 checks) to prevent memory leak
+        _rate_limits_cleanup += 1
+        if _rate_limits_cleanup >= 100:
+            _rate_limits_cleanup = 0
+            stale_cutoff = now - 300
+            stale = [k for k, v in _rate_limits.items() if v[-1] <= stale_cutoff]
+            for k in stale:
+                del _rate_limits[k]
+    return False
+
+
+# ──────────────────────────────────────────────
+# Text chunking for long text synthesis
+# ──────────────────────────────────────────────
+
+_SPLIT_RE = re.compile(r'(?<=[。！？.!?\n])\s*')
+
+
+def _split_text_chunks(text, max_chunk=None):
+    """Split text into chunks by sentence boundaries, respecting max_chunk size."""
+    if max_chunk is None:
+        max_chunk = CHUNK_SIZE
+    if len(text) <= max_chunk:
+        return [text]
+    sentences = _SPLIT_RE.split(text)
+    chunks = []
+    current = ''
+    for s in sentences:
+        if not s:
+            continue
+        if len(current) + len(s) > max_chunk and current:
+            chunks.append(current)
+            current = s
+        else:
+            current += s
+    if current:
+        chunks.append(current)
+    # If any chunk is still too long, hard-split it
+    final = []
+    for c in chunks:
+        while len(c) > max_chunk:
+            final.append(c[:max_chunk])
+            c = c[max_chunk:]
+        if c:
+            final.append(c)
+    return final if final else [text]
+
+
+def _concat_mp3(segments):
+    """Concatenate MP3 byte segments. Simple append works for MP3 frames."""
+    return b''.join(segments)
+
+
+_FFMPEG_AVAILABLE = shutil.which('ffmpeg') is not None
+_FORMAT_MIME = {'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg; codecs=opus'}
+
+
+def _convert_audio(audio_bytes: bytes, fmt: str) -> bytes:
+    """Convert audio to the requested format using ffmpeg.
+    Falls back to original bytes if ffmpeg unavailable or conversion fails."""
+    if fmt == 'mp3' or not _FFMPEG_AVAILABLE:
+        return audio_bytes
+    try:
+        proc = subprocess.run(
+            ['ffmpeg', '-i', 'pipe:0', '-f', fmt, '-y', 'pipe:1'],
+            input=audio_bytes, capture_output=True, timeout=30,
+        )
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout
+    except Exception:
+        log.debug("Audio conversion to %s failed, returning original", fmt)
+    return audio_bytes
 
 
 def _shutdown_edge_executor():
@@ -86,6 +354,30 @@ def _shutdown_edge_executor():
 
 atexit.register(_shutdown_edge_executor)
 
+
+# ──────────────────────────────────────────────
+# Admin auth helper
+# ──────────────────────────────────────────────
+
+def _check_admin():
+    """Return error Response if ADMIN_TOKEN is set but request lacks auth."""
+    if not ADMIN_TOKEN:
+        return None
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    token = token or request.args.get('token', '')
+    if token != ADMIN_TOKEN:
+        return Response('Unauthorized', status=401)
+    return None
+
+
+def _is_admin():
+    """Return True if admin auth is satisfied (or not required)."""
+    if not ADMIN_TOKEN:
+        return True
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    token = token or request.args.get('token', '')
+    return token == ADMIN_TOKEN
+
 DEFAULT_CONFIG = {
     'provider': 'edge',
     'appid': '',
@@ -99,6 +391,10 @@ DEFAULT_CONFIG = {
     'edge_voice': 'zh-CN-XiaoxiaoNeural',
     'xiaomi_api_key': '',
     'xiaomi_voice': 'mimo_default',
+    'fishaudio_api_key': '',
+    'fishaudio_voice': 'fish-animated',
+    'fishaudio_reference_id': '',
+    'pronunciation_dict': {},  # custom word->replacement mapping
 }
 
 # ──────────────────────────────────────────────
@@ -126,7 +422,7 @@ TENCENT_VOICES = [
 ]
 
 EDGE_VOICES = [
-    # Chinese
+    # Chinese Mainland
     {"id": "zh-CN-XiaoxiaoNeural", "name": "晓晓 - 女声"},
     {"id": "zh-CN-YunxiNeural", "name": "云希 - 男声"},
     {"id": "zh-CN-YunjianNeural", "name": "云健 - 男声"},
@@ -147,11 +443,21 @@ EDGE_VOICES = [
     {"id": "zh-CN-YunxiaNeural", "name": "云夏 - 男声"},
     {"id": "zh-CN-YunyeNeural", "name": "云野 - 男声"},
     {"id": "zh-CN-YunzeNeural", "name": "云泽 - 男声"},
+    # Chinese Taiwan
+    {"id": "zh-TW-HsiaoChenNeural", "name": "曉臻 - 台湾女声"},
+    {"id": "zh-TW-YunJheNeural", "name": "雲哲 - 台湾男声"},
+    {"id": "zh-TW-HsiaoYuNeural", "name": "曉雨 - 台湾女声"},
+    # Chinese HK (Cantonese)
+    {"id": "zh-HK-HiuMaanNeural", "name": "曉曼 - 粤语女声"},
+    {"id": "zh-HK-WanLungNeural", "name": "雲龍 - 粤语男声"},
+    {"id": "zh-HK-HiuGaaiNeural", "name": "曉佳 - 粤语女声"},
     # English
     {"id": "en-US-JennyNeural", "name": "Jenny - English F"},
     {"id": "en-US-GuyNeural", "name": "Guy - English M"},
     {"id": "en-US-AriaNeural", "name": "Aria - English F"},
+    {"id": "en-US-DavisNeural", "name": "Davis - English M"},
     {"id": "en-GB-SoniaNeural", "name": "Sonia - British F"},
+    {"id": "en-GB-RyanNeural", "name": "Ryan - British M"},
     # Japanese
     {"id": "ja-JP-NanamiNeural", "name": "Nanami - Japanese F"},
     {"id": "ja-JP-KeitaNeural", "name": "Keita - Japanese M"},
@@ -166,11 +472,47 @@ XIAOMI_VOICES = [
     {"id": "default_eh", "name": "英文女声"},
 ]
 
-ALL_PROVIDERS = ['doubao', 'tencent', 'edge', 'xiaomi']
+FISH_AUDIO_VOICES = [
+    {"id": "fish-animated", "name": "Fish Animated - 活泼女声"},
+    {"id": "fish-speech-zh", "name": "Fish Speech - 自然女声"},
+    {"id": "fish-audio-male", "name": "Fish Audio - 沉稳男声"},
+    {"id": "fish-narrator", "name": "Fish Narrator - 讲述者"},
+    {"id": "custom", "name": "Fish 自定义 (在配置中设置reference_id)"},
+]
+
+ALL_PROVIDERS = ['doubao', 'tencent', 'edge', 'xiaomi', 'fishaudio']
 _ALL_VOICE_IDS = set()
-for _voices in [EDGE_VOICES, DOUBAO_VOICES, TENCENT_VOICES, XIAOMI_VOICES]:
+# ──────────────────────────────────────────────
+# Voice name -> ID lookup (for OpenAI compat)
+# ──────────────────────────────────────────────
+
+_VOICE_NAME_TO_ID = {}
+for _voices in [EDGE_VOICES, DOUBAO_VOICES, TENCENT_VOICES, XIAOMI_VOICES, FISH_AUDIO_VOICES]:
     for _v in _voices:
         _ALL_VOICE_IDS.add(_v['id'])
+        _VOICE_NAME_TO_ID[_v['name'].lower()] = _v['id']
+
+# Common aliases for easier configuration
+_VOICE_ALIASES = {
+    # OpenAI compatible aliases
+    'alloy': 'zh-CN-XiaoxiaoNeural',
+    'echo': 'zh-CN-YunxiNeural',
+    'fable': 'zh-CN-XiaoyiNeural',
+    'onyx': 'zh-CN-YunjianNeural',
+    'nova': 'zh-CN-XiaochenNeural',
+    'shimmer': 'zh-CN-XiaohanNeural',
+    # Chinese shorthand
+    '晓晓': 'zh-CN-XiaoxiaoNeural',
+    '云希': 'zh-CN-YunxiNeural',
+    '晓伊': 'zh-CN-XiaoyiNeural',
+    '云健': 'zh-CN-YunjianNeural',
+    '晓辰': 'zh-CN-XiaochenNeural',
+    '晓涵': 'zh-CN-XiaohanNeural',
+    # Doubao shorthand
+    '甸甘': 'zh_female_cancan_mars_bigtts',
+    '田田': 'zh_female_tiantian_mars_bigtts',
+}
+_VOICE_NAME_TO_ID.update({k.lower(): v for k, v in _VOICE_ALIASES.items()})
 
 # ──────────────────────────────────────────────
 # File helpers
@@ -189,7 +531,9 @@ def _read_json(path, default):
 
 def _write_json(path, data):
     """Write JSON file atomically via tmp + replace."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     tmp = path + '.tmp'
     try:
         with open(tmp, 'w', encoding='utf-8') as f:
@@ -224,21 +568,26 @@ def save_config(config):
 _empty_provider_stats = {'total_chars': 0, 'total_requests': 0, 'history': []}
 
 
+def _new_provider_stats():
+    """Return a fresh empty stats dict (deep copy to prevent shared references)."""
+    return {'total_chars': 0, 'total_requests': 0, 'history': []}
+
+
 def load_stats():
     data = _read_json(STATS_FILE, {})
     if not isinstance(data, dict):
         data = {}
     for p in ALL_PROVIDERS:
         if p not in data or not isinstance(data[p], dict):
-            data[p] = dict(_empty_provider_stats)
+            data[p] = _new_provider_stats()
         for k in _empty_provider_stats:
             if k not in data[p]:
-                data[p][k] = _empty_provider_stats[k]
+                data[p][k] = [] if k == 'history' else _empty_provider_stats[k]
     return data
 
 
 def _apply_stats_update(stats, chars, provider):
-    ps = stats.get(provider, dict(_empty_provider_stats))
+    ps = stats.get(provider, _new_provider_stats())
     ps['total_chars'] = ps.get('total_chars', 0) + chars
     ps['total_requests'] = ps.get('total_requests', 0) + 1
     today = datetime.now().strftime('%Y-%m-%d')
@@ -270,8 +619,12 @@ def _update_stats_with_retry(chars, provider, retries=3, delay=0.1):
 def update_stats(chars, provider):
     if not provider:
         return
+    with _metrics_lock:
+        _metrics['chars_total'] += chars
     try:
-        os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
+        parent = os.path.dirname(STATS_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         if fcntl is None:
             _update_stats_with_retry(chars, provider)
             return
@@ -334,7 +687,7 @@ def synthesize_doubao(text, voice, speed_ratio=1.0):
     def _do():
         resp = _http_session.post(
             "https://openspeech.bytedance.com/api/v1/tts",
-            headers=headers, json=payload, timeout=30)
+            headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
         result = resp.json()
         if result.get("code") != 3000:
             return None, f"火山引擎API错误: {result.get('message', 'Unknown')}"
@@ -362,6 +715,8 @@ def synthesize_tencent(text, voice, speed=0):
     sid, skey = config.get('tencent_secret_id', ''), config.get('tencent_secret_key', '')
     if not sid or not skey:
         return None, "未配置腾讯云SecretId或SecretKey"
+    if not voice.isdigit():
+        return None, f"腾讯云VoiceType必须为数字，当前值: {voice}"
     svc, host, act, ver = 'tts', 'tts.tencentcloudapi.com', 'TextToVoice', '2019-08-23'
     region, algo = config.get('tencent_region', 'ap-guangzhou'), 'TC3-HMAC-SHA256'
     ts = int(time.time())
@@ -383,7 +738,7 @@ def synthesize_tencent(text, voice, speed=0):
             'X-TC-Action': act, 'X-TC-Timestamp': str(ts),
             'X-TC-Version': ver, 'X-TC-Region': region}
     def _do():
-        resp = _http_session.post(f'https://{host}', headers=hdrs, data=payload, timeout=30)
+        resp = _http_session.post(f'https://{host}', headers=hdrs, data=payload, timeout=REQUEST_TIMEOUT)
         result = resp.json()
         if 'Response' in result and 'Audio' in result['Response']:
             return base64.b64decode(result['Response']['Audio']), None
@@ -397,7 +752,11 @@ def synthesize_tencent(text, voice, speed=0):
 
 def synthesize_edge(text, voice, rate='+0%'):
     async def _synth():
-        comm = edge_tts.Communicate(text, voice, rate=rate)
+        if ALLOW_SSML and text.strip().startswith('<speak'):
+            # SSML mode: rate parameter is ignored, controlled via SSML tags
+            comm = edge_tts.Communicate(text, voice)
+        else:
+            comm = edge_tts.Communicate(text, voice, rate=rate)
         buf = io.BytesIO()
         async for chunk in comm.stream():
             if chunk["type"] == "audio":
@@ -410,9 +769,49 @@ def synthesize_edge(text, voice, rate='+0%'):
         except RuntimeError:
             loop_running = False
         if loop_running:
-            fut = _edge_executor.submit(asyncio.run, _synth())
-            return fut.result(timeout=30), None
+            executor = _edge_executor
+            if executor is None:
+                return None, 'Edge TTS executor is shut down'
+            fut = executor.submit(asyncio.run, _synth())
+            return fut.result(timeout=REQUEST_TIMEOUT), None
         return asyncio.run(_synth()), None
+    except Exception as e:
+        return None, str(e)
+
+
+def synthesize_fishaudio(text, voice):
+    config = load_config()
+    api_key = config.get('fishaudio_api_key', '')
+    if not api_key:
+        return None, "未配置Fish Audio API Key"
+    # Map voice to Fish Audio reference_id
+    voice_map = {
+        'fish-animated': 'b7f4b37e-6e92-4f72-a650-d2c8a1dc50e3',
+        'fish-speech-zh': '7f92f8a6-4cf1-4590-88c2-4e0f84eb265e',
+        'fish-audio-male': 'a5e6c9db-2b6c-4c3e-8c1e-2e8f0c3a4b5d',
+        'fish-narrator': '9d4f0c1e-5a2b-4c8d-9e6f-1a2b3c4d5e6f',
+    }
+    ref_id = config.get('fishaudio_reference_id', '')
+    if not ref_id:
+        ref_id = voice_map.get(voice, voice)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    payload = {
+        "text": text,
+        "reference_id": ref_id,
+        "format": "mp3",
+    }
+    def _do():
+        resp = _http_session.post(
+            "https://api.fish.audio/v1/tts",
+            headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+        if resp.status_code != 200:
+            return None, f"Fish Audio API错误 ({resp.status_code}): {resp.text[:200]}"
+        return resp.content, None
+    try:
+        return _retry(_do)
     except Exception as e:
         return None, str(e)
 
@@ -448,7 +847,7 @@ def synthesize_xiaomi(text, voice, speed_ratio=1.0):
     def _do():
         resp = _http_session.post(
             "https://api.xiaomimimo.com/v1/chat/completions",
-            headers=headers, json=payload, timeout=30)
+            headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         result = resp.json()
         choices = result.get('choices', [])
@@ -471,7 +870,9 @@ def resolve_provider(voice):
     """Determine TTS provider from voice ID."""
     if not voice:
         return None
-    if 'Neural' in voice:
+    # Sanitize voice to prevent header injection
+    voice = voice.replace('\r', '').replace('\n', '').replace('\x00', '')
+    if 'Neural' in voice and '-' in voice:
         return 'edge'
     if voice.isdigit() and 1 <= int(voice) <= 999999:
         return 'tencent'
@@ -479,6 +880,8 @@ def resolve_provider(voice):
         return 'doubao'
     if voice in ('mimo_default', 'default_zh', 'default_eh') or voice.startswith('mimo_'):
         return 'xiaomi'
+    if voice.startswith('fish-') or voice == 'custom':
+        return 'fishaudio'
     return None
 
 
@@ -490,18 +893,100 @@ def parse_rate(rate_str):
         return 0.0
 
 
+def _clean_text(text):
+    """Normalize text: remove control chars but keep newlines/tabs for TTS."""
+    # Remove NULL and C0 controls except \t (0x09), \n (0x0a), \r (0x0d)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    # Collapse multiple blank lines but keep paragraph structure
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Collapse horizontal whitespace per line
+    text = re.sub(r'(?<=\S)[ \t]+', ' ', text)
+    text = re.sub(r'^[ \t]+', '', text, flags=re.MULTILINE)
+    text = text.strip()
+    # Apply custom pronunciation dictionary
+    text = _apply_pronunciation_dict(text)
+    return text
+
+
+def _apply_pronunciation_dict(text):
+    """Replace words in text according to custom pronunciation dictionary."""
+    config = load_config()
+    pdict = config.get('pronunciation_dict', {})
+    if not isinstance(pdict, dict) or not pdict:
+        return text
+    for word, replacement in pdict.items():
+        if word and replacement and isinstance(word, str) and isinstance(replacement, str):
+            text = text.replace(word, replacement)
+    return text
+
+
 def dispatch(provider, text, voice, pct):
-    """Route to the correct TTS provider and return (audio_bytes, error)."""
+    """Route to the correct TTS provider and return (audio_bytes, error).
+    When FALLBACK_TO_EDGE is enabled and a non-edge provider fails,
+    automatically retry with Edge TTS using a default Chinese voice."""
+    text = _clean_text(text)
+    if not text:
+        return None, 'Text is empty after cleaning'
+
+    audio, err = _dispatch_impl(provider, text, voice, pct)
+    if audio:
+        return audio, None
+
+    # Fallback to Edge TTS if enabled and primary provider is not edge
+    if FALLBACK_TO_EDGE and provider != 'edge':
+        fallback_voice = 'zh-CN-XiaoxiaoNeural'
+        rate = f'+{int(pct)}%' if pct >= 0 else f'{int(pct)}%'
+        log.warning("Fallback to Edge TTS: provider=%s voice=%s error=%s",
+                    provider, voice, err)
+        fb_audio, fb_err = synthesize_edge(text, fallback_voice, rate)
+        if fb_audio:
+            return fb_audio, None
+        return None, f'Primary: {err}; Fallback(Edge): {fb_err}'
+    return None, err
+
+
+def _dispatch_impl(provider, text, voice, pct):
+    """Internal dispatch without fallback."""
+    # Auto-chunk long text
+    chunks = _split_text_chunks(text)
+    if len(chunks) == 1:
+        return _dispatch_single(provider, text, voice, pct)
+
+    # Multi-chunk synthesis
+    segments = []
+    for i, chunk in enumerate(chunks):
+        audio, err = _dispatch_single(provider, chunk, voice, pct)
+        if not audio:
+            return None, f'Chunk {i+1}/{len(chunks)} failed: {err}'
+        segments.append(audio)
+    return _concat_mp3(segments), None
+
+
+def _dispatch_single(provider, text, voice, pct):
+    """Dispatch a single chunk to the correct TTS provider."""
+    cache_key = (provider, text, voice, int(pct))
+    cached = _cache_get(cache_key)
+    if cached:
+        with _metrics_lock:
+            _metrics['cache_hits_total'] += 1
+        log.info("Cache hit: provider=%s voice=%s chars=%d", provider, voice, len(text))
+        return cached, None
     if provider == 'edge':
         rate = f'+{int(pct)}%' if pct >= 0 else f'{int(pct)}%'
-        return synthesize_edge(text, voice, rate)
-    if provider == 'tencent':
-        return synthesize_tencent(text, voice, max(-2, min(6, pct / 50)))
-    if provider == 'doubao':
-        return synthesize_doubao(text, voice, max(0.2, min(3.0, 1.0 + pct / 100)))
-    if provider == 'xiaomi':
-        return synthesize_xiaomi(text, voice, max(0.2, min(3.0, 1.0 + pct / 100)))
-    return None, f'Unknown provider: {provider}'
+        audio, err = synthesize_edge(text, voice, rate)
+    elif provider == 'tencent':
+        audio, err = synthesize_tencent(text, voice, max(-2, min(6, pct / 50)))
+    elif provider == 'doubao':
+        audio, err = synthesize_doubao(text, voice, max(0.2, min(3.0, 1.0 + pct / 100)))
+    elif provider == 'xiaomi':
+        audio, err = synthesize_xiaomi(text, voice, max(0.2, min(3.0, 1.0 + pct / 100)))
+    elif provider == 'fishaudio':
+        audio, err = synthesize_fishaudio(text, voice)
+    else:
+        return None, f'Unknown provider: {provider}'
+    if audio:
+        _cache_put(cache_key, audio)
+    return audio, err
 
 
 # ──────────────────────────────────────────────
@@ -509,17 +994,87 @@ def dispatch(provider, text, voice, pct):
 # ──────────────────────────────────────────────
 
 @app.route('/health')
+@gzipped
 def health():
-    return jsonify({'status': 'ok', 'version': __version__,
-                    'timestamp': datetime.now().isoformat()})
+    import platform
+    config = load_config()
+    uptime_sec = time.time() - _metrics.get('_start_time', time.time())
+    return jsonify({
+        'status': 'ok', 'version': __version__,
+        'timestamp': datetime.now().isoformat(),
+        'uptime_seconds': int(uptime_sec),
+        'python_version': platform.python_version(),
+        'providers': ALL_PROVIDERS,
+        'active_provider': config.get('provider', 'edge'),
+        'cache': _cache_info(),
+        'admin_protected': bool(ADMIN_TOKEN),
+        'ffmpeg_available': _FFMPEG_AVAILABLE,
+        'ssml_enabled': ALLOW_SSML,
+        'fallback_enabled': FALLBACK_TO_EDGE,
+        'rate_limit_rpm': RATE_LIMIT_RPM,
+        'request_timeout': REQUEST_TIMEOUT,
+        'pronunciation_dict_size': len(config.get('pronunciation_dict', {})),
+    })
+
+
+@app.route('/metrics')
+@gzipped
+def metrics():
+    """Prometheus-compatible metrics endpoint."""
+    with _metrics_lock:
+        total = _metrics['requests_total']
+        success = _metrics['requests_success']
+        failed = _metrics['requests_failed']
+        chars = _metrics['chars_total']
+        cache_hits = _metrics['cache_hits_total']
+        rts = _metrics['response_time_ms'][:]
+    cache_hit_rate = cache_hits / (total - failed) if (total - failed) > 0 else 0.0
+    avg_rt = sum(rts) / len(rts) if rts else 0.0
+    p95_rt = 0.0
+    if rts:
+        sorted_rts = sorted(rts)
+        p95_rt = sorted_rts[int(len(sorted_rts) * 0.95)] if len(sorted_rts) > 1 else rts[0]
+    out = [
+        '# HELP tts_requests_total Total number of TTS requests',
+        '# TYPE tts_requests_total counter',
+        f'tts_requests_total {total}',
+        '# HELP tts_requests_success Number of successful TTS requests',
+        '# TYPE tts_requests_success counter',
+        f'tts_requests_success {success}',
+        '# HELP tts_requests_failed Number of failed TTS requests',
+        '# TYPE tts_requests_failed counter',
+        f'tts_requests_failed {failed}',
+        '# HELP tts_chars_total Total number of characters synthesized',
+        '# TYPE tts_chars_total counter',
+        f'tts_chars_total {chars}',
+        '# HELP tts_cache_hits_total Total number of cache hits',
+        '# TYPE tts_cache_hits_total counter',
+        f'tts_cache_hits_total {cache_hits}',
+        '# HELP tts_cache_hit_ratio Cache hit ratio (0.0-1.0)',
+        '# TYPE tts_cache_hit_ratio gauge',
+        f'tts_cache_hit_ratio {cache_hit_rate:.4f}',
+        '# HELP tts_response_time_ms_avg Average response time in milliseconds',
+        '# TYPE tts_response_time_ms_avg gauge',
+        f'tts_response_time_ms_avg {avg_rt:.2f}',
+        '# HELP tts_response_time_ms_p95 95th percentile response time in milliseconds',
+        '# TYPE tts_response_time_ms_p95 gauge',
+        f'tts_response_time_ms_p95 {p95_rt:.2f}',
+    ]
+    return Response('\n'.join(out) + '\n', mimetype='text/plain')
 
 
 @app.route('/speech/stream', methods=['POST'])
 def speech_stream():
     try:
+        # Rate limiting
+        client_ip = request.remote_addr or 'unknown'
+        if _check_rate_limit(client_ip):
+            return Response('Rate limit exceeded', status=429,
+                            headers={'Retry-After': '60'})
+
         data = request.get_json(silent=True) or {}
         text = str(data.get('text', '')).strip()
-        voice = str(data.get('voice', '')).strip()
+        voice = str(data.get('voice', '')).strip().replace('\r', '').replace('\n', '').replace('\x00', '')
         if not text:
             return Response('Missing text', status=400)
         if not voice:
@@ -527,9 +1082,18 @@ def speech_stream():
         if len(text) > MAX_TEXT_LENGTH:
             return Response(f'Text too long (max {MAX_TEXT_LENGTH})', status=400)
 
+        # Resolve voice aliases
+        resolved = _VOICE_NAME_TO_ID.get(voice.lower())
+        if resolved:
+            voice = resolved
+
         provider = resolve_provider(voice)
         if not provider:
             return Response(f'Unknown voice format: {voice}', status=400)
+
+        request._tts_provider = provider
+        request._tts_voice = voice
+        request._tts_chars = len(text)
 
         pct = parse_rate(data.get('rate', '0%'))
         audio, error = dispatch(provider, text, voice, pct)
@@ -543,6 +1107,7 @@ def speech_stream():
                 'X-TTS-Provider': provider,
                 'X-TTS-Voice': voice,
                 'Cache-Control': 'no-store',
+                'X-TTS-Chars': str(len(text)),
             })
         log.warning("TTS failed: provider=%s voice=%s error=%s", provider, voice, error)
         return Response(f'TTS failed: {error}', status=500)
@@ -553,19 +1118,23 @@ def speech_stream():
 
 @app.route('/api/config', methods=['GET', 'POST'])
 def api_config():
+    err = _check_admin()
+    if err:
+        return err
     config = load_config()
     if request.method == 'POST':
         data = request.get_json(silent=True) or {}
         for key in ['provider', 'default_voice', 'tencent_voice',
-                    'edge_voice', 'xiaomi_voice', 'cluster']:
+                    'edge_voice', 'xiaomi_voice', 'fishaudio_voice', 'cluster',
+                    'fishaudio_reference_id']:
             if key in data:
                 config[key] = data[key]
         for key in ['appid', 'access_token', 'tencent_secret_id',
-                    'tencent_secret_key', 'xiaomi_api_key']:
+                    'tencent_secret_key', 'xiaomi_api_key', 'fishaudio_api_key']:
             if key in data and '***' not in str(data[key]):
                 config[key] = data[key]
         # Validate voice selection
-        for vkey in ['default_voice', 'tencent_voice', 'edge_voice', 'xiaomi_voice']:
+        for vkey in ['default_voice', 'tencent_voice', 'edge_voice', 'xiaomi_voice', 'fishaudio_voice']:
             v = data.get(vkey)
             if v and v not in _ALL_VOICE_IDS:
                 log.warning("Unknown voice selected: %s=%s", vkey, v)
@@ -593,6 +1162,8 @@ def api_config():
                     'note': '已配置' if config.get('tencent_secret_id') and config.get('tencent_secret_key') else '未配置'},
         'xiaomi': {'ready': bool(config.get('xiaomi_api_key')),
                    'note': '已配置' if config.get('xiaomi_api_key') else '未配置'},
+        'fishaudio': {'ready': bool(config.get('fishaudio_api_key')),
+                      'note': '已配置' if config.get('fishaudio_api_key') else '未配置'},
     }
     return jsonify(safe)
 
@@ -600,13 +1171,17 @@ def api_config():
 @app.route('/api/config/test', methods=['POST'])
 def api_config_test():
     """Test current provider config by synthesizing a short sample."""
+    err = _check_admin()
+    if err:
+        return err
     config = load_config()
     provider = config.get('provider', 'edge')
     result = {'provider': provider, 'ok': True, 'error': None}
     voice = config.get(f'{provider}_voice') or config.get('default_voice')
     if not voice:
         voice_map = {'edge': EDGE_VOICES[0]['id'], 'doubao': DOUBAO_VOICES[0]['id'],
-                     'tencent': TENCENT_VOICES[0]['id'], 'xiaomi': XIAOMI_VOICES[0]['id']}
+                     'tencent': TENCENT_VOICES[0]['id'], 'xiaomi': XIAOMI_VOICES[0]['id'],
+                     'fishaudio': FISH_AUDIO_VOICES[0]['id']}
         voice = voice_map.get(provider, EDGE_VOICES[0]['id'])
     audio, error = dispatch(provider, '你好，配置测试。', voice, 0)
     if audio:
@@ -618,10 +1193,152 @@ def api_config_test():
     return jsonify(result)
 
 
+@app.route('/api/config/export', methods=['GET'])
+def api_config_export():
+    """Export full configuration as JSON download."""
+    err = _check_admin()
+    if err:
+        return err
+    config = load_config()
+    config['_version'] = __version__
+    config['_exported_at'] = datetime.now().isoformat()
+    return Response(
+        json.dumps(config, ensure_ascii=False, indent=2),
+        mimetype='application/json',
+        headers={'Content-Disposition': 'attachment; filename="tts-config.json"'}
+    )
+
+
+@app.route('/api/config/import', methods=['POST'])
+def api_config_import():
+    """Import configuration from JSON."""
+    err = _check_admin()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    if not data:
+        return Response(json.dumps({'error': 'No JSON data'}), status=400, mimetype='application/json')
+    data.pop('_version', None)
+    data.pop('_exported_at', None)
+    config = DEFAULT_CONFIG.copy()
+    for k, v in data.items():
+        if k in config:
+            config[k] = v
+    save_config(config)
+    log.info('Configuration imported')
+    return jsonify({'status': 'ok', 'message': 'Configuration imported successfully'})
+
+
+@app.route('/api/audit', methods=['GET'])
+def api_audit():
+    """Return recent TTS request audit log.
+    Optional: ?limit=50 (default 50, max AUDIT_LOG_SIZE)"""
+    err = _check_admin()
+    if err:
+        return err
+    limit = min(int(request.args.get('limit', '50')), AUDIT_LOG_SIZE)
+    with _audit_lock:
+        records = list(_audit_log[-limit:])
+    return jsonify({'records': records, 'count': len(records), 'total': len(_audit_log)})
+
+
+# SSE event subscribers
+_sse_subscribers = []  # list of queue.Queue
+_sse_lock = threading.Lock()
+
+def _sse_publish(event_type, data):
+    """Publish an event to all SSE subscribers."""
+    import queue
+    msg = json.dumps({'type': event_type, **data}, ensure_ascii=False)
+    with _sse_lock:
+        dead = []
+        for q in _sse_subscribers:
+            try:
+                q.put_nowait(msg)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            _sse_subscribers.remove(q)
+
+
+@app.route('/api/events')
+def api_events():
+    """SSE stream of real-time TTS events."""
+    import queue
+    q = queue.Queue(maxsize=100)
+    with _sse_lock:
+        _sse_subscribers.append(q)
+
+    def stream():
+        try:
+            yield 'data: {"type":"connected"}\n\n'
+            while True:
+                try:
+                    msg = q.get(timeout=30)
+                    yield f'data: {msg}\n\n'
+                except queue.Empty:
+                    yield ': keepalive\n\n'  # SSE comment as heartbeat
+        except GeneratorExit:
+            pass
+        finally:
+            with _sse_lock:
+                if q in _sse_subscribers:
+                    _sse_subscribers.remove(q)
+
+    return Response(stream(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/pronunciation', methods=['GET', 'POST', 'DELETE'])
+def api_pronunciation():
+    """Manage custom pronunciation dictionary.
+
+    GET  - List all entries
+    POST - Add/update entries: {"entries": {"word": "replacement", ...}}
+    DELETE - Delete entries: {"words": ["word1", "word2"]}
+    """
+    err = _check_admin()
+    if err:
+        return err
+    config = load_config()
+    pdict = config.get('pronunciation_dict', {})
+    if not isinstance(pdict, dict):
+        pdict = {}
+
+    if request.method == 'GET':
+        return jsonify({'entries': pdict, 'count': len(pdict)})
+
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        entries = data.get('entries', {})
+        if not isinstance(entries, dict):
+            return Response(json.dumps({'error': 'entries must be a dict'}), status=400, mimetype='application/json')
+        for word, replacement in entries.items():
+            if isinstance(word, str) and isinstance(replacement, str) and word:
+                pdict[word] = replacement
+        config['pronunciation_dict'] = pdict
+        save_config(config)
+        return jsonify({'status': 'ok', 'count': len(pdict)})
+
+    if request.method == 'DELETE':
+        data = request.get_json(silent=True) or {}
+        words = data.get('words', [])
+        if not isinstance(words, list):
+            return Response(json.dumps({'error': 'words must be a list'}), status=400, mimetype='application/json')
+        for w in words:
+            pdict.pop(w, None)
+        config['pronunciation_dict'] = pdict
+        save_config(config)
+        return jsonify({'status': 'ok', 'count': len(pdict)})
+
+
 @app.route('/api/stats', methods=['GET', 'DELETE'])
 def api_stats():
     if request.method == 'DELETE':
-        _write_json(STATS_FILE, {p: dict(_empty_provider_stats) for p in ALL_PROVIDERS})
+        err = _check_admin()
+        if err:
+            return err
+        _write_json(STATS_FILE, {p: _new_provider_stats() for p in ALL_PROVIDERS})
         log.info("Stats reset")
         return jsonify({'status': 'ok', 'message': '统计已重置'})
     return jsonify(load_stats())
@@ -633,10 +1350,206 @@ def api_voices():
     return jsonify({
         'tencent': TENCENT_VOICES, 'doubao': DOUBAO_VOICES,
         'xiaomi': XIAOMI_VOICES, 'edge': EDGE_VOICES,
+        'fishaudio': FISH_AUDIO_VOICES,
     }.get(p, EDGE_VOICES))
 
 
+@app.route('/api/voices/all', methods=['GET'])
+def api_voices_all():
+    """Return all voices grouped by provider."""
+    return jsonify({
+        'edge': EDGE_VOICES,
+        'doubao': DOUBAO_VOICES,
+        'tencent': TENCENT_VOICES,
+        'xiaomi': XIAOMI_VOICES,
+        'fishaudio': FISH_AUDIO_VOICES,
+    })
+
+
+@app.route('/api/voices/edge/live', methods=['GET'])
+def api_voices_edge_live():
+    """Fetch live Edge TTS voice list from Microsoft.
+    Optional query: ?locale=zh-CN to filter by language."""
+    try:
+        locale_filter = request.args.get('locale', '').strip()
+        voices = asyncio.run(edge_tts.list_voices())
+        if locale_filter:
+            voices = [v for v in voices if v.get('Locale', '').startswith(locale_filter)]
+        result = [{
+            'id': v.get('ShortName', ''),
+            'name': v.get('FriendlyName', v.get('ShortName', '')),
+            'locale': v.get('Locale', ''),
+            'gender': v.get('Gender', ''),
+        } for v in voices]
+        return jsonify(result)
+    except Exception as e:
+        log.error("Failed to list Edge voices: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/cache/stats', methods=['GET'])
+def api_cache_stats():
+    with _audio_cache_lock:
+        return jsonify(_cache_info())
+
+
+@app.route('/api/cache/clear', methods=['DELETE'])
+def api_cache_clear():
+    err = _check_admin()
+    if err:
+        return err
+    _cache_clear()
+    log.info('Audio cache cleared')
+    return jsonify({'status': 'ok'})
+
+
+# ──────────────────────────────────────────────
+# OpenAI-compatible TTS API
+# ──────────────────────────────────────────────
+
+@app.route('/v1/audio/speech', methods=['POST'])
+def openai_speech():
+    """OpenAI-compatible TTS endpoint.
+
+    POST /v1/audio/speech
+    {
+        "model": "tts-1",          // ignored, provider auto-detected from voice
+        "input": "Hello world.",
+        "voice": "zh-CN-XiaoxiaoNeural",
+        "response_format": "mp3",  // mp3 | wav | ogg (requires ffmpeg)
+        "speed": 1.0               // 0.25-4.0
+    }
+    """
+    try:
+        client_ip = request.remote_addr or 'unknown'
+        if _check_rate_limit(client_ip):
+            return Response(json.dumps({'error': {'message': 'Rate limit exceeded', 'type': 'rate_limit_error'}}),
+                            status=429, mimetype='application/json',
+                            headers={'Retry-After': '60'})
+
+        data = request.get_json(silent=True) or {}
+        text = str(data.get('input', '')).strip()
+        voice = str(data.get('voice', '')).strip().replace('\r', '').replace('\n', '').replace('\x00', '')
+        resp_format = str(data.get('response_format', 'mp3')).strip().lower()
+        if resp_format not in _FORMAT_MIME:
+            resp_format = 'mp3'
+        try:
+            speed = float(data.get('speed', 1.0))
+        except (ValueError, TypeError):
+            speed = 1.0
+        speed = max(0.25, min(4.0, speed))
+
+        if not text:
+            return Response(json.dumps({'error': {'message': 'Missing input', 'type': 'invalid_request_error'}}),
+                            status=400, mimetype='application/json')
+        if not voice:
+            return Response(json.dumps({'error': {'message': 'Missing voice', 'type': 'invalid_request_error'}}),
+                            status=400, mimetype='application/json')
+        if len(text) > MAX_TEXT_LENGTH:
+            return Response(json.dumps({'error': {'message': f'Input too long (max {MAX_TEXT_LENGTH})', 'type': 'invalid_request_error'}}),
+                            status=400, mimetype='application/json')
+
+        # Try to resolve voice by name if not a known ID
+        if voice not in _ALL_VOICE_IDS:
+            resolved = _VOICE_NAME_TO_ID.get(voice.lower())
+            if resolved:
+                voice = resolved
+
+        provider = resolve_provider(voice)
+        if not provider:
+            return Response(json.dumps({'error': {'message': f'Unknown voice: {voice}', 'type': 'invalid_request_error'}}),
+                            status=400, mimetype='application/json')
+
+        request._tts_provider = provider
+        request._tts_voice = voice
+        request._tts_chars = len(text)
+
+        # Convert speed (0.25-4.0) to percentage (-75% to +300%)
+        pct = (speed - 1.0) * 100
+        audio, error = dispatch(provider, text, voice, pct)
+
+        if audio:
+            update_stats(len(text), provider)
+            audio = _convert_audio(audio, resp_format)
+            mime = _FORMAT_MIME.get(resp_format, 'audio/mpeg')
+            log.info("OpenAI TTS OK: provider=%s voice=%s chars=%d size=%d fmt=%s",
+                     provider, voice, len(text), len(audio), resp_format)
+            return Response(audio, mimetype=mime, headers={
+                'Content-Length': str(len(audio)),
+                'Content-Type': mime,
+            })
+        return Response(json.dumps({'error': {'message': f'TTS failed: {error}', 'type': 'server_error'}}),
+                        status=500, mimetype='application/json')
+    except Exception as e:
+        log.error("openai_speech error: %s", e, exc_info=True)
+        return Response(json.dumps({'error': {'message': str(e), 'type': 'server_error'}}),
+                        status=500, mimetype='application/json')
+
+
+@app.route('/v1/models', methods=['GET'])
+def openai_models():
+    """OpenAI-compatible models list."""
+    return jsonify({
+        'object': 'list',
+        'data': [
+            {'id': 'tts-1', 'object': 'model', 'owned_by': 'legado-tts-server'},
+            {'id': 'tts-1-hd', 'object': 'model', 'owned_by': 'legado-tts-server'},
+        ]
+    })
+
+
+@app.route('/api/legado/config', methods=['GET'])
+def api_legado_config():
+    """Generate Legado-compatible TTS engine configuration JSON.
+
+    Query params:
+        voice  - voice ID (default: current config)
+        server - server URL (default: auto-detect from request)
+    """
+    config = load_config()
+    voice = request.args.get('voice', config.get('default_voice', 'zh-CN-XiaoxiaoNeural')).strip()
+    server = request.args.get('server', '').strip()
+    if not server:
+        # Auto-detect from request
+        server = request.host_url.rstrip('/')
+    rate = request.args.get('rate', '+0%').strip()
+    legado_cfg = {
+        "concurrentRate": "0",
+        "contentType": "audio/mpeg",
+        "name": f"TTS-{voice.split('-')[-1]}",
+        "url": f"{server}/speech/stream,{{\"method\":\"POST\",\"body\":{{\"text\":\"{{speakText}}\",\"voice\":\"{voice}\",\"rate\":\"{{String(speakSpeed)}}{rate}\"}},\"headers\":{{\"Content-Type\":\"application/json\"}}}}"
+    }
+    return jsonify(legado_cfg)
+
+
+@app.route('/api/legado/subscribe', methods=['GET'])
+def api_legado_subscribe():
+    """Generate a Legado subscription URL (base64-encoded config JSON).
+
+    Usage: Import this URL directly into Legado as a speech engine.
+    """
+    import base64 as b64
+    config = load_config()
+    voice = request.args.get('voice', config.get('default_voice', 'zh-CN-XiaoxiaoNeural')).strip()
+    server = request.args.get('server', '').strip()
+    if not server:
+        server = request.host_url.rstrip('/')
+    rate = request.args.get('rate', '+0%').strip()
+    legado_cfg = {
+        "concurrentRate": "0",
+        "contentType": "audio/mpeg",
+        "name": f"TTS-{voice.split('-')[-1]}",
+        "url": f"{server}/speech/stream,{{\"method\":\"POST\",\"body\":{{\"text\":\"{{speakText}}\",\"voice\":\"{voice}\",\"rate\":\"{{String(speakSpeed)}}{rate}\"}},\"headers\":{{\"Content-Type\":\"application/json\"}}}}"
+    }
+    encoded = b64.b64encode(json.dumps(legado_cfg, ensure_ascii=False).encode()).decode()
+    subscribe_url = f"{server}/api/legado/subscribe?voice={voice}&auto=true"
+    if request.args.get('auto') == 'true':
+        return Response(encoded, mimetype='text/plain')
+    return jsonify({'url': subscribe_url, 'config': legado_cfg, 'encoded': encoded})
+
+
 @app.route('/')
+@gzipped
 def index():
     config = load_config()
     def _mask(val, prefix=3, suffix=3):
@@ -656,6 +1569,9 @@ def index():
         appid=_mask(config.get('appid', '')),
         tencent_secret_id=_mask(config.get('tencent_secret_id', ''), 6, 4),
         xiaomi_api_key=_mask(config.get('xiaomi_api_key', ''), 6, 4),
+        fishaudio_api_key=_mask(config.get('fishaudio_api_key', ''), 6, 4),
+        fishaudio_reference_id=config.get('fishaudio_reference_id', ''),
+        admin_protected=bool(ADMIN_TOKEN),
     )
 
 
@@ -679,7 +1595,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         h2{font-size:20px;margin-bottom:16px}
         .row{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
         .row h2{margin:0}
-        .provider-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+        .provider-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
         .provider-btn{padding:12px;border:2px solid var(--border);border-radius:8px;cursor:pointer;text-align:center;background:var(--card);transition:all .2s}
         .provider-btn:hover{border-color:#aaa}
         .provider-btn.active{border-color:var(--primary);background:#e7f1ff;box-shadow:0 0 0 2px rgba(0,123,255,.2)}
@@ -713,6 +1629,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="provider-btn" data-provider="doubao" onclick="setProvider('doubao')"><strong>火山引擎</strong><div class="badge" id="doubao-status"></div></div>
             <div class="provider-btn" data-provider="tencent" onclick="setProvider('tencent')"><strong>腾讯云</strong><div class="badge" id="tencent-status"></div></div>
             <div class="provider-btn" data-provider="xiaomi" onclick="setProvider('xiaomi')"><strong>小米MiMo</strong><div class="badge" id="xiaomi-status"></div></div>
+            <div class="provider-btn" data-provider="fishaudio" onclick="setProvider('fishaudio')"><strong>Fish Audio</strong><div class="badge" id="fishaudio-status"></div></div>
         </div>
     </div>
     <div class="card">
@@ -725,19 +1642,62 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
     <div class="card">
-        <div class="row"><h2>开源阅读配置</h2><div style="display:flex;align-items:center;gap:8px"><label for="voice-select" style="font-weight:500">音色</label><select id="voice-select" onchange="updateLegadoConfig()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px"></select></div></div>
+        <div class="row"><h2>开源阅读配置</h2><div style="display:flex;align-items:center;gap:8px"><label for="voice-select" style="font-weight:500">音色</label><select id="voice-select" onchange="updateLegadoConfig()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px"></select><button class="btn" onclick="previewVoice()" style="padding:4px 10px;font-size:12px">▶ 试听</button></div></div>
         <p style="color:#666;margin-bottom:12px">复制以下配置到开源阅读的朗读引擎，即可使用上方选择的音色。</p>
         <div class="code" id="legado-config"></div>
-        <button class="btn btn-primary" onclick="copyConfig()" style="margin-top:12px">复制配置</button>
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="copyConfig()">复制配置</button>
+            <button class="btn" onclick="copySubscribeUrl()">复制订阅链接</button>
+        </div>
+    </div>
+    <div class="card">
+        <h2>系统状态</h2>
+        <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px;">
+            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
+                <div style="color:#666; font-size:12px; margin-bottom:4px">总合成字符</div>
+                <div style="font-size:20px; font-weight:600" id="total-chars-all">0</div>
+            </div>
+            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
+                <div style="color:#666; font-size:12px; margin-bottom:4px">总请求数</div>
+                <div style="font-size:20px; font-weight:600" id="total-requests-all">0</div>
+            </div>
+            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
+                <div style="color:#666; font-size:12px; margin-bottom:4px">缓存命中率</div>
+                <div style="font-size:20px; font-weight:600" id="cache-hit-rate">0%</div>
+            </div>
+            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
+                <div style="color:#666; font-size:12px; margin-bottom:4px">P95响应时间</div>
+                <div style="font-size:20px; font-weight:600" id="response-time-p95">0ms</div>
+            </div>
+            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
+                <div style="color:#666; font-size:12px; margin-bottom:4px">缓存条目</div>
+                <div style="font-size:20px; font-weight:600" id="cache-count">0</div>
+            </div>
+            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
+                <div style="color:#666; font-size:12px; margin-bottom:4px">缓存内存</div>
+                <div style="font-size:20px; font-weight:600" id="cache-memory">0MB</div>
+            </div>
+            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
+                <div style="color:#666; font-size:12px; margin-bottom:4px">FFmpeg支持</div>
+                <div style="font-size:20px; font-weight:600; color: var(--success)" id="ffmpeg-status">✓</div>
+            </div>
+            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
+                <div style="color:#666; font-size:12px; margin-bottom:4px">Admin保护</div>
+                <div style="font-size:20px; font-weight:600" id="admin-status">✗</div>
+            </div>
+        </div>
     </div>
     <div class="card">
         <h2>API 设置</h2>
         <div id="doubao-settings" style="display:none"><div class="field"><label>App ID</label><input type="text" id="appid" value="{{ appid }}"></div><div class="field"><label>Access Token</label><input type="password" id="access-token" placeholder=""></div></div>
         <div id="tencent-settings" style="display:none"><div class="field"><label>SecretId</label><input type="text" id="tencent-secret-id" value="{{ tencent_secret_id }}"></div><div class="field"><label>SecretKey</label><input type="password" id="tencent-secret-key" placeholder=""></div></div>
         <div id="xiaomi-settings" style="display:none"><div class="field"><label>API Key</label><input type="password" id="xiaomi-api-key" value="{{ xiaomi_api_key }}" placeholder="请输入小米MiMo API Key"></div></div>
+        <div id="fishaudio-settings" style="display:none"><div class="field"><label>API Key</label><input type="password" id="fishaudio-api-key" value="{{ fishaudio_api_key }}" placeholder="请输入Fish Audio API Key"></div><div class="field"><label>自定义音色Reference ID</label><input type="text" id="fishaudio-reference-id" value="{{ fishaudio_reference_id }}" placeholder="可选，留空使用预设音色"></div></div>
         <div style="display:flex;gap:8px;align-items:center">
             <button class="btn btn-primary" id="save-btn" onclick="saveConfig()" style="display:none">保存设置</button>
             <button class="btn btn-success" id="test-cfg-btn" onclick="testConfig()" style="display:none">测试连接</button>
+            <button class="btn" onclick="exportConfig()" style="font-size:12px">导出配置</button>
+            <label class="btn" style="font-size:12px;cursor:pointer">导入配置<input type="file" accept=".json" onchange="importConfig(event)" style="display:none"></label>
             <span id="api-note" style="color:#666;font-size:12px;display:none"></span>
         </div>
     </div>
@@ -758,37 +1718,171 @@ document.addEventListener('DOMContentLoaded',()=>{
     const setStatus=(el,ok)=>{el.textContent=ok?'已配置':'未配置';el.className='badge '+(ok?'badge-ok':'badge-err')};
 
     const loadStats=async()=>{try{const r=await fetch('/api/stats');stats=await r.json();showStats()}catch(e){}};
-    const showStats=()=>{const d=stats[prov]||{};$('total-chars').textContent=(d.total_chars||0).toLocaleString();$('total-requests').textContent=(d.total_requests||0).toLocaleString();const t=new Date().toISOString().split('T')[0];const td=(d.history||[]).find(h=>h.date===t)||{};$('today-chars').textContent=(td.chars||0).toLocaleString();$('today-requests').textContent=(td.requests||0).toLocaleString()};
+    const showStats=()=>{const d=stats[prov]||{};$('total-chars').textContent=(d.total_chars||0).toLocaleString();$('total-requests').textContent=(d.total_requests||0).toLocaleString();const t=new Date().toISOString().split('T')[0];const td=(d.history||[]).find(h=>h.date===t)||{};$('today-chars').textContent=(td.chars||0).toLocaleString();$('today-requests').textContent=(td.requests||0).toLocaleString();};
+
+    const loadSystemStatus=async()=>{
+        try{
+            const r=await fetch('/health');
+            const h=await r.json();
+            // 更新系统状态
+            const cache=h.cache||{};
+            $('cache-count').textContent=cache.count||0;
+            $('cache-memory').textContent=((cache.bytes||0)/(1024*1024)).toFixed(1)+'MB';
+            $('ffmpeg-status').textContent=h.ffmpeg_available?'✓':'✗';
+            $('ffmpeg-status').style.color=h.ffmpeg_available?'var(--success)':'var(--danger)';
+            $('admin-status').textContent=h.admin_protected?'✓':'✗';
+            $('admin-status').style.color=h.admin_protected?'var(--success)':'var(--danger)';
+            // 加载metrics
+            const mr=await fetch('/metrics');
+            const mt=await mr.text();
+            let totalChars=0,totalRequests=0,cacheHitRate=0,rtP95=0;
+            for(const line of mt.split('\n')){
+                if(line.startsWith('tts_chars_total ')) totalChars=parseInt(line.split(' ')[1])||0;
+                if(line.startsWith('tts_requests_total ')) totalRequests=parseInt(line.split(' ')[1])||0;
+                if(line.startsWith('tts_cache_hit_ratio ')) cacheHitRate=parseFloat(line.split(' ')[1])||0;
+                if(line.startsWith('tts_response_time_ms_p95 ')) rtP95=parseFloat(line.split(' ')[1])||0;
+            }
+            $('total-chars-all').textContent=totalChars.toLocaleString();
+            $('total-requests-all').textContent=totalRequests.toLocaleString();
+            $('cache-hit-rate').textContent=(cacheHitRate*100).toFixed(1)+'%';
+            $('response-time-p95').textContent=Math.round(rtP95)+'ms';
+        }catch(e){}
+    };
 
     const loadVoices=async p=>{try{const r=await fetch('/api/voices?provider='+p);const vs=await r.json();const sel=$('voice-select');sel.innerHTML='';vs.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;if(v.id===dv[p])o.selected=true;sel.appendChild(o)});updateLegadoConfig()}catch(e){}};
 
-    window.updateLegadoConfig=()=>{const v=$('voice-select').value;if(!v)return;const q='"',lb='{{',rb='}}';$('legado-config').textContent='{\\n  "concurrentRate": "0",\\n  "contentType": "audio/mpeg",\\n  "name": "TTS服务",\\n  "url": "http://'+IP+'/speech/stream,{'+q+'method'+q+':'+q+'POST'+q+','+q+'body'+q+':{'+q+'text'+q+':'+q+lb+'speakText'+rb+q+','+q+'voice'+q+':'+q+v+q+','+q+'rate'+q+':'+q+lb+'String(speakSpeed)'+rb+'%'+q+'},'+q+'headers'+q+':{'+q+'Content-Type'+q+':'+q+'application/json'+q+'}}"\\n}'};
+    window.updateLegadoConfig=()=>{const v=$('voice-select').value;if(!v)return;const q='"',lb=String.fromCharCode(123,123),rb=String.fromCharCode(125,125);$('legado-config').textContent='{\\n  "concurrentRate": "0",\\n  "contentType": "audio/mpeg",\\n  "name": "TTS服务",\\n  "url": "http://'+IP+'/speech/stream,{'+q+'method'+q+':'+q+'POST'+q+','+q+'body'+q+':{'+q+'text'+q+':'+q+lb+'speakText'+rb+q+','+q+'voice'+q+':'+q+v+q+','+q+'rate'+q+':'+q+lb+'String(speakSpeed)'+rb+'%'+q+'},'+q+'headers'+q+':{'+q+'Content-Type'+q+':'+q+'application/json'+q+'}}"\\n}'};
 
     window.copyConfig=async()=>{const t=$('legado-config').textContent;try{await navigator.clipboard.writeText(t);toast('已复制到剪切板')}catch(e){const a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);a.select();try{document.execCommand('copy');toast('已复制到剪切板')}catch(_){toast('复制失败')}document.body.removeChild(a)}};
+    window.copySubscribeUrl=async()=>{const v=$('voice-select').value;if(!v){toast('请先选择音色');return}try{const r=await fetch('/api/legado/subscribe?voice='+encodeURIComponent(v));const d=await r.json();const u=d.url||window.location.origin+'/api/legado/subscribe?voice='+encodeURIComponent(v)+'&auto=true';await navigator.clipboard.writeText(u);toast('已复制订阅链接')}catch(e){toast('复制失败')}};
 
-    window.setProvider=p=>{prov=p;document.querySelectorAll('.provider-btn').forEach(b=>b.classList.toggle('active',b.dataset.provider===p));$('doubao-settings').style.display=p==='doubao'?'block':'none';$('tencent-settings').style.display=p==='tencent'?'block':'none';$('xiaomi-settings').style.display=p==='xiaomi'?'block':'none';if(p==='edge'){$('save-btn').style.display='none';$('test-cfg-btn').style.display='none';$('api-note').textContent='Edge TTS 免费使用，无需配置。';$('api-note').style.display='inline'}else{$('save-btn').style.display='inline-block';$('test-cfg-btn').style.display='inline-block';$('api-note').style.display='none'}showStats();loadVoices(p);fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p})})};
+    window.setProvider=p=>{prov=p;document.querySelectorAll('.provider-btn').forEach(b=>b.classList.toggle('active',b.dataset.provider===p));$('doubao-settings').style.display=p==='doubao'?'block':'none';$('tencent-settings').style.display=p==='tencent'?'block':'none';$('xiaomi-settings').style.display=p==='xiaomi'?'block':'none';$('fishaudio-settings').style.display=p==='fishaudio'?'block':'none';if(p==='edge'){$('save-btn').style.display='none';$('test-cfg-btn').style.display='none';$('api-note').textContent='Edge TTS 免费使用，无需配置。';$('api-note').style.display='inline'}else{$('save-btn').style.display='inline-block';$('test-cfg-btn').style.display='inline-block';$('api-note').style.display='none'}showStats();loadVoices(p);fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p})})};
 
-    window.saveConfig=async()=>{const b=$('save-btn');b.disabled=true;b.textContent='保存中...';try{let d={provider:prov};const v=$('voice-select').value;if(prov==='doubao'){d.appid=$('appid').value;d.access_token=$('access-token').value||'***';d.default_voice=v}else if(prov==='tencent'){d.tencent_secret_id=$('tencent-secret-id').value;d.tencent_secret_key=$('tencent-secret-key').value||'***';d.tencent_voice=v}else if(prov==='xiaomi'){d.xiaomi_api_key=$('xiaomi-api-key').value||'***';d.xiaomi_voice=v}await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});toast('设置已保存');setTimeout(()=>location.reload(),1000)}finally{b.disabled=false;b.textContent='保存设置'}};
+    window.saveConfig=async()=>{const b=$('save-btn');b.disabled=true;b.textContent='保存中...';try{let d={provider:prov};const v=$('voice-select').value;if(prov==='doubao'){d.appid=$('appid').value;d.access_token=$('access-token').value||'***';d.default_voice=v}else if(prov==='tencent'){d.tencent_secret_id=$('tencent-secret-id').value;d.tencent_secret_key=$('tencent-secret-key').value||'***';d.tencent_voice=v}else if(prov==='xiaomi'){d.xiaomi_api_key=$('xiaomi-api-key').value||'***';d.xiaomi_voice=v}else if(prov==='fishaudio'){d.fishaudio_api_key=$('fishaudio-api-key').value||'***';d.fishaudio_voice=v;d.fishaudio_reference_id=$('fishaudio-reference-id').value}await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});toast('设置已保存');setTimeout(()=>location.reload(),1000)}finally{b.disabled=false;b.textContent='保存设置'}};
 
     window.testTTS=async()=>{const b=$('test-btn');b.disabled=true;b.textContent='合成中...';try{const r=await fetch('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:$('test-text').value,voice:$('voice-select').value,rate:'0%'})});if(r.ok){const bl=await r.blob();const p=$('audio-player');if(p._u)URL.revokeObjectURL(p._u);p._u=URL.createObjectURL(bl);p.src=p._u;p.play()}else toast('TTS失败: '+await r.text())}catch(e){toast('请求错误: '+e.message)}finally{b.disabled=false;b.textContent='播放测试'}};
+
+    window.previewVoice=async()=>{const v=$('voice-select').value;if(!v){toast('请先选择音色');return}try{const r=await fetch('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'你好，我是您的朗读助手，很高兴认识您。',voice:v,rate:'0%'})});if(r.ok){const bl=await r.blob();const p=$('audio-player');if(p._u)URL.revokeObjectURL(p._u);p._u=URL.createObjectURL(bl);p.src=p._u;p.play()}else toast('试听失败')}catch(e){toast('试听失败: '+e.message)}};
 
     window.testConfig=async()=>{const b=$('test-cfg-btn');b.disabled=true;b.textContent='测试中...';try{const r=await fetch('/api/config/test',{method:'POST'});const d=await r.json();toast(d.ok?'✅ 连接成功！'+(d.audio_size||0)+'字节':'❌ 失败: '+(d.error||'未知'))}catch(e){toast('请求错误: '+e.message)}finally{b.disabled=false;b.textContent='测试连接'}};
 
     window.resetStats=async()=>{if(!confirm('确定要重置所有统计数据吗？'))return;await fetch('/api/stats',{method:'DELETE'});toast('统计已重置');loadStats()};
+    window.exportConfig=async()=>{try{const r=await fetch('/api/config/export');const b=await r.blob();const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download='tts-config.json';a.click();URL.revokeObjectURL(u);toast('配置已导出')}catch(e){toast('导出失败')}};
+    window.importConfig=async(e)=>{const f=e.target.files[0];if(!f)return;try{const t=await f.text();const d=JSON.parse(t);const r=await fetch('/api/config/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(r.ok){toast('配置已导入，刷新页面...');setTimeout(()=>location.reload(),1000)}else toast('导入失败')}catch(e){toast('导入失败: '+e.message)}};
 
     function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
 
-    setProvider(cur);loadStats();
-    fetch('/api/config').then(r=>r.json()).then(c=>{if(c.provider_status){const s=c.provider_status;setStatus($('doubao-status'),s.doubao?.ready);setStatus($('tencent-status'),s.tencent?.ready);setStatus($('xiaomi-status'),s.xiaomi?.ready)}}).catch(()=>{});
+    setProvider(cur);loadStats();loadSystemStatus();
+    // 每30秒刷新系统状态
+    setInterval(loadSystemStatus,30000);
+    fetch('/api/config').then(r=>r.json()).then(c=>{if(c.provider_status){const s=c.provider_status;setStatus($('doubao-status'),s.doubao?.ready);setStatus($('tencent-status'),s.tencent?.ready);setStatus($('xiaomi-status'),s.xiaomi?.ready);setStatus($('fishaudio-status'),s.fishaudio?.ready)}}).catch(()=>{});
+    // SSE real-time activity feed
+    try{const es=new EventSource('/api/events');const feed=document.createElement('div');feed.id='live-feed';feed.style.cssText='max-height:200px;overflow-y:auto;font-family:monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:12px';const h=document.createElement('h3');h.textContent='📡 实时活动';h.style.cssText='margin:0 0 8px';feed.prepend(h);const main=document.querySelector('.container');if(main)main.appendChild(feed);es.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='tts_request'){const line=document.createElement('div');const ok=d.status>=200&&d.status<300;line.style.color=ok?'#4caf50':'#f44336';line.textContent=`[${d.ts?.split('T')[1]?.split('.')[0]||''}] ${d.provider||'?'} ${d.voice||''} ${d.chars}字 ${d.ms}ms ${d.status}`;feed.appendChild(line);if(feed.children.length>52)feed.removeChild(feed.children[1]);feed.scrollTop=feed.scrollHeight}}catch(ex){}};es.onerror=()=>{}}catch(ex){}
 });
 </script>
 </body>
 </html>"""
 
 
+@app.route('/api/speech/batch', methods=['POST'])
+@gzipped
+def batch_speech():
+    """Batch TTS endpoint. Synthesize multiple texts in one request.
+
+    POST /api/speech/batch
+    {
+        "voice": "zh-CN-XiaoxiaoNeural",  // required
+        "rate": "0%",                     // optional: +/- percentage
+        "texts": ["text1", "text2", ...],   // required: array of texts
+        "response_format": "mp3"           // optional: mp3/wav/ogg
+    }
+
+    Returns:
+    {
+        "results": [
+            {"text": "text1", "audio": "base64_audio_data", "error": null},
+            {"text": "text2", "audio": null, "error": "error message"}
+        ]
+    }
+    """
+    try:
+        client_ip = request.remote_addr or 'unknown'
+        if _check_rate_limit(client_ip):
+            return Response(json.dumps({'error': {'message': 'Rate limit exceeded', 'type': 'rate_limit_error'}}),
+                            status=429, mimetype='application/json',
+                            headers={'Retry-After': '60'})
+
+        data = request.get_json(silent=True) or {}
+        texts = data.get('texts', [])
+        if not isinstance(texts, list) or len(texts) == 0:
+            return Response(json.dumps({'error': {'message': 'Missing or invalid texts array', 'type': 'invalid_request_error'}}),
+                            status=400, mimetype='application/json')
+        if len(texts) > 20:
+            return Response(json.dumps({'error': {'message': 'Maximum 20 texts per batch request', 'type': 'invalid_request_error'}}),
+                            status=400, mimetype='application/json')
+        for t in texts:
+            if isinstance(t, str) and len(t) > MAX_TEXT_LENGTH:
+                return Response(json.dumps({'error': {'message': f'Text too long: "{str(t)[:50]}..."', 'type': 'invalid_request_error'}}),
+                                status=400, mimetype='application/json')
+
+        voice = str(data.get('voice', '')).strip().replace('\r', '').replace('\n', '').replace('\x00', '')
+        if not voice:
+            return Response(json.dumps({'error': {'message': 'Missing voice', 'type': 'invalid_request_error'}}),
+                            status=400, mimetype='application/json')
+        rate = str(data.get('rate', '0%')).strip()
+        resp_format = str(data.get('response_format', 'mp3')).strip().lower()
+        if resp_format not in _FORMAT_MIME:
+            resp_format = 'mp3'
+
+        # Try to resolve voice by name if not a known ID
+        if voice not in _ALL_VOICE_IDS:
+            resolved = _VOICE_NAME_TO_ID.get(voice.lower())
+            if resolved:
+                voice = resolved
+
+        provider = resolve_provider(voice)
+        if not provider:
+            return Response(json.dumps({'error': {'message': f'Unknown voice: {voice}', 'type': 'invalid_request_error'}}),
+                            status=400, mimetype='application/json')
+
+        pct = parse_rate(rate)
+        results = []
+        total_chars = 0
+
+        for text in texts:
+            if text is None:
+                results.append({'text': None, 'audio': None, 'error': 'Text is None'})
+                continue
+            text = text.strip()
+            if not text:
+                results.append({'text': text, 'audio': None, 'error': 'Empty text'})
+                continue
+            try:
+                audio, error = dispatch(provider, text, voice, pct)
+                if audio:
+                    total_chars += len(text)
+                    audio = _convert_audio(audio, resp_format)
+                    results.append({'text': text, 'audio': base64.b64encode(audio).decode('utf-8'), 'error': None})
+                else:
+                    results.append({'text': text, 'audio': None, 'error': error})
+            except Exception as e:
+                results.append({'text': text, 'audio': None, 'error': str(e)})
+
+        if total_chars > 0:
+            update_stats(total_chars, provider)
+
+        return jsonify({'results': results})
+    except Exception as e:
+        log.error("batch_speech error: %s", e, exc_info=True)
+        return Response(json.dumps({'error': {'message': str(e), 'type': 'server_error'}}),
+                        status=500, mimetype='application/json')
+
+
 if __name__ == '__main__':
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(CONFIG_FILE) or '.', exist_ok=True)
     port = int(os.environ.get('PORT', '80'))
     log.info("Legado TTS Server v%s starting on port %d", __version__, port)
     log.info("Config: %s | Stats: %s", CONFIG_FILE, STATS_FILE)
+    log.info("FFmpeg: %s | Admin: %s", _FFMPEG_AVAILABLE, bool(ADMIN_TOKEN))
+    log.info("Rate limit: %d RPM | Cache: %d entries", RATE_LIMIT_RPM, AUDIO_CACHE_SIZE)
     app.run(host='0.0.0.0', port=port, threaded=True)

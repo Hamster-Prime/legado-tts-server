@@ -10,6 +10,10 @@ services:
       - CONFIG_FILE=/opt/doubao-tts/config.json
       - STATS_FILE=/opt/doubao-tts/stats.json
       - MAX_TEXT_LENGTH=5000
+      - CHUNK_SIZE=500
+      - AUDIO_CACHE_SIZE=100
+      - RATE_LIMIT_RPM=120
+      # - ADMIN_TOKEN=your-secret-token  # uncomment to enable auth
     restart: unless-stopped
 
 volumes:

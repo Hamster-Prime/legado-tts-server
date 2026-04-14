@@ -1231,6 +1231,17 @@ class TestTextNormalization:
         assert '博士' in _normalize_text('Dr. Wang')
         assert '等等' in _normalize_text('etc.')
 
+    def test_normalize_temperature(self):
+        from app import _normalize_text
+        result = _normalize_text('36.5°C')
+        assert '摄氏度' in result
+        assert '三十六' in result
+
+    def test_normalize_units(self):
+        from app import _normalize_text
+        assert '公里' in _normalize_text('100km')
+        assert '毫升' in _normalize_text('500ml')
+
     def test_clean_text_applies_normalization(self):
         from app import _clean_text
         result = _clean_text('50%')

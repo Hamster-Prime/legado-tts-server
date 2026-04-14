@@ -36,7 +36,7 @@ import edge_tts
 import gzip
 import functools
 
-__version__ = '1.6.0'
+__version__ = '1.7.0'
 
 def gzipped(f):
     """Decorator to gzip responses for clients that support it."""
@@ -986,10 +986,11 @@ def _normalize_text(text):
     abbrevs = {
         'Mr.': '先生', 'Mrs.': '女士', 'Dr.': '博士',
         'vs.': '对', 'etc.': '等等', 'e.g.': '例如', 'i.e.': '也就是',
+        'PS:': '附注：', 'P.S.': '附注：',
     }
     for abbr, expansion in abbrevs.items():
         text = text.replace(abbr, expansion)
-    # Date pattern: 2024年1月1日 or 2024-01-01 or 2024/01/01
+    # Date pattern: 2024-01-01 or 2024/01/01
     def _date_repl(m):
         y, m_val, d = m.group(1), m.group(2), m.group(3)
         return f'{y}年{int(m_val)}月{int(d)}日'
@@ -999,10 +1000,21 @@ def _normalize_text(text):
         h, mi = int(m.group(1)), int(m.group(2))
         return _num_to_chinese(h) + '点' + (_num_to_chinese(mi) + '分' if mi else '')
     text = re.sub(r'\b(\d{1,2}):(\d{2})\b', _time_repl, text)
+    # Temperature: 36.5°C -> 三十六点五度
+    def _temp_repl(m):
+        integer = _num_to_chinese(int(m.group(1)))
+        decimal = ''.join(_CN_DIGITS[int(d)] for d in m.group(2)) if m.group(2) else ''
+        unit = '摄氏度' if m.group(3) == 'C' else '华氏度'
+        return integer + ('点' + decimal if decimal else '') + unit
+    text = re.sub(r'(\d+)\.?(\d*)°([CF])', _temp_repl, text)
     # Percentage: 50% -> 百分之五十
     def _pct_repl(m):
         return '百分之' + _num_to_chinese(int(m.group(1)))
     text = re.sub(r'(\d+)%', _pct_repl, text)
+    # Common units
+    _units = {'km': '公里', 'kg': '公斤', 'cm': '厘米', 'mm': '毫米', 'ml': '毫升', 'GB': 'G字节', 'MB': '兆字节', 'KB': '千字节'}
+    for unit, cn in _units.items():
+        text = re.sub(r'(\d+)\s*' + re.escape(unit) + r'\b', lambda m, c=cn: _num_to_chinese(int(m.group(1))) + c, text)
     return text
 
 

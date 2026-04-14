@@ -1235,3 +1235,36 @@ class TestTextNormalization:
         from app import _clean_text
         result = _clean_text('50%')
         assert '百分之' in result
+
+
+class TestErrorHandlers:
+    """Test global error handlers."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        import app as app_module
+        self.app = app_module.app
+        self.app.config['TESTING'] = True
+        self.client = self.app.test_client()
+
+    def test_404_returns_json(self):
+        r = self.client.get('/nonexistent-path-xyz')
+        assert r.status_code == 404
+        data = r.get_json()
+        assert 'error' in data
+        assert data['error']['type'] == 'not_found'
+
+    def test_405_returns_json(self):
+        r = self.client.delete('/health')
+        assert r.status_code == 405
+        data = r.get_json()
+        assert data['error']['type'] == 'method_not_allowed'
+
+    def test_response_has_request_id(self):
+        r = self.client.get('/health')
+        assert 'X-Request-ID' in r.headers
+        assert len(r.headers['X-Request-ID']) > 0
+
+    def test_custom_request_id_forwarded(self):
+        r = self.client.get('/health', headers={'X-Request-ID': 'test-123'})
+        assert r.headers['X-Request-ID'] == 'test-123'

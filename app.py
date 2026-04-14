@@ -85,7 +85,7 @@ AUDIT_LOG_SIZE = int(os.environ.get('AUDIT_LOG_SIZE', '200'))
 _audit_log = []  # list of dicts
 _audit_lock = threading.Lock()
 
-def _audit_record(method, path, status, provider=None, voice=None, chars=0, ms=0, ip=''):
+def _audit_record(method, path, status, provider=None, voice=None, chars=0, ms=0, ip='', request_id=''):
     """Append a request record to the audit ring buffer."""
     rec = {
         'ts': datetime.now().isoformat(),
@@ -97,6 +97,7 @@ def _audit_record(method, path, status, provider=None, voice=None, chars=0, ms=0
         'chars': chars,
         'ms': round(ms, 1),
         'ip': ip,
+        'request_id': request_id,
     }
     with _audit_lock:
         _audit_log.append(rec)
@@ -131,9 +132,24 @@ CORS(app, resources={
 })
 
 
+@app.errorhandler(404)
+def handle_404(e):
+    return _error_response('Not found', 404, 'not_found')
+
+@app.errorhandler(405)
+def handle_405(e):
+    return _error_response('Method not allowed', 405, 'method_not_allowed')
+
+@app.errorhandler(500)
+def handle_500(e):
+    log.error('Internal server error: %s', e)
+    return _error_response('Internal server error', 500, 'server_error')
+
+
 @app.before_request
 def _before_request():
     request._start_time = time.time()
+    request._request_id = request.headers.get('X-Request-ID', uuid.uuid4().hex[:12])
 
 
 @app.after_request
@@ -160,8 +176,10 @@ def _after_request(response):
             chars=getattr(request, '_tts_chars', 0),
             ms=rt_ms,
             ip=request.remote_addr or '',
+            request_id=getattr(request, '_request_id', ''),
         )
     response.headers['X-Response-Time'] = str(int(rt_ms)) + 'ms'
+    response.headers['X-Request-ID'] = getattr(request, '_request_id', '')
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Server'] = f'Legado-TTS/{__version__}'
@@ -358,6 +376,21 @@ atexit.register(_shutdown_edge_executor)
 # ──────────────────────────────────────────────
 # Admin auth helper
 # ──────────────────────────────────────────────
+
+def _error_response(message, status=400, error_type='invalid_request_error'):
+    """Return standardized error JSON response."""
+    return Response(
+        json.dumps({
+            'error': {
+                'message': message,
+                'type': error_type,
+                'request_id': getattr(request, '_request_id', None),
+            }
+        }, ensure_ascii=False),
+        status=status,
+        mimetype='application/json'
+    )
+
 
 def _check_admin():
     """Return error Response if ADMIN_TOKEN is set but request lacks auth."""

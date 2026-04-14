@@ -1290,3 +1290,86 @@ class TestErrorHandlers:
         assert r.status_code == 200
         data = r.get_json()
         assert data['ready'] is True
+
+
+class TestEdgeCases:
+    """Test boundary conditions and edge cases."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        import app as app_module
+        self.app = app_module.app
+        self.app.config['TESTING'] = True
+        self.client = self.app.test_client()
+
+    def test_empty_text_returns_400(self):
+        r = self.client.post('/speech/stream', json={
+            'text': '', 'voice': 'zh-CN-XiaoxiaoNeural'
+        })
+        assert r.status_code == 400
+
+    def test_missing_voice_returns_400(self):
+        r = self.client.post('/speech/stream', json={
+            'text': '测试'
+        })
+        assert r.status_code == 400
+
+    def test_very_long_text_returns_400(self):
+        r = self.client.post('/speech/stream', json={
+            'text': 'a' * 10000, 'voice': 'zh-CN-XiaoxiaoNeural'
+        })
+        assert r.status_code == 400
+
+    def test_openai_missing_input_returns_400(self):
+        r = self.client.post('/v1/audio/speech', json={
+            'model': 'tts-1', 'voice': 'zh-CN-XiaoxiaoNeural'
+        })
+        assert r.status_code == 400
+
+    def test_batch_empty_texts_returns_400(self):
+        r = self.client.post('/api/speech/batch', json={
+            'texts': [], 'voice': 'zh-CN-XiaoxiaoNeural'
+        })
+        assert r.status_code == 400
+
+    def test_batch_too_many_texts_returns_400(self):
+        r = self.client.post('/api/speech/batch', json={
+            'texts': ['text'] * 21, 'voice': 'zh-CN-XiaoxiaoNeural'
+        })
+        assert r.status_code == 400
+
+    def test_special_chars_in_text(self):
+        """Text with special characters should not crash."""
+        r = self.client.post('/speech/stream', json={
+            'text': '你好<script>alert(1)</script>&amp;', 'voice': 'zh-CN-XiaoxiaoNeural'
+        })
+        # Should not crash (may fail synth but 400 or 500, not exception)
+        assert r.status_code in (200, 400, 500, 503)
+
+    def test_unicode_voice_name(self):
+        """Voice alias in Chinese should resolve."""
+        from app import _VOICE_NAME_TO_ID
+        assert '晓晓' in _VOICE_NAME_TO_ID or '晓晓'.lower() in _VOICE_NAME_TO_ID
+
+    def test_health_returns_all_fields(self):
+        r = self.client.get('/health')
+        data = r.get_json()
+        required = ['status', 'version', 'providers', 'cache', 'uptime_seconds']
+        for field in required:
+            assert field in data, f'Missing field: {field}'
+
+    def test_info_returns_complete(self):
+        r = self.client.get('/api/info')
+        data = r.get_json()
+        assert 'version' in data
+        assert 'config' in data
+        assert 'metrics' in data
+        assert 'cache' in data
+        assert 'providers' in data
+
+    def test_openapi_spec_valid(self):
+        r = self.client.get('/api/openapi.json')
+        data = r.get_json()
+        assert data['openapi'] == '3.0.0'
+        assert 'paths' in data
+        assert '/speech/stream' in data['paths']

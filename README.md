@@ -4,7 +4,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![Version](https://img.shields.io/badge/version-1.8.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.9.0-green.svg)
 ![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**

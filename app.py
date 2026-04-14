@@ -36,7 +36,7 @@ import edge_tts
 import gzip
 import functools
 
-__version__ = '1.8.0'
+__version__ = '1.9.0'
 
 def gzipped(f):
     """Decorator to gzip responses for clients that support it."""
@@ -228,6 +228,7 @@ API_KEYS = set(filter(None, os.environ.get('API_KEYS', '').split(',')))  # optio
 API_KEYS_REQUIRED = os.environ.get('API_KEYS_REQUIRED', '0') == '1'  # require API key for TTS
 ALLOW_SSML = os.environ.get('ALLOW_SSML', '1') == '1'  # allow SSML input
 FALLBACK_TO_EDGE = os.environ.get('FALLBACK_TO_EDGE', '1') == '1'  # auto-fallback to Edge on failure
+FALLBACK_VOICE = os.environ.get('FALLBACK_VOICE', 'zh-CN-XiaoxiaoNeural')  # voice to use when fallback to Edge
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')  # optional webhook for error notifications
 WEBHOOK_EVENTS = os.environ.get('WEBHOOK_EVENTS', 'error')  # comma-separated: error,synthesis,startup
 REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))  # seconds per provider request
@@ -256,6 +257,7 @@ _rate_lock = threading.Lock()
 _rate_limits_cleanup = 0  # counter to periodically clean up stale IPs
 _daily_char_usage = {}  # {ip: {date: chars}}
 _daily_char_lock = threading.Lock()
+_daily_cleanup_counter = 0
 
 
 def _cache_get(key):
@@ -388,7 +390,15 @@ def _concat_mp3(segments):
 
 
 _FFMPEG_AVAILABLE = shutil.which('ffmpeg') is not None
-_FORMAT_MIME = {'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg; codecs=opus'}
+_FORMAT_MIME = {
+    'mp3': 'audio/mpeg',
+    'wav': 'audio/wav',
+    'ogg': 'audio/ogg; codecs=opus',
+    'aac': 'audio/aac',
+    'flac': 'audio/flac',
+    'pcm': 'audio/pcm',
+    'opus': 'audio/ogg; codecs=opus',
+}
 
 
 def _convert_audio(audio_bytes: bytes, fmt: str) -> bytes:
@@ -396,15 +406,25 @@ def _convert_audio(audio_bytes: bytes, fmt: str) -> bytes:
     Falls back to original bytes if ffmpeg unavailable or conversion fails."""
     if fmt == 'mp3' or not _FFMPEG_AVAILABLE:
         return audio_bytes
+    # Map format names to ffmpeg output formats
+    _fmt_map = {
+        'wav': 'wav', 'ogg': 'ogg', 'opus': 'ogg',
+        'aac': 'adts', 'flac': 'flac', 'pcm': 's16le',
+    }
+    ffmpeg_fmt = _fmt_map.get(fmt, fmt)
     try:
+        cmd = ['ffmpeg', '-i', 'pipe:0', '-f', ffmpeg_fmt, '-y', 'pipe:1']
+        if fmt == 'pcm':
+            cmd = ['ffmpeg', '-i', 'pipe:0', '-f', 's16le', '-ar', '24000', '-ac', '1', '-y', 'pipe:1']
         proc = subprocess.run(
-            ['ffmpeg', '-i', 'pipe:0', '-f', fmt, '-y', 'pipe:1'],
+            cmd,
             input=audio_bytes, capture_output=True, timeout=30,
         )
         if proc.returncode == 0 and proc.stdout:
             return proc.stdout
-    except Exception:
-        log.debug("Audio conversion to %s failed, returning original", fmt)
+        log.debug("Audio conversion to %s failed (rc=%d): %s", fmt, proc.returncode, proc.stderr[:200] if proc.stderr else '')
+    except Exception as e:
+        log.debug("Audio conversion to %s failed: %s", fmt, e)
     return audio_bytes
 
 
@@ -490,6 +510,13 @@ def _check_daily_quota(ip, chars):
         old = [d for d in usage if d != today]
         for d in old:
             del usage[d]
+        # Periodically evict stale IPs (every 100 checks)
+        _daily_cleanup_counter += 1
+        if _daily_cleanup_counter >= 100:
+            _daily_cleanup_counter = 0
+            stale = [k for k, v in _daily_char_usage.items() if not v]
+            for k in stale:
+                del _daily_char_usage[k]
     return None
 
 
@@ -699,16 +726,38 @@ def _write_json(path, data):
 # Config
 # ──────────────────────────────────────────────
 
+# In-memory config cache with mtime check
+_config_cache = {'data': None, 'mtime': 0}
+_config_cache_lock = threading.Lock()
+
+
 def load_config():
+    """Load config with in-memory cache. Re-reads file if mtime changed."""
+    try:
+        mtime = os.path.getmtime(CONFIG_FILE)
+    except OSError:
+        mtime = 0
+    with _config_cache_lock:
+        cached = _config_cache
+        if cached['data'] is not None and cached['mtime'] == mtime:
+            return cached['data'].copy()
+    # Cache miss or file changed
     cfg = _read_json(CONFIG_FILE, DEFAULT_CONFIG.copy())
     for k, v in DEFAULT_CONFIG.items():
         if k not in cfg:
             cfg[k] = v
-    return cfg
+    with _config_cache_lock:
+        _config_cache['data'] = cfg
+        _config_cache['mtime'] = mtime
+    return cfg.copy()
 
 
 def save_config(config):
     _write_json(CONFIG_FILE, config)
+    # Invalidate cache
+    with _config_cache_lock:
+        _config_cache['data'] = None
+        _config_cache['mtime'] = 0
 
 
 # ──────────────────────────────────────────────
@@ -1061,10 +1110,50 @@ _SPEED_PRESETS = {
 }
 
 def parse_rate(rate_str):
-    """Parse rate string ('+50%', '-20%', 'fast', '快速', '1.5x') to float percentage."""
+    """Parse rate string to float percentage offset for TTS.
+
+    Legado (开源阅读) speakSpeed format (confirmed from source code):
+      speakSpeed = AppConfig.speechRatePlay + 5
+      speechRatePlay SeekBar range: 0~20, default 10
+      => speakSpeed range: 5~25, normal speed = 15
+      URL template: {{String(speakSpeed)}}+0%  => e.g. "15+0%"
+
+    Conversion formula:
+      pct = (speakSpeed - 15) / 15 * 100
+      e.g. speakSpeed=5  => -67% (slow)
+           speakSpeed=15 => 0%   (normal)
+           speakSpeed=25 => +67% (fast)
+
+    Other supported formats:
+    - '+50%', '-20%'  -> 50.0, -20.0  (direct percentage offset)
+    - 'fast', 'slow'  -> preset values
+    - '1.5x'          -> 50.0  (speed multiplier, 1.0=normal)
+    """
     s = str(rate_str).strip().lower()
+    if not s:
+        return 0.0
     if s in _SPEED_PRESETS:
         return float(_SPEED_PRESETS[s])
+    import re as _re
+    # Legado speakSpeed format: "<integer>+0%" or "<integer>-0%"
+    # speakSpeed is an integer (5~25), normal=15
+    legado_m = _re.match(r'^(\d+(?:\.\d+)?)([-+]\d+(?:\.\d+)?)%$', s)
+    if legado_m:
+        speak_speed = float(legado_m.group(1))
+        base_offset = float(legado_m.group(2))
+        # If speakSpeed looks like a Legado integer speed (1~30 range)
+        # convert: (speakSpeed - 15) / 15 * 100 + base_offset
+        # Normal speakSpeed=15 => 0%, speakSpeed=5 => -67%, speakSpeed=25 => +67%
+        pct = (speak_speed - 15.0) / 15.0 * 100.0 + base_offset
+        return max(-90.0, min(200.0, pct))
+    # x-suffix multiplier: '1.5x' -> 50%
+    if s.endswith('x'):
+        try:
+            multiplier = float(s[:-1])
+            return max(-90.0, min(200.0, (multiplier - 1.0) * 100.0))
+        except (ValueError, TypeError):
+            pass
+    # Direct percentage: '+50%', '-20%', '50'
     try:
         return float(s.replace('%', '').replace('+', '').strip())
     except (ValueError, TypeError):
@@ -1075,6 +1164,42 @@ def _clean_text(text):
     """Normalize text: remove control chars, normalize numbers/dates, apply pronunciation dict."""
     # Remove NULL and C0 controls except \t (0x09), \n (0x0a), \r (0x0d)
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    # Common emoji to Chinese description mapping
+    _EMOJI_MAP = {
+        '😊': '[笑脸]', '😃': '[大笑]', '😄': '[微笑]', '😁': '[开心]',
+        '😆': '[憨笑]', '😂': '[笑哭]', '🤣': '[大笑]', '😊': '[微笑]',
+        '😇': '[天使]', '🙂': '[微笑]', '🙃': '[颠倒]', '😉': '[眨眼]',
+        '😌': '[得意]', '😍': '[喜欢]', '🥰': '[爱慕]', '😘': '[亲亲]',
+        '😗': '[亲亲]', '😙': '[亲亲]', '😚': '[亲亲]', '😜': '[调皮]',
+        '🤪': '[搞怪]', '😝': '[吐舌]', '🤗': '[抱抱]', '🤭': '[偷笑]',
+        '🤫': '[嘘]', '🤔': '[思考]', '🤐': '[闭嘴]', '🤨': '[疑惑]',
+        '😐': '[中立]', '😑': '[无语]', '😒': '[不爽]', '🙄': '[白眼]',
+        '😬': '[尴尬]', '🤥': '[说谎]', '😌': '[松口气]', '😔': '[难过]',
+        '😪': '[困]', '🤤': '[流口水]', '😴': '[睡觉]', '😷': '[口罩]',
+        '🤒': '[生病]', '🤕': '[受伤]', '🤢': '[恶心]', '🤮': '[呕吐]',
+        '🤧': '[感冒]', '🥵': '[热]', '🥶': '[冷]', '🥴': '[晕]',
+        '😵': '[晕]', '🤯': '[爆炸]', '🤠': '[牛仔]', '🥳': '[庆祝]',
+        '😎': '[酷]', '🤓': '[ nerd ]', '🧐': '[好奇]', '😕': '[困惑]',
+        '🫤': '[失望]', '😟': '[担心]', '🙁': '[难过]', '☹️': '[难过]',
+        '😮': '[惊讶]', '😯': '[惊讶]', '😲': '[震惊]', '😳': '[脸红]',
+        '🥺': '[恳求]', '😦': '[惊讶]', '😧': '[痛苦]', '😨': '[害怕]',
+        '😰': '[冷汗]', '😥': '[失望]', '😢': '[哭]', '😭': '[大哭]',
+        '😱': '[恐惧]', '😖': '[痛苦]', '😣': '[痛苦]', '😞': '[失望]',
+        '😓': '[汗]', '😩': '[累]', '😫': '[累]', '🥱': '[困]',
+        '😤': '[生气]', '😡': '[愤怒]', '😠': '[生气]', '🤬': '[骂脏话]',
+        '🤯': '[头炸]', '😳': '[害羞]', '🥵': '[脸红发热]',
+        '❤️': '[爱心]', '💔': '[心碎]', '💕': '[两颗心]', '💓': '[心跳]',
+        '💗': '[爱心]', '💖': '[爱心]', '💘': '[丘比特]', '💝': '[礼物心]',
+        '💟': '[爱心]', '❣️': '[爱心]', '💞': '[心心]', '💟': '[爱心]',
+        '👍': '[赞]', '👎': '[踩]', '👌': '[好的]', '✌️': '[耶]',
+        '🤞': '[好运]', '🤟': '[爱你]', '🤘': '[摇滚]', '👊': '[拳头]',
+        '✊': '[加油]', '👋': '[再见]', '🤚': '[举手]', '🖐️': '[击掌]',
+        '✋': '[停]', '🖖': '[挥手]', '🙌': '[举双手]', '👏': '[鼓掌]',
+        '🙏': '[拜托]', '🤝': '[握手]', '👍🏻': '[赞]', '👏🏻': '[鼓掌]',
+    }
+    # Replace common emojis with descriptions
+    for emoji, desc in _EMOJI_MAP.items():
+        text = text.replace(emoji, desc)
     # Collapse multiple blank lines but keep paragraph structure
     text = re.sub(r'\n{3,}', '\n\n', text)
     # Collapse horizontal whitespace per line
@@ -1094,7 +1219,16 @@ _CN_DIGITS = '零一二三四五六七八九'
 _CN_UNITS = {1: '十', 2: '百', 3: '千', 4: '万', 8: '亿'}
 
 def _num_to_chinese(n):
-    """Convert an integer to Chinese characters (simplified, up to 99999999)."""
+    """Convert an integer or float to Chinese characters (simplified, up to 99999999)."""
+    # Handle floating point numbers
+    if isinstance(n, float):
+        integer_part = int(n)
+        decimal_part = str(n).split('.')[-1].rstrip('0')
+        if not decimal_part:  # No decimal part after stripping trailing zeros
+            return _num_to_chinese(integer_part)
+        integer_str = _num_to_chinese(integer_part)
+        decimal_str = '点' + ''.join(_CN_DIGITS[int(d)] for d in decimal_part)
+        return integer_str + decimal_str
     if n < 0:
         return '负' + _num_to_chinese(-n)
     if n < 10:
@@ -1135,21 +1269,148 @@ def _normalize_text(text):
         h, mi = int(m.group(1)), int(m.group(2))
         return _num_to_chinese(h) + '点' + (_num_to_chinese(mi) + '分' if mi else '')
     text = re.sub(r'\b(\d{1,2}):(\d{2})\b', _time_repl, text)
-    # Temperature: 36.5°C -> 三十六点五度
+    # Temperature: 36.5°C -> 三十六点五摄氏度
     def _temp_repl(m):
-        integer = _num_to_chinese(int(m.group(1)))
-        decimal = ''.join(_CN_DIGITS[int(d)] for d in m.group(2)) if m.group(2) else ''
-        unit = '摄氏度' if m.group(3) == 'C' else '华氏度'
-        return integer + ('点' + decimal if decimal else '') + unit
-    text = re.sub(r'(\d+)\.?(\d*)°([CF])', _temp_repl, text)
-    # Percentage: 50% -> 百分之五十
+        num_str = m.group(1)
+        unit = '摄氏度' if m.group(2) == 'C' else '华氏度'
+        return _num_to_chinese(float(num_str) if '.' in num_str else int(num_str)) + unit
+    text = re.sub(r'(\d+(?:\.\d+)?)°([CF])', _temp_repl, text)
+    # Percentage: 50% -> 百分之五十, 3.14% -> 百分之三点一四
     def _pct_repl(m):
-        return '百分之' + _num_to_chinese(int(m.group(1)))
-    text = re.sub(r'(\d+)%', _pct_repl, text)
-    # Common units
-    _units = {'km': '公里', 'kg': '公斤', 'cm': '厘米', 'mm': '毫米', 'ml': '毫升', 'GB': 'G字节', 'MB': '兆字节', 'KB': '千字节'}
+        return '百分之' + _num_to_chinese(float(m.group(1)))
+    text = re.sub(r'(\d+(?:\.\d+)?)%', _pct_repl, text)
+    # Long number sequence handling: phone numbers, card numbers, serial numbers - read digit by digit
+    # Pattern: 5+ digits without unit suffix, or 11-digit 1-start phone numbers, or 15+ digit long numbers
+    def _long_number_repl(m):
+        num_str = m.group(1).replace('-', '').replace(' ', '')
+        # Determine if we should read digit by digit
+        read_digit = False
+        # 11-digit starting with 1: phone number
+        if len(num_str) == 11 and num_str.startswith('1'):
+            read_digit = True
+        # 15-19 digits: ID card or bank card
+        elif 15 <= len(num_str) <= 19:
+            read_digit = True
+        # 4 digits followed by '年': year, read digit by digit
+        elif len(num_str) == 4:
+            next_char = m.string[m.end():m.end() + 1] if m.end() < len(m.string) else ''
+            if next_char == '年':
+                read_digit = True
+        # 5+ digits without unit suffix or with '号' suffix (serial number)
+        elif len(num_str) >= 5:
+            # Check if next character is a unit (skip digit read if has unit)
+            next_char = m.string[m.end():m.end() + 1] if m.end() < len(m.string) else ''
+            if next_char == '号':
+                # Serial number with '号' suffix: read digit by digit
+                read_digit = True
+            elif next_char not in ['元', '年', '月', '日', '个', '人', '米', '公里', 'kg', 'g', 's', 'min', 'h', '°', '℃', '℉', '%', 'km', 'cm', 'mm', 'ml', 'GB', 'MB', 'KB']:
+                # No unit suffix: read digit by digit
+                read_digit = True
+        if read_digit:
+            # Convert each digit to Chinese
+            return ''.join(_CN_DIGITS[int(d)] for d in num_str)
+        # Otherwise convert as normal number
+        try:
+            return _num_to_chinese(int(num_str) if '.' not in num_str else float(num_str))
+        except (ValueError, OverflowError):
+            return num_str
+    # Match pure digit sequences with optional dash separators (min 5 digits)
+    text = re.sub(r'(\d[\d\- ]{3,}\d)', _long_number_repl, text)
+    # Handle 4-digit years: 2024年 -> 二零二四年
+    def _year_repl(m):
+        year_str = m.group(1)
+        return ''.join(_CN_DIGITS[int(d)] for d in year_str) + '年'
+    text = re.sub(r'(\d{4})年', _year_repl, text)
+    # Currency: ¥100 -> 一百元, $5.5 -> 五点五美元, €3 -> 三欧元
+    def _currency_repl(m):
+        amount = float(m.group(2) or m.group(3))
+        symbol = m.group(1) or m.group(4)
+        if symbol in ('¥', '￥', '元'):
+            return _num_to_chinese(amount) + '元'
+        elif symbol in ('$', '美元'):
+            return _num_to_chinese(amount) + '美元'
+        elif symbol in ('€', '欧元'):
+            return _num_to_chinese(amount) + '欧元'
+        elif symbol in ('£', '英镑'):
+            return _num_to_chinese(amount) + '英镑'
+        elif symbol in ('₩', '韩元'):
+            return _num_to_chinese(amount) + '韩元'
+        elif symbol in ('¥', '日元'):
+            return _num_to_chinese(amount) + '日元'
+        return m.group(0)
+    text = re.sub(r'([¥\$€£₩￥])(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)(元|美元|欧元|英镑|韩元|日元)', _currency_repl, text)
+    # Common units: 1.5km -> 一点五公里, 30min -> 三十分钟
+    _units = {'km': '公里', 'kg': '公斤', 'cm': '厘米', 'mm': '毫米', 'ml': '毫升',
+              'GB': 'G字节', 'MB': '兆字节', 'KB': '千字节',
+              'min': '分钟', 'h': '小时', 's': '秒', 'm': '米', 'g': '克'}
     for unit, cn in _units.items():
-        text = re.sub(r'(\d+)\s*' + re.escape(unit) + r'\b', lambda m, c=cn: _num_to_chinese(int(m.group(1))) + c, text)
+        text = re.sub(r'(\d+(?:\.\d+)?)\s*' + re.escape(unit) + r'\b', lambda m, c=cn: _num_to_chinese(float(m.group(1))) + c, text)
+    # Roman numerals to Chinese (1-12 common usage)
+    _ROMAN_MAP = {
+        'Ⅰ': '一', 'Ⅱ': '二', 'Ⅲ': '三', 'Ⅳ': '四', 'Ⅴ': '五',
+        'Ⅵ': '六', 'Ⅶ': '七', 'Ⅷ': '八', 'Ⅸ': '九', 'Ⅹ': '十',
+        'Ⅺ': '十一', 'Ⅻ': '十二', 'I': '一', 'II': '二', 'III': '三',
+        'IV': '四', 'V': '五', 'VI': '六', 'VII': '七', 'VIII': '八',
+        'IX': '九', 'X': '十', 'XI': '十一', 'XII': '十二',
+    }
+    # Replace full-width roman numerals
+    def _full_width_roman_repl(m):
+        return _ROMAN_MAP.get(m.group(0), m.group(0))
+    text = re.sub(r'[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]', _full_width_roman_repl, text)
+    # Replace half-width roman numerals (1-12) not surrounded by other letters
+    def _half_width_roman_repl(m):
+        return _ROMAN_MAP.get(m.group(0), m.group(0))
+    text = re.sub(r'(?<![a-zA-Z0-9])[IVXL]{1,4}(?![a-zA-Z0-9])', _half_width_roman_repl, text)
+    # Ordinal number conversion: 第1 -> 第一章, 第3.5 -> 第三点五节
+    def _ordinal_repl(m):
+        prefix = m.group(1) or ''
+        num = m.group(2)
+        suffix = m.group(3) or ''
+        if '.' in num:
+            integer_part, decimal_part = num.split('.', 1)
+            cn_num = _num_to_chinese(int(integer_part)) + '点' + ''.join(_CN_DIGITS[int(d)] for d in decimal_part)
+        else:
+            cn_num = _num_to_chinese(int(num))
+        return f'{prefix}{cn_num}{suffix}'
+    # Match ordinal patterns like 第1, 第12.3, 第3章, 第5.2节
+    text = re.sub(r'(第)(\d+(?:\.\d+)?)(章|节|页|条|款|部分|讲|集)?', _ordinal_repl, text)
+    # Common internet slang (extendable)
+    _SLANG_MAP = {
+        'yyds': '永远的神', 'YYDS': '永远的神',
+        'emo': '情绪低落', 'EMO': '情绪低落',
+        'u1s1': '有一说一', 'U1S1': '有一说一',
+        'xswl': '笑死我了', 'XSWL': '笑死我了',
+        'awsl': '啊我死了', 'AWSL': '啊我死了',
+        'dbq': '对不起', 'DBQ': '对不起',
+        'pyq': '朋友圈', 'PYQ': '朋友圈',
+        'ssfd': '瑟瑟发抖', 'SSFD': '瑟瑟发抖',
+        'gkd': '搞快点', 'GKD': '搞快点',
+        'kdl': '磕到了', 'KDL': '磕到了',
+        'szd': '是真的', 'SZD': '是真的',
+        'dddd': '懂的都懂', 'DDDD': '懂的都懂',
+    }
+    for slang, desc in _SLANG_MAP.items():
+        # Match slang not surrounded by other letters/numbers
+        text = re.sub(r'(?<![a-zA-Z0-9])' + re.escape(slang) + r'(?![a-zA-Z0-9])', desc, text)
+    # Common English abbreviations to Chinese
+    _ABBR_MAP = {
+        'AI': '人工智能', 'ML': '机器学习', 'DL': '深度学习', 'NLP': '自然语言处理',
+        'API': '接口', 'SDK': '开发套件', 'UI': '界面', 'UX': '用户体验',
+        'CPU': '处理器', 'GPU': '图形处理器', 'RAM': '内存', 'ROM': '只读存储器',
+        'OS': '操作系统', 'PC': '个人电脑', 'APP': '应用', 'URL': '网址',
+        'HTTP': '超文本传输协议', 'HTTPS': '安全超文本传输协议',
+        'Wi-Fi': '无线网络', 'WiFi': '无线网络', 'WIFI': '无线网络',
+        'GPS': '全球定位系统', 'VPN': '虚拟私人网络',
+        'ID': '编号', 'IP': '网络地址', 'DNS': '域名系统',
+        'CEO': '首席执行官', 'CTO': '首席技术官', 'CFO': '首席财务官',
+        'VIP': '贵宾', 'DIY': '自己动手做', 'OK': '好的', 'LOL': '哈哈',
+        'PDF': 'PDF文档', 'PPT': '幻灯片', 'ETA': '预计到达时间',
+        'P.S.': '附注', 'PS': '附注', 'FAQ': '常见问题', 'FYI': '供参考',
+        'ASAP': '尽快', 'TBD': '待定', 'TBD': '待定', 'BFF': '最好的朋友',
+        'IoT': '物联网', 'IOT': '物联网', 'AR': '增强现实', 'VR': '虚拟现实',
+    }
+    for abbr, expansion in _ABBR_MAP.items():
+        text = re.sub(r'(?<![a-zA-Z])' + re.escape(abbr) + r'(?![a-zA-Z])', expansion, text)
     return text
 
 
@@ -1165,17 +1426,111 @@ def _apply_pronunciation_dict(text):
     return text
 
 
+def _split_text(text, max_len=300):
+    """把长文本按自然断点分段，每段不超过max_len字"""
+    if len(text) <= max_len:
+        return [text]
+    # 按优先级的断点符号：句号、感叹号、问号、换行、分号、逗号、空格
+    separators = ['。', '！', '？', '!', '?', '\n', '；', ';', '，', ',', ' ']
+    chunks = []
+    current = text
+    while len(current) > max_len:
+        split_pos = -1
+        # 找最靠后的断点
+        for sep in separators:
+            pos = current.rfind(sep, 0, max_len)
+            if pos > split_pos:
+                split_pos = pos + len(sep)  # 包含断点本身
+                if sep == '\n':
+                    break  # 换行优先级最高，找到就用
+        if split_pos == -1:
+            # 没有找到断点，硬切
+            split_pos = max_len
+        chunks.append(current[:split_pos].strip())
+        current = current[split_pos:].strip()
+    if current:
+        chunks.append(current)
+    return [c for c in chunks if c]
+
+def _concat_audio(chunks, format='mp3'):
+    """拼接多个音频字节流，返回合并后的字节"""
+    if not chunks:
+        return None
+    if len(chunks) == 1:
+        return chunks[0]
+    try:
+        import subprocess
+        import tempfile
+        import os
+        # 创建临时目录
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 写入所有分段
+            input_paths = []
+            for i, chunk in enumerate(chunks):
+                if not chunk:
+                    continue
+                path = os.path.join(tmpdir, f'chunk_{i}.{format}')
+                with open(path, 'wb') as f:
+                    f.write(chunk)
+                input_paths.append(path)
+            if not input_paths:
+                return None
+            # 生成ffmpeg concat文件
+            concat_file = os.path.join(tmpdir, 'concat.txt')
+            with open(concat_file, 'w') as f:
+                for path in input_paths:
+                    f.write(f"file '{os.path.abspath(path)}'\n")
+            # 拼接
+            output_path = os.path.join(tmpdir, f'output.{format}')
+            cmd = [
+                'ffmpeg', '-f', 'concat', '-safe', '0',
+                '-i', concat_file,
+                '-c', 'copy', '-y',
+                output_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, check=True)
+            with open(output_path, 'rb') as f:
+                return f.read()
+    except Exception as e:
+        log.error(f"音频拼接失败: {e}")
+        return None
+
 def dispatch(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz'):
-    """Route to the correct TTS provider and return (audio_bytes, error).
+    """Route to the correct TTS provider and return (audio_bytes, error, actual_provider, actual_voice).
     When FALLBACK_TO_EDGE is enabled and a non-edge provider fails,
     automatically retry with Edge TTS using a default Chinese voice."""
     text = _clean_text(text)
     if not text:
-        return None, 'Text is empty after cleaning'
-
+        return None, 'Text is empty after cleaning', None, None
+    
+    # 长文本自动分段合成
+    MAX_SINGLE_CHUNK = 300  # 单段最多300字
+    if len(text) > MAX_SINGLE_CHUNK:
+        chunks = _split_text(text, MAX_SINGLE_CHUNK)
+        log.info(f"文本过长({len(text)}字)，自动分成{len(chunks)}段合成")
+        audio_chunks = []
+        for i, chunk in enumerate(chunks):
+            log.info(f"合成第{i+1}/{len(chunks)}段 ({len(chunk)}字)")
+            chunk_audio, err = _dispatch_impl(provider, chunk, voice, pct, style=style, volume=volume, pitch=pitch)
+            if err:
+                # 分段失败直接返回错误
+                return None, f"分段{i+1}合成失败: {err}", None, None
+            if not chunk_audio:
+                return None, f"分段{i+1}返回空音频", None, None
+            audio_chunks.append(chunk_audio)
+        # 拼接所有音频
+        merged_audio = _concat_audio(audio_chunks)
+        if not merged_audio:
+            return None, "音频拼接失败", None, None
+        # 缓存合并后的音频
+        cache_key = (provider, text, voice, int(pct))
+        _cache_put(cache_key, merged_audio)
+        return merged_audio, None, provider, voice
+    
+    # 短文本直接合成
     audio, err = _dispatch_impl(provider, text, voice, pct, style=style, volume=volume, pitch=pitch)
     if audio:
-        return audio, None
+        return audio, None, provider, voice
 
     # Send error webhook notification
     _send_webhook('error', {
@@ -1187,15 +1542,15 @@ def dispatch(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz')
 
     # Fallback to Edge TTS if enabled and primary provider is not edge
     if FALLBACK_TO_EDGE and provider != 'edge':
-        fallback_voice = 'zh-CN-XiaoxiaoNeural'
-        rate = f'+{int(pct)}%' if pct >= 0 else f'{int(pct)}%'
+        fallback_voice = FALLBACK_VOICE
+        rate = f'+{int(round(pct))}%' if pct >= 0 else f'{int(round(pct))}%'
         log.warning("Fallback to Edge TTS: provider=%s voice=%s error=%s",
                     provider, voice, err)
         fb_audio, fb_err = synthesize_edge(text, fallback_voice, rate)
         if fb_audio:
-            return fb_audio, None
-        return None, f'Primary: {err}; Fallback(Edge): {fb_err}'
-    return None, err
+            return fb_audio, None, 'edge', fallback_voice
+        return None, f'Primary: {err}; Fallback(Edge): {fb_err}', None, None
+    return None, err, None, None
 
 
 def _dispatch_impl(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz'):
@@ -1225,7 +1580,7 @@ def _dispatch_single(provider, text, voice, pct, style=None, volume='+0%', pitch
         log.info("Cache hit: provider=%s voice=%s chars=%d", provider, voice, len(text))
         return cached, None
     if provider == 'edge':
-        rate = f'+{int(pct)}%' if pct >= 0 else f'{int(pct)}%'
+        rate = f'+{int(round(pct))}%' if pct >= 0 else f'{int(round(pct))}%'
         audio, err = synthesize_edge(text, voice, rate, style=style, volume=volume, pitch=pitch)
     elif provider == 'tencent':
         audio, err = synthesize_tencent(text, voice, max(-2, min(6, pct / 50)))
@@ -1410,16 +1765,19 @@ def speech_stream():
             return quota_err
 
         pct = parse_rate(data.get('rate', '0%'))
-        audio, error = dispatch(provider, text, voice, pct, style=style, volume=volume, pitch=pitch)
+        audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct, style=style, volume=volume, pitch=pitch)
 
         if audio:
-            update_stats(len(text), provider, voice=voice)
+            # Use actual provider/voice for stats and response headers (in case of fallback)
+            final_provider = actual_provider or provider
+            final_voice = actual_voice or voice
+            update_stats(len(text), final_provider, voice=final_voice)
             log.info("TTS OK: provider=%s voice=%s style=%s chars=%d size=%d",
-                     provider, voice, style, len(text), len(audio))
+                     final_provider, final_voice, style, len(text), len(audio))
             return Response(audio, mimetype='audio/mpeg', headers={
                 'Content-Length': str(len(audio)),
-                'X-TTS-Provider': provider,
-                'X-TTS-Voice': voice,
+                'X-TTS-Provider': final_provider,
+                'X-TTS-Voice': final_voice,
                 'Cache-Control': 'no-store',
                 'X-TTS-Chars': str(len(text)),
             })
@@ -1459,31 +1817,41 @@ def speech_stream_chunked():
         request._tts_chars = len(text)
         pct = parse_rate(data.get('rate', '0%'))
         if provider == 'edge':
-            rate = f'+{int(pct)}%' if pct >= 0 else f'{int(pct)}%'
+            rate = f'+{int(round(pct))}%' if pct >= 0 else f'{int(round(pct))}%'
             text = _clean_text(text)
             def generate():
+                """Generator that yields audio chunks from edge-tts via a dedicated event loop."""
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    comm = edge_tts.Communicate(text, voice, rate=rate)
-                    async def _stream():
+                    async def _collect_chunks():
+                        chunks = []
+                        comm = edge_tts.Communicate(text, voice, rate=rate)
                         async for chunk in comm.stream():
                             if chunk['type'] == 'audio':
-                                yield chunk['data']
-                    for chunk_data in loop.run_until_complete(_stream()):
+                                chunks.append(chunk['data'])
+                        return chunks
+                    audio_chunks = loop.run_until_complete(_collect_chunks())
+                    for chunk_data in audio_chunks:
                         yield chunk_data
-                    loop.close()
                     update_stats(len(text), provider, voice=voice)
                 except Exception as e:
                     log.error('Chunked stream error: %s', e)
+                finally:
+                    loop.close()
             return Response(generate(), mimetype='audio/mpeg', headers={
                 'X-TTS-Provider': provider, 'Transfer-Encoding': 'chunked',
             })
         else:
-            audio, error = dispatch(provider, text, voice, pct)
+            audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct)
             if audio:
-                update_stats(len(text), provider, voice=voice)
-                return Response(audio, mimetype='audio/mpeg')
+                final_provider = actual_provider or provider
+                final_voice = actual_voice or voice
+                update_stats(len(text), final_provider, voice=final_voice)
+                return Response(audio, mimetype='audio/mpeg', headers={
+                    'X-TTS-Provider': final_provider,
+                    'X-TTS-Voice': final_voice,
+                })
             return _error_response(f'TTS failed: {error}', 502)
     except Exception as e:
         log.error('Chunked TTS error: %s', e)
@@ -1557,10 +1925,11 @@ def api_config_test():
                      'tencent': TENCENT_VOICES[0]['id'], 'xiaomi': XIAOMI_VOICES[0]['id'],
                      'fishaudio': FISH_AUDIO_VOICES[0]['id']}
         voice = voice_map.get(provider, EDGE_VOICES[0]['id'])
-    audio, error = dispatch(provider, '你好，配置测试。', voice, 0)
+    audio, error, actual_provider, actual_voice = dispatch(provider, '你好，配置测试。', voice, 0)
     if audio:
         result['audio_size'] = len(audio)
-        result['voice'] = voice
+        result['voice'] = actual_voice or voice
+        result['actual_provider'] = actual_provider or provider
     else:
         result['ok'] = False
         result['error'] = error
@@ -1695,7 +2064,9 @@ def api_openapi():
                                  'input': {'type': 'string'},
                                  'voice': {'type': 'string'},
                                  'speed': {'type': 'number', 'default': 1.0},
-                                 'response_format': {'type': 'string', 'enum': ['mp3', 'wav', 'ogg']}
+                                 'response_format': {'type': 'string', 'enum': ['mp3', 'wav', 'ogg', 'aac', 'flac', 'pcm', 'opus']},
+                                 'stream_format': {'type': 'string', 'enum': ['audio', 'sse']},
+                                 'instructions': {'type': 'string', 'description': 'Style hint (Edge only)'},
                              },
                              'required': ['input', 'voice']
                          }}}},
@@ -1745,6 +2116,8 @@ def api_events():
             while True:
                 try:
                     msg = q.get(timeout=30)
+                    if msg is None:  # shutdown signal
+                        break
                     yield f'data: {msg}\n\n'
                 except queue.Empty:
                     yield ': keepalive\n\n'  # SSE comment as heartbeat
@@ -1910,6 +2283,69 @@ def api_voices_edge_live():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/voices/search', methods=['GET'])
+def api_voices_search():
+    """Search voices by keyword across all providers.
+    ?q=keyword  - search in voice name or ID
+    ?provider=edge  - optional filter by provider"""
+    q = request.args.get('q', '').strip().lower()
+    provider = request.args.get('provider', '').strip().lower()
+    if not q:
+        return _error_response('Missing search query (q parameter)', 400)
+    all_voices = []
+    catalogs = {'edge': EDGE_VOICES, 'doubao': DOUBAO_VOICES, 'tencent': TENCENT_VOICES,
+                'xiaomi': XIAOMI_VOICES, 'fishaudio': FISH_AUDIO_VOICES}
+    for prov, voices in catalogs.items():
+        if provider and prov != provider:
+            continue
+        for v in voices:
+            if q in v['id'].lower() or q in v['name'].lower():
+                all_voices.append({**v, 'provider': prov})
+    return jsonify({'results': all_voices, 'count': len(all_voices)})
+
+
+@app.route('/api/tts/preview', methods=['POST'])
+def api_tts_preview():
+    """Preview a voice with a fixed short text. For quick voice comparison.
+    POST {"voice": "zh-CN-XiaoxiaoNeural", "provider": "edge"}
+    Returns: {"audio": "base64", "size": 1234, "duration_estimate_ms": 2000}"""
+    key_err = _check_api_key()
+    if key_err:
+        return key_err
+    data = request.get_json(silent=True) or {}
+    voice = str(data.get('voice', '')).strip().replace('\r', '').replace('\n', '').replace('\x00', '')
+    if not voice:
+        return _error_response('Missing voice', 400)
+    # Resolve aliases
+    if voice not in _ALL_VOICE_IDS:
+        resolved = _VOICE_NAME_TO_ID.get(voice.lower())
+        if resolved:
+            voice = resolved
+    provider = data.get('provider', '').strip().lower()
+    if provider and provider not in ALL_PROVIDERS:
+        return _error_response(f'Unknown provider: {provider}', 400)
+    if not provider:
+        provider = resolve_provider(voice)
+    if not provider:
+        return _error_response(f'Cannot determine provider for voice: {voice}', 400)
+    preview_text = '你好，我是您的语音助手，很高兴认识您。'
+    audio, error, actual_provider, actual_voice = dispatch(provider, preview_text, voice, 0)
+    if audio:
+        final_provider = actual_provider or provider
+        final_voice = actual_voice or voice
+        update_stats(len(preview_text), final_provider, voice=final_voice)
+        # Rough duration estimate: MP3 at ~48kbps
+        duration_ms = int(len(audio) / 48 * 1000 / 8) if len(audio) > 0 else 0
+        return jsonify({
+            'audio': base64.b64encode(audio).decode(),
+            'size': len(audio),
+            'voice': final_voice,
+            'provider': final_provider,
+            'duration_estimate_ms': duration_ms,
+        })
+    return _error_response(f'Preview failed: {error}', 500)
+
+
 @app.route('/api/cache/stats', methods=['GET'])
 def api_cache_stats():
     with _audio_cache_lock:
@@ -1936,11 +2372,13 @@ def openai_speech():
 
     POST /v1/audio/speech
     {
-        "model": "tts-1",          // ignored, provider auto-detected from voice
+        "model": "tts-1",               // ignored, provider auto-detected from voice
         "input": "Hello world.",
         "voice": "zh-CN-XiaoxiaoNeural",
-        "response_format": "mp3",  // mp3 | wav | ogg (requires ffmpeg)
-        "speed": 1.0               // 0.25-4.0
+        "response_format": "mp3",        // mp3|wav|ogg|aac|flac|pcm|opus (non-mp3 requires ffmpeg)
+        "speed": 1.0,                    // 0.25-4.0
+        "stream_format": "audio",        // audio (default) | sse (Server-Sent Events streaming)
+        "instructions": "speak slowly"   // optional: prepended to text as style hint (Edge only)
     }
     """
     try:
@@ -1959,6 +2397,8 @@ def openai_speech():
         resp_format = str(data.get('response_format', 'mp3')).strip().lower()
         if resp_format not in _FORMAT_MIME:
             resp_format = 'mp3'
+        stream_format = str(data.get('stream_format', 'audio')).strip().lower()
+        instructions = str(data.get('instructions', '')).strip()
         try:
             speed = float(data.get('speed', 1.0))
         except (ValueError, TypeError):
@@ -1990,19 +2430,64 @@ def openai_speech():
         request._tts_voice = voice
         request._tts_chars = len(text)
 
+        # Check daily quota
+        quota_err = _check_daily_quota(client_ip, len(text))
+        if quota_err:
+            return quota_err
+
+        # Apply instructions as style hint (currently Edge TTS only)
+        style = None
+        if instructions and provider == 'edge':
+            style = instructions[:100]  # cap length to avoid abuse
+
         # Convert speed (0.25-4.0) to percentage (-75% to +300%)
         pct = (speed - 1.0) * 100
-        audio, error = dispatch(provider, text, voice, pct)
+
+        # SSE streaming mode (Edge TTS only; fallback to buffered for other providers)
+        if stream_format == 'sse' and provider == 'edge':
+            rate = f'+{int(round(pct))}%' if pct >= 0 else f'{int(round(pct))}%'
+            clean_text = _clean_text(text)
+            def _sse_generate():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    async def _collect():
+                        chunks = []
+                        comm = edge_tts.Communicate(clean_text, voice, rate=rate)
+                        async for chunk in comm.stream():
+                            if chunk['type'] == 'audio':
+                                chunks.append(chunk['data'])
+                        return chunks
+                    audio_chunks = loop.run_until_complete(_collect())
+                    for chunk in audio_chunks:
+                        b64 = base64.b64encode(chunk).decode()
+                        yield f'data: {json.dumps({"type": "audio_chunk", "data": b64})}\n\n'
+                    update_stats(len(clean_text), provider, voice=voice)
+                    yield f'data: {json.dumps({"type": "done"})}\n\n'
+                except Exception as e:
+                    log.error('SSE stream error: %s', e)
+                    yield f'data: {json.dumps({"type": "error", "message": str(e)})}\n\n'
+                finally:
+                    loop.close()
+            return Response(_sse_generate(), mimetype='text/event-stream',
+                            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+                                     'X-TTS-Provider': provider})
+
+        audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct, style=style)
 
         if audio:
-            update_stats(len(text), provider, voice=voice)
+            final_provider = actual_provider or provider
+            final_voice = actual_voice or voice
+            update_stats(len(text), final_provider, voice=final_voice)
             audio = _convert_audio(audio, resp_format)
             mime = _FORMAT_MIME.get(resp_format, 'audio/mpeg')
             log.info("OpenAI TTS OK: provider=%s voice=%s chars=%d size=%d fmt=%s",
-                     provider, voice, len(text), len(audio), resp_format)
+                     final_provider, final_voice, len(text), len(audio), resp_format)
             return Response(audio, mimetype=mime, headers={
                 'Content-Length': str(len(audio)),
                 'Content-Type': mime,
+                'X-TTS-Provider': final_provider,
+                'X-TTS-Voice': final_voice,
             })
         return Response(json.dumps({'error': {'message': f'TTS failed: {error}', 'type': 'server_error'}}),
                         status=500, mimetype='application/json')
@@ -2039,11 +2524,13 @@ def api_legado_config():
         # Auto-detect from request
         server = request.host_url.rstrip('/')
     rate = request.args.get('rate', '+0%').strip()
+    legado_url = (server + '/speech/stream,{"method":"POST","body":{"text":"{{speakText}}","voice":"' +
+                  voice + '","rate":"{{String(speakSpeed)}}' + rate + '"},"headers":{"Content-Type":"application/json"}}')
     legado_cfg = {
         "concurrentRate": "0",
         "contentType": "audio/mpeg",
         "name": f"TTS-{voice.split('-')[-1]}",
-        "url": f"{server}/speech/stream,{{\"method\":\"POST\",\"body\":{{\"text\":\"{{speakText}}\",\"voice\":\"{voice}\",\"rate\":\"{{String(speakSpeed)}}{rate}\"}},\"headers\":{{\"Content-Type\":\"application/json\"}}}}"
+        "url": legado_url
     }
     return jsonify(legado_cfg)
 
@@ -2065,7 +2552,8 @@ def api_legado_subscribe():
         "concurrentRate": "0",
         "contentType": "audio/mpeg",
         "name": f"TTS-{voice.split('-')[-1]}",
-        "url": f"{server}/speech/stream,{{\"method\":\"POST\",\"body\":{{\"text\":\"{{speakText}}\",\"voice\":\"{voice}\",\"rate\":\"{{String(speakSpeed)}}{rate}\"}},\"headers\":{{\"Content-Type\":\"application/json\"}}}}"
+        "url": (server + '/speech/stream,{"method":"POST","body":{"text":"{{speakText}}","voice":"' +
+                voice + '","rate":"{{String(speakSpeed)}}' + rate + '"},"headers":{"Content-Type":"application/json"}}')
     }
     encoded = b64.b64encode(json.dumps(legado_cfg, ensure_ascii=False).encode()).decode()
     subscribe_url = f"{server}/api/legado/subscribe?voice={voice}&auto=true"
@@ -2171,7 +2659,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
     <div class="card">
-        <div class="row"><h2>开源阅读配置</h2><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><label for="voice-search" style="font-weight:500">音色</label><input id="voice-search" placeholder="搜索音色..." oninput="filterVoices()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;width:120px"><select id="voice-select" onchange="updateLegadoConfig()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px"></select><button class="btn" onclick="previewVoice()" style="padding:4px 10px;font-size:12px">▶ 试听</button></div></div>
+        <div class="row"><h2>开源阅读配置</h2><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><label for="voice-search" style="font-weight:500">音色</label><input id="voice-search" placeholder="搜索音色..." oninput="filterVoices()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;width:120px"><select id="voice-select" onchange="updateLegadoConfig()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px"></select><button class="btn" onclick="previewVoice()" style="padding:4px 10px;font-size:12px">▶ 试听</button><button class="btn" onclick="showAllVoices()" style="padding:4px 10px;font-size:12px">🎵 全部试听</button></div></div>
         <p style="color:#666;margin-bottom:12px">复制以下配置到开源阅读的朗读引擎，即可使用上方选择的音色。</p>
         <div class="code" id="legado-config"></div>
         <div class="card" style="margin-top:16px"><h2>音色对比</h2><p style="font-size:13px;color:#666;margin:0 0 8px">输入文本，对比两个音色的效果</p><textarea id="compare-text" placeholder="输入对比文本..." style="width:100%;height:60px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;resize:vertical;box-sizing:border-box">今天天气真好，我们一起出去散步吧。</textarea><div style="display:flex;gap:12px;margin-top:8px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:200px"><label style="font-size:12px;color:#666">音色 A</label><select id="compare-a" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-top:2px"></select><audio id="audio-a" controls style="width:100%;margin-top:6px"></audio></div><div style="flex:1;min-width:200px"><label style="font-size:12px;color:#666">音色 B</label><select id="compare-b" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-top:2px"></select><audio id="audio-b" controls style="width:100%;margin-top:6px"></audio></div><button class="btn" onclick="compareVoices()" style="padding:6px 16px;align-self:flex-end">对比播放</button></div></div>
@@ -2243,7 +2731,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 document.addEventListener('DOMContentLoaded',()=>{
     const IP='{{ server_ip }}',cur='{{ provider }}';
     const dv={doubao:'{{ default_voice }}',tencent:'{{ tencent_voice }}',edge:'{{ edge_voice }}',xiaomi:'{{ xiaomi_voice }}'};
-    let stats={},prov=cur;
+    let stats={},prov=cur,_allVoiceOptions=[];
     const $=id=>document.getElementById(id);
     // Theme toggle
     window.toggleTheme=()=>{const d=document.documentElement;const dark=d.getAttribute('data-theme')==='dark';d.setAttribute('data-theme',dark?'light':'dark');$('theme-btn').textContent=dark?'🌙 暗色':'☀️ 亮色';localStorage.setItem('tts-theme',dark?'light':'dark')};
@@ -2269,7 +2757,7 @@ document.addEventListener('DOMContentLoaded',()=>{
             const mr=await fetch('/metrics');
             const mt=await mr.text();
             let totalChars=0,totalRequests=0,cacheHitRate=0,rtP95=0;
-            for(const line of mt.split('\n')){
+            for(const line of mt.split('\\n')){
                 if(line.startsWith('tts_chars_total ')) totalChars=parseInt(line.split(' ')[1])||0;
                 if(line.startsWith('tts_requests_total ')) totalRequests=parseInt(line.split(' ')[1])||0;
                 if(line.startsWith('tts_cache_hit_ratio ')) cacheHitRate=parseFloat(line.split(' ')[1])||0;
@@ -2282,9 +2770,10 @@ document.addEventListener('DOMContentLoaded',()=>{
         }catch(e){}
     };
 
-    const loadVoices=async p=>{try{const r=await fetch('/api/voices?provider='+p);const vs=await r.json();_allVoiceOptions=vs;const sel=$('voice-select');sel.innerHTML='';vs.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;if(v.id===dv[p])o.selected=true;sel.appendChild(o)});if($('voice-search'))$('voice-search').value='';updateLegadoConfig()}catch(e){}};
+    const loadVoices=async p=>{try{const r=await fetch('/api/voices?provider='+p);const vs=await r.json();_allVoiceOptions=vs;const sel=$('voice-select');sel.innerHTML='';vs.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;if(v.id===dv[p])o.selected=true;sel.appendChild(o)});if($('voice-search'))$('voice-search').value='';// also fill compare selects
+const fillSel=id=>{const s=$(id);if(!s)return;s.innerHTML='';vs.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;s.appendChild(o)})};fillSel('compare-a');fillSel('compare-b');if(vs.length>1&&$('compare-b'))$('compare-b').selectedIndex=1;updateLegadoConfig()}catch(e){console.warn('loadVoices error:',e)}};
 
-    window.updateLegadoConfig=()=>{const v=$('voice-select').value;if(!v)return;const q='"',lb=String.fromCharCode(123,123),rb=String.fromCharCode(125,125);$('legado-config').textContent='{\\n  "concurrentRate": "0",\\n  "contentType": "audio/mpeg",\\n  "name": "TTS服务",\\n  "url": "http://'+IP+'/speech/stream,{'+q+'method'+q+':'+q+'POST'+q+','+q+'body'+q+':{'+q+'text'+q+':'+q+lb+'speakText'+rb+q+','+q+'voice'+q+':'+q+v+q+','+q+'rate'+q+':'+q+lb+'String(speakSpeed)'+rb+'%'+q+'},'+q+'headers'+q+':{'+q+'Content-Type'+q+':'+q+'application/json'+q+'}}"\\n}'};
+    window.updateLegadoConfig=async()=>{const v=$('voice-select').value;if(!v)return;try{const r=await fetch('/api/legado/config?voice='+encodeURIComponent(v));const d=await r.json();$('legado-config').textContent=JSON.stringify(d,null,2)}catch(e){console.warn('updateLegadoConfig error:',e)}};
 
     window.copyConfig=async()=>{const t=$('legado-config').textContent;try{await navigator.clipboard.writeText(t);toast('已复制到剪切板')}catch(e){const a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);a.select();try{document.execCommand('copy');toast('已复制到剪切板')}catch(_){toast('复制失败')}document.body.removeChild(a)}};
     window.copySubscribeUrl=async()=>{const v=$('voice-select').value;if(!v){toast('请先选择音色');return}try{const r=await fetch('/api/legado/subscribe?voice='+encodeURIComponent(v));const d=await r.json();const u=d.url||window.location.origin+'/api/legado/subscribe?voice='+encodeURIComponent(v)+'&auto=true';await navigator.clipboard.writeText(u);toast('已复制订阅链接')}catch(e){toast('复制失败')}};
@@ -2297,8 +2786,6 @@ document.addEventListener('DOMContentLoaded',()=>{
 
     window.previewVoice=async()=>{const v=$('voice-select').value;if(!v){toast('请先选择音色');return}try{const r=await fetch('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'你好，我是您的朗读助手，很高兴认识您。',voice:v,rate:'0%'})});if(r.ok){const bl=await r.blob();const p=$('audio-player');if(p._u)URL.revokeObjectURL(p._u);p._u=URL.createObjectURL(bl);p.src=p._u;p.play()}else toast('试听失败')}catch(e){toast('试听失败: '+e.message)}};
     window.compareVoices=async()=>{const text=$('compare-text').value;const va=$('compare-a').value;const vb=$('compare-b').value;if(!text||!va||!vb){toast('请填写文本并选择两个音色');return}const synthesize=async(id,voice)=>{const r=await fetch('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,voice,rate:'0%'})});if(!r.ok)throw new Error('TTS failed');return URL.createObjectURL(await r.blob())};try{const [ua,ub]=await Promise.all([synthesize('a',va),synthesize('b',vb)]);$('audio-a').src=ua;$('audio-b').src=ub;toast('对比音频已加载')}catch(e){toast('对比失败: '+e.message)}};
-    const _origLoadVoices=window.loadVoices;window.loadVoices=async p=>{await _origLoadVoices(p);const opts=[..._allVoiceOptions];const fillSel=id=>{const sel=$(id);sel.innerHTML='';opts.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;sel.appendChild(o)})};fillSel('compare-a');fillSel('compare-b');if(opts.length>1)$('compare-b').selectedIndex=1};
-    let _allVoiceOptions=[];
     window.filterVoices=()=>{const q=$('voice-search').value.toLowerCase();const sel=$('voice-select');const cur=sel.value;sel.innerHTML='';_allVoiceOptions.filter(v=>!q||v.name.toLowerCase().includes(q)||v.id.toLowerCase().includes(q)).forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;if(v.id===cur)o.selected=true;sel.appendChild(o)});updateLegadoConfig()};
 
     window.testConfig=async()=>{const b=$('test-cfg-btn');b.disabled=true;b.textContent='测试中...';try{const r=await fetch('/api/config/test',{method:'POST'});const d=await r.json();toast(d.ok?'✅ 连接成功！'+(d.audio_size||0)+'字节':'❌ 失败: '+(d.error||'未知'))}catch(e){toast('请求错误: '+e.message)}finally{b.disabled=false;b.textContent='测试连接'}};
@@ -2315,8 +2802,81 @@ document.addEventListener('DOMContentLoaded',()=>{
     fetch('/api/config').then(r=>r.json()).then(c=>{if(c.provider_status){const s=c.provider_status;setStatus($('doubao-status'),s.doubao?.ready);setStatus($('tencent-status'),s.tencent?.ready);setStatus($('xiaomi-status'),s.xiaomi?.ready);setStatus($('fishaudio-status'),s.fishaudio?.ready)}}).catch(()=>{});
     // SSE real-time activity feed
     try{const es=new EventSource('/api/events');const feed=document.createElement('div');feed.id='live-feed';feed.style.cssText='max-height:200px;overflow-y:auto;font-family:monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:12px';const h=document.createElement('h3');h.textContent='📡 实时活动';h.style.cssText='margin:0 0 8px';feed.prepend(h);const main=document.querySelector('.container');if(main)main.appendChild(feed);es.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='tts_request'){const line=document.createElement('div');const ok=d.status>=200&&d.status<300;line.style.color=ok?'#4caf50':'#f44336';line.textContent=`[${d.ts?.split('T')[1]?.split('.')[0]||''}] ${d.provider||'?'} ${d.voice||''} ${d.chars}字 ${d.ms}ms ${d.status}`;feed.appendChild(line);if(feed.children.length>52)feed.removeChild(feed.children[1]);feed.scrollTop=feed.scrollHeight}}catch(ex){}};es.onerror=()=>{}}catch(ex){}
+
+    // 全部音色试听功能
+    window.showAllVoices=()=>{
+        // 创建模态框
+        const modal=document.createElement('div');
+        modal.id='voice-modal';
+        modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px';
+        modal.onclick=(e)=>{if(e.target===modal)modal.remove()};
+        // 内容容器
+        const content=document.createElement('div');
+        content.style.cssText='background:var(--card);border-radius:12px;width:100%;max-width:900px;max-height:80vh;overflow:auto;padding:20px';
+        // 头部
+        const header=document.createElement('div');
+        header.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)';
+        header.innerHTML='<h2 style="margin:0">所有音色试听</h2><button style="background:none;border:none;font-size:24px;cursor:pointer;color:var(--text)">×</button>';
+        header.querySelector('button').onclick=()=>modal.remove();
+        content.appendChild(header);
+        // 搜索框
+        const search=document.createElement('input');
+        search.placeholder='搜索音色...';
+        search.style.cssText='width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-bottom:16px';
+        content.appendChild(search);
+        // 音色网格
+        const grid=document.createElement('div');
+        grid.style.cssText='display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px';
+        // 播放音频的全局元素
+        let currentAudio=null;
+        // 生成所有音色卡片
+        _allVoiceOptions.forEach(v=>{
+            const card=document.createElement('div');
+            card.style.cssText='border:1px solid var(--border);border-radius:8px;padding:12px;display:flex;justify-content:space-between;align-items:center';
+            card.innerHTML=`<span style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v.name}</span><button class="btn" style="padding:4px 8px;font-size:12px">▶ 试听</button>`;
+            const btn=card.querySelector('button');
+            btn.onclick=async()=>{
+                btn.disabled=true;
+                btn.textContent='⏳ 加载中...';
+                try{
+                    if(currentAudio){
+                        currentAudio.pause();
+                        currentAudio.src='';
+                    }
+                    const r=await fetch('/speech/stream',{
+                        method:'POST',
+                        headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({text:'你好，我是这个音色的朗读效果。',voice:v.id,rate:'0%'})
+                    });
+                    if(r.ok){
+                        const bl=await r.blob();
+                        const audio=new Audio(URL.createObjectURL(bl));
+                        currentAudio=audio;
+                        audio.play();
+                        btn.textContent='⏸ 播放中';
+                        audio.onended=()=>{btn.textContent='▶ 试听'};
+                    }else toast('试听失败');
+                }catch(e){toast('试听失败: '+e.message)}finally{
+                    btn.disabled=false;
+                }
+            };
+            grid.appendChild(card);
+        });
+        // 搜索过滤
+        search.oninput=()=>{
+            const q=search.value.toLowerCase();
+            Array.from(grid.children).forEach((card,i)=>{
+                const v=_allVoiceOptions[i];
+                card.style.display=q&&!v.name.toLowerCase().includes(q)&&!v.id.toLowerCase().includes(q)?'none':'flex';
+            });
+        };
+        content.appendChild(grid);
+        modal.appendChild(content);
+        document.body.appendChild(modal);
+    };
 });
 </script>
+<!-- 模态框样式已经内联在JS里 -->
 </body>
 </html>"""
 
@@ -2385,6 +2945,12 @@ def batch_speech():
             return Response(json.dumps({'error': {'message': f'Unknown voice: {voice}', 'type': 'invalid_request_error'}}),
                             status=400, mimetype='application/json')
 
+        # Check daily quota (estimate total chars)
+        total_input_chars = sum(len(str(t or '')) for t in texts)
+        quota_err = _check_daily_quota(client_ip, total_input_chars)
+        if quota_err:
+            return quota_err
+
         pct = parse_rate(rate)
         results = []
         total_chars = 0
@@ -2398,18 +2964,25 @@ def batch_speech():
                 results.append({'text': text, 'audio': None, 'error': 'Empty text'})
                 continue
             try:
-                audio, error = dispatch(provider, text, voice, pct)
+                audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct)
                 if audio:
                     total_chars += len(text)
                     audio = _convert_audio(audio, resp_format)
                     results.append({'text': text, 'audio': base64.b64encode(audio).decode('utf-8'), 'error': None})
+                    # Track actual provider/voice in case of fallback (all requests will have same fallback)
+                    if actual_provider:
+                        final_batch_provider = actual_provider
+                        final_batch_voice = actual_voice
                 else:
                     results.append({'text': text, 'audio': None, 'error': error})
             except Exception as e:
                 results.append({'text': text, 'audio': None, 'error': str(e)})
 
         if total_chars > 0:
-            update_stats(total_chars, provider, voice=voice)
+            # Use actual provider/voice for stats in case of fallback
+            stats_provider = final_batch_provider if 'final_batch_provider' in locals() else provider
+            stats_voice = final_batch_voice if 'final_batch_voice' in locals() else voice
+            update_stats(total_chars, stats_provider, voice=stats_voice)
 
         return jsonify({'results': results})
     except Exception as e:
@@ -2421,12 +2994,11 @@ def batch_speech():
 def _graceful_shutdown():
     """Flush stats and clean up on shutdown."""
     log.info("Shutting down gracefully...")
-    # Save current stats
+    # Save current stats (outside of metrics lock to avoid deadlock)
     try:
-        with _metrics_lock:
-            stats = _read_json(STATS_FILE, {})
-            stats['_last_shutdown'] = datetime.now().isoformat()
-            _write_json(STATS_FILE, stats)
+        stats = _read_json(STATS_FILE, {})
+        stats['_last_shutdown'] = datetime.now().isoformat()
+        _write_json(STATS_FILE, stats)
     except Exception as e:
         log.warning("Failed to save stats on shutdown: %s", e)
     # Close SSE subscribers
@@ -2437,6 +3009,8 @@ def _graceful_shutdown():
             except Exception:
                 pass
         _sse_subscribers.clear()
+    # Flush edge executor
+    _shutdown_edge_executor()
     log.info("Shutdown complete.")
 
 atexit.register(_graceful_shutdown)

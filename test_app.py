@@ -198,40 +198,70 @@ class TestDispatch:
 
     def test_dispatch_unknown_provider(self):
         from app import dispatch
-        audio, error = dispatch('unknown', 'test', 'test', 0)
-        assert audio is None
-        assert 'Unknown provider' in error
+        import app as app_module
+        orig = app_module.FALLBACK_TO_EDGE
+        app_module.FALLBACK_TO_EDGE = False
+        try:
+            audio, error, _, __ = dispatch('unknown', 'test', 'test', 0)
+            assert audio is None
+            assert 'Unknown provider' in error
+        finally:
+            app_module.FALLBACK_TO_EDGE = orig
 
     def test_dispatch_edge_no_network(self):
         """Edge TTS should work (free, no API key)."""
         from app import dispatch
-        audio, error = dispatch('edge', '你好', 'zh-CN-XiaoxiaoNeural', 0)
+        audio, error, _, __ = dispatch('edge', '你好', 'zh-CN-XiaoxiaoNeural', 0)
         assert audio is not None, f"Edge TTS failed: {error}"
         assert len(audio) > 0
 
     def test_dispatch_doubao_no_config(self):
         from app import dispatch
-        audio, error = dispatch('doubao', 'test', 'zh_female_cancan_mars_bigtts', 0)
-        assert audio is None
-        assert '未配置' in error
+        import app as app_module
+        orig = app_module.FALLBACK_TO_EDGE
+        app_module.FALLBACK_TO_EDGE = False
+        try:
+            audio, error, _, __ = dispatch('doubao', 'test', 'zh_female_cancan_mars_bigtts', 0)
+            assert audio is None
+            assert '未配置' in error
+        finally:
+            app_module.FALLBACK_TO_EDGE = orig
 
     def test_dispatch_tencent_no_config(self):
         from app import dispatch
-        audio, error = dispatch('tencent', 'test', '501002', 0)
-        assert audio is None
-        assert '未配置' in error
+        import app as app_module
+        orig = app_module.FALLBACK_TO_EDGE
+        app_module.FALLBACK_TO_EDGE = False
+        try:
+            audio, error, _, __ = dispatch('tencent', 'test', '501002', 0)
+            assert audio is None
+            assert '未配置' in error
+        finally:
+            app_module.FALLBACK_TO_EDGE = orig
 
     def test_dispatch_xiaomi_no_config(self):
         from app import dispatch
-        audio, error = dispatch('xiaomi', 'test', 'mimo_default', 0)
-        assert audio is None
-        assert '未配置' in error
+        import app as app_module
+        orig = app_module.FALLBACK_TO_EDGE
+        app_module.FALLBACK_TO_EDGE = False
+        try:
+            audio, error, _, __ = dispatch('xiaomi', 'test', 'mimo_default', 0)
+            assert audio is None
+            assert '未配置' in error
+        finally:
+            app_module.FALLBACK_TO_EDGE = orig
 
     def test_dispatch_fishaudio_no_config(self):
         from app import dispatch
-        audio, error = dispatch('fishaudio', 'test', 'fish-animated', 0)
-        assert audio is None
-        assert '未配置' in error
+        import app as app_module
+        orig = app_module.FALLBACK_TO_EDGE
+        app_module.FALLBACK_TO_EDGE = False
+        try:
+            audio, error, _, __ = dispatch('fishaudio', 'test', 'fish-animated', 0)
+            assert audio is None
+            assert '未配置' in error
+        finally:
+            app_module.FALLBACK_TO_EDGE = orig
 
 
 class TestXiaomiStyle:

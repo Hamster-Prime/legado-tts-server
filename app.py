@@ -222,6 +222,7 @@ AUDIO_CACHE_MAX_MB = int(os.environ.get('AUDIO_CACHE_MAX_MB', '200'))  # max cac
 CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', '500'))  # chars per chunk for long text
 RATE_LIMIT_RPM = int(os.environ.get('RATE_LIMIT_RPM', '120'))  # requests per minute, 0=unlimited
 RATE_LIMIT_WHITELIST = set(filter(None, os.environ.get('RATE_LIMIT_WHITELIST', '127.0.0.1,::1').split(',')))
+DAILY_CHAR_QUOTA = int(os.environ.get('DAILY_CHAR_QUOTA', '0'))  # daily char limit per IP, 0=unlimited
 ADMIN_TOKEN = os.environ.get('ADMIN_TOKEN', '')  # protect config/stats/cache endpoints
 API_KEYS = set(filter(None, os.environ.get('API_KEYS', '').split(',')))  # optional: restrict TTS access
 API_KEYS_REQUIRED = os.environ.get('API_KEYS_REQUIRED', '0') == '1'  # require API key for TTS
@@ -253,6 +254,8 @@ _audio_cache_bytes = 0  # total bytes in cache
 _rate_limits: dict = {}  # ip -> list of timestamps
 _rate_lock = threading.Lock()
 _rate_limits_cleanup = 0  # counter to periodically clean up stale IPs
+_daily_char_usage = {}  # {ip: {date: chars}}
+_daily_char_lock = threading.Lock()
 
 
 def _cache_get(key):
@@ -461,6 +464,32 @@ def _check_api_key():
         if ADMIN_TOKEN and key == ADMIN_TOKEN:
             return None
         return _error_response('Invalid or missing API key', 401, 'authentication_error')
+    return None
+
+
+def _check_daily_quota(ip, chars):
+    """Check and update daily character quota. Returns error Response or None."""
+    if DAILY_CHAR_QUOTA <= 0:
+        return None
+    today = datetime.now().strftime('%Y-%m-%d')
+    with _daily_char_lock:
+        usage = _daily_char_usage.get(ip, {})
+        current = usage.get(today, 0)
+        if current + chars > DAILY_CHAR_QUOTA:
+            remaining = max(0, DAILY_CHAR_QUOTA - current)
+            return Response(
+                json.dumps({'error': {'message': f'Daily quota exceeded ({DAILY_CHAR_QUOTA} chars/day)',
+                                 'type': 'quota_exceeded', 'remaining': remaining}}),
+                status=429, mimetype='application/json',
+                headers={'X-DailyQuota-Limit': str(DAILY_CHAR_QUOTA),
+                         'X-DailyQuota-Remaining': str(remaining),
+                         'Retry-After': '86400'})
+        usage[today] = current + chars
+        _daily_char_usage[ip] = usage
+        # Clean old dates
+        old = [d for d in usage if d != today]
+        for d in old:
+            del usage[d]
     return None
 
 
@@ -1375,6 +1404,10 @@ def speech_stream():
         request._tts_provider = provider
         request._tts_voice = voice
         request._tts_chars = len(text)
+
+        quota_err = _check_daily_quota(client_ip, len(text))
+        if quota_err:
+            return quota_err
 
         pct = parse_rate(data.get('rate', '0%'))
         audio, error = dispatch(provider, text, voice, pct, style=style, volume=volume, pitch=pitch)

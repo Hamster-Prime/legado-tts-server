@@ -1373,3 +1373,24 @@ class TestEdgeCases:
         assert data['openapi'] == '3.0.0'
         assert 'paths' in data
         assert '/speech/stream' in data['paths']
+
+
+class TestAPIKeys:
+    """Test API key authentication."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        import app as app_module
+        self.app = app_module.app
+        self.app.config['TESTING'] = True
+        self.client = self.app.test_client()
+
+    def test_no_key_required_by_default(self):
+        """API keys should not be required by default."""
+        import app as app_module
+        assert app_module.API_KEYS_REQUIRED is False
+
+    def test_rate_limit_whitelist_bypass(self):
+        """Whitelisted IPs should bypass rate limiting."""
+        import app as app_module
+        assert '127.0.0.1' in app_module.RATE_LIMIT_WHITELIST

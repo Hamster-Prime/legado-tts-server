@@ -658,7 +658,7 @@ def load_stats():
     return data
 
 
-def _apply_stats_update(stats, chars, provider):
+def _apply_stats_update(stats, chars, provider, voice=None):
     ps = stats.get(provider, _new_provider_stats())
     ps['total_chars'] = ps.get('total_chars', 0) + chars
     ps['total_requests'] = ps.get('total_requests', 0) + 1
@@ -671,11 +671,23 @@ def _apply_stats_update(stats, chars, provider):
     else:
         history.append({'date': today, 'chars': chars, 'requests': 1})
     ps['history'] = history[-30:]
+    # Per-voice stats (top 20 voices)
+    if voice:
+        voice_stats = ps.get('voice_stats', {})
+        vs = voice_stats.get(voice, {'chars': 0, 'requests': 0})
+        vs['chars'] = vs.get('chars', 0) + chars
+        vs['requests'] = vs.get('requests', 0) + 1
+        voice_stats[voice] = vs
+        # Keep only top 20 voices by request count
+        if len(voice_stats) > 20:
+            sorted_vs = sorted(voice_stats.items(), key=lambda x: x[1].get('requests', 0), reverse=True)
+            voice_stats = dict(sorted_vs[:20])
+        ps['voice_stats'] = voice_stats
     stats[provider] = ps
     return stats
 
 
-def _update_stats_with_retry(chars, provider, retries=3, delay=0.1):
+def _update_stats_with_retry(chars, provider, voice=None, retries=3, delay=0.1):
     for attempt in range(1, retries + 1):
         try:
             stats = load_stats()
@@ -688,7 +700,7 @@ def _update_stats_with_retry(chars, provider, retries=3, delay=0.1):
             time.sleep(delay * attempt)
 
 
-def update_stats(chars, provider):
+def update_stats(chars, provider, voice=None):
     if not provider:
         return
     with _metrics_lock:
@@ -698,7 +710,7 @@ def update_stats(chars, provider):
         if parent:
             os.makedirs(parent, exist_ok=True)
         if fcntl is None:
-            _update_stats_with_retry(chars, provider)
+            _update_stats_with_retry(chars, provider, voice=voice)
             return
         with open(STATS_FILE, 'a+', encoding='utf-8') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
@@ -709,7 +721,7 @@ def update_stats(chars, provider):
                     stats = json.loads(raw) if raw.strip() else {}
                 except (json.JSONDecodeError, ValueError):
                     stats = {}
-                stats = _apply_stats_update(stats, chars, provider)
+                stats = _apply_stats_update(stats, chars, provider, voice=voice)
                 f.seek(0)
                 f.truncate()
                 json.dump(stats, f, indent=2, ensure_ascii=False)
@@ -1255,7 +1267,7 @@ def speech_stream():
         audio, error = dispatch(provider, text, voice, pct)
 
         if audio:
-            update_stats(len(text), provider)
+            update_stats(len(text), provider, voice=voice)
             log.info("TTS OK: provider=%s voice=%s chars=%d size=%d",
                      provider, voice, len(text), len(audio))
             return Response(audio, mimetype='audio/mpeg', headers={
@@ -1589,6 +1601,27 @@ def api_stats():
     return jsonify(load_stats())
 
 
+@app.route('/api/stats/summary', methods=['GET'])
+def api_stats_summary():
+    """High-level stats summary with top voices per provider."""
+    stats = load_stats()
+    summary = []
+    for prov in ALL_PROVIDERS:
+        ps = stats.get(prov, {})
+        top_voices = []
+        voice_stats = ps.get('voice_stats', {})
+        if voice_stats:
+            sorted_v = sorted(voice_stats.items(), key=lambda x: x[1].get('requests', 0), reverse=True)
+            top_voices = [{'voice': v, 'requests': s.get('requests', 0), 'chars': s.get('chars', 0)} for v, s in sorted_v[:5]]
+        summary.append({
+            'provider': prov,
+            'total_requests': ps.get('total_requests', 0),
+            'total_chars': ps.get('total_chars', 0),
+            'top_voices': top_voices,
+        })
+    return jsonify({'providers': summary})
+
+
 @app.route('/api/voices', methods=['GET'])
 def api_voices():
     p = request.args.get('provider', 'edge')
@@ -1714,7 +1747,7 @@ def openai_speech():
         audio, error = dispatch(provider, text, voice, pct)
 
         if audio:
-            update_stats(len(text), provider)
+            update_stats(len(text), provider, voice=voice)
             audio = _convert_audio(audio, resp_format)
             mime = _FORMAT_MIME.get(resp_format, 'audio/mpeg')
             log.info("OpenAI TTS OK: provider=%s voice=%s chars=%d size=%d fmt=%s",
@@ -2122,7 +2155,7 @@ def batch_speech():
                 results.append({'text': text, 'audio': None, 'error': str(e)})
 
         if total_chars > 0:
-            update_stats(total_chars, provider)
+            update_stats(total_chars, provider, voice=voice)
 
         return jsonify({'results': results})
     except Exception as e:

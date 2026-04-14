@@ -868,15 +868,18 @@ def synthesize_tencent(text, voice, speed=0):
         return None, str(e)
 
 
-def synthesize_edge(text, voice, rate='+0%', style=None):
+def synthesize_edge(text, voice, rate='+0%', style=None, volume='+0%', pitch='+0Hz'):
     async def _synth():
         if ALLOW_SSML and text.strip().startswith('<speak'):
-            # SSML mode: rate/style parameters are ignored, controlled via SSML tags
             comm = edge_tts.Communicate(text, voice)
         else:
             kwargs = {'rate': rate}
             if style:
                 kwargs['style'] = style
+            if volume != '+0%':
+                kwargs['volume'] = volume
+            if pitch != '+0Hz':
+                kwargs['pitch'] = pitch
             comm = edge_tts.Communicate(text, voice, **kwargs)
         buf = io.BytesIO()
         async for chunk in comm.stream():
@@ -1118,7 +1121,7 @@ def _apply_pronunciation_dict(text):
     return text
 
 
-def dispatch(provider, text, voice, pct, style=None):
+def dispatch(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz'):
     """Route to the correct TTS provider and return (audio_bytes, error).
     When FALLBACK_TO_EDGE is enabled and a non-edge provider fails,
     automatically retry with Edge TTS using a default Chinese voice."""
@@ -1126,7 +1129,7 @@ def dispatch(provider, text, voice, pct, style=None):
     if not text:
         return None, 'Text is empty after cleaning'
 
-    audio, err = _dispatch_impl(provider, text, voice, pct, style=style)
+    audio, err = _dispatch_impl(provider, text, voice, pct, style=style, volume=volume, pitch=pitch)
     if audio:
         return audio, None
 
@@ -1151,24 +1154,24 @@ def dispatch(provider, text, voice, pct, style=None):
     return None, err
 
 
-def _dispatch_impl(provider, text, voice, pct, style=None):
+def _dispatch_impl(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz'):
     """Internal dispatch without fallback."""
     # Auto-chunk long text
     chunks = _split_text_chunks(text)
     if len(chunks) == 1:
-        return _dispatch_single(provider, text, voice, pct, style=style)
+        return _dispatch_single(provider, text, voice, pct, style=style, volume=volume, pitch=pitch)
 
     # Multi-chunk synthesis
     segments = []
     for i, chunk in enumerate(chunks):
-        audio, err = _dispatch_single(provider, chunk, voice, pct, style=style)
+        audio, err = _dispatch_single(provider, chunk, voice, pct, style=style, volume=volume, pitch=pitch)
         if not audio:
             return None, f'Chunk {i+1}/{len(chunks)} failed: {err}'
         segments.append(audio)
     return _concat_mp3(segments), None
 
 
-def _dispatch_single(provider, text, voice, pct, style=None):
+def _dispatch_single(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz'):
     """Dispatch a single chunk to the correct TTS provider."""
     cache_key = (provider, text, voice, int(pct))
     cached = _cache_get(cache_key)
@@ -1179,7 +1182,7 @@ def _dispatch_single(provider, text, voice, pct, style=None):
         return cached, None
     if provider == 'edge':
         rate = f'+{int(pct)}%' if pct >= 0 else f'{int(pct)}%'
-        audio, err = synthesize_edge(text, voice, rate, style=style)
+        audio, err = synthesize_edge(text, voice, rate, style=style, volume=volume, pitch=pitch)
     elif provider == 'tencent':
         audio, err = synthesize_tencent(text, voice, max(-2, min(6, pct / 50)))
     elif provider == 'doubao':
@@ -1336,6 +1339,8 @@ def speech_stream():
         text = str(data.get('text', '')).strip()
         voice = str(data.get('voice', '')).strip().replace('\r', '').replace('\n', '').replace('\x00', '')
         style = str(data.get('style', '')).strip() or None
+        volume = str(data.get('volume', '+0%')).strip()
+        pitch = str(data.get('pitch', '+0Hz')).strip()
         if not text:
             return Response('Missing text', status=400)
         if not voice:
@@ -1357,7 +1362,7 @@ def speech_stream():
         request._tts_chars = len(text)
 
         pct = parse_rate(data.get('rate', '0%'))
-        audio, error = dispatch(provider, text, voice, pct, style=style)
+        audio, error = dispatch(provider, text, voice, pct, style=style, volume=volume, pitch=pitch)
 
         if audio:
             update_stats(len(text), provider, voice=voice)

@@ -1443,3 +1443,28 @@ class TestVoiceFavorites:
         self.client.post('/api/favorites', json={'voice': 'zh-CN-YunxiNeural'})
         count2 = self.client.get('/api/favorites').get_json()['count']
         assert count1 == count2
+
+
+class TestStreaming:
+    """Test chunked streaming endpoint."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        import app as app_module
+        self.app = app_module.app
+        self.app.config['TESTING'] = True
+        self.client = self.app.test_client()
+
+    def test_chunked_missing_text(self):
+        r = self.client.post('/speech/stream/chunked', json={'voice': 'zh-CN-XiaoxiaoNeural'})
+        assert r.status_code == 400
+
+    def test_chunked_missing_voice(self):
+        r = self.client.post('/speech/stream/chunked', json={'text': 'test'})
+        assert r.status_code == 400
+
+    def test_chunked_unknown_voice(self):
+        r = self.client.post('/speech/stream/chunked', json={
+            'text': 'test', 'voice': 'invalid-voice-xyz'
+        })
+        assert r.status_code == 400

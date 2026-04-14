@@ -113,11 +113,26 @@ def _audit_record(method, path, status, provider=None, voice=None, chars=0, ms=0
 # ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+LOG_JSON = os.environ.get('LOG_JSON', '0') == '1'
+
+if LOG_JSON:
+    class _JsonFormatter(logging.Formatter):
+        def format(self, record):
+            return json.dumps({
+                'ts': self.formatTime(record),
+                'level': record.levelname,
+                'msg': record.getMessage(),
+                'module': record.module,
+            }, ensure_ascii=False)
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(_JsonFormatter())
+    logging.basicConfig(level=logging.INFO, handlers=[_handler])
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
 log = logging.getLogger('tts-server')
 
 # ──────────────────────────────────────────────
@@ -200,6 +215,8 @@ RATE_LIMIT_RPM = int(os.environ.get('RATE_LIMIT_RPM', '120'))  # requests per mi
 ADMIN_TOKEN = os.environ.get('ADMIN_TOKEN', '')  # protect config/stats/cache endpoints
 ALLOW_SSML = os.environ.get('ALLOW_SSML', '1') == '1'  # allow SSML input
 FALLBACK_TO_EDGE = os.environ.get('FALLBACK_TO_EDGE', '1') == '1'  # auto-fallback to Edge on failure
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')  # optional webhook for error notifications
+WEBHOOK_EVENTS = os.environ.get('WEBHOOK_EVENTS', 'error')  # comma-separated: error,synthesis,startup
 REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))  # seconds per provider request
 
 if LOG_LEVEL != 'INFO':
@@ -377,6 +394,27 @@ atexit.register(_shutdown_edge_executor)
 # ──────────────────────────────────────────────
 # Admin auth helper
 # ──────────────────────────────────────────────
+
+def _send_webhook(event_type, data):
+    """Send webhook notification in background thread."""
+    if not WEBHOOK_URL:
+        return
+    events = [e.strip() for e in WEBHOOK_EVENTS.split(',')]
+    if event_type not in events:
+        return
+    def _do_send():
+        try:
+            payload = {
+                'event': event_type,
+                'timestamp': datetime.now().isoformat(),
+                'version': __version__,
+                'data': data,
+            }
+            _http_session.post(WEBHOOK_URL, json=payload, timeout=(5, 10))
+        except Exception as e:
+            log.debug('Webhook send failed: %s', e)
+    threading.Thread(target=_do_send, daemon=True).start()
+
 
 def _error_response(message, status=400, error_type='invalid_request_error'):
     """Return standardized error JSON response."""
@@ -1041,6 +1079,14 @@ def dispatch(provider, text, voice, pct):
     audio, err = _dispatch_impl(provider, text, voice, pct)
     if audio:
         return audio, None
+
+    # Send error webhook notification
+    _send_webhook('error', {
+        'provider': provider,
+        'voice': voice,
+        'error': str(err),
+        'text_length': len(text),
+    })
 
     # Fallback to Edge TTS if enabled and primary provider is not edge
     if FALLBACK_TO_EDGE and provider != 'edge':

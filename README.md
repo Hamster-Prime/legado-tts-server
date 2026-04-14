@@ -4,7 +4,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![Version](https://img.shields.io/badge/version-1.6.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.7.0-green.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
 
@@ -67,6 +67,11 @@ docker run -d --name legado-tts -p 80:80 -v tts-data:/opt/doubao-tts legado-tts
 docker compose up -d
 ```
 
+### Gunicorn (生产)
+```bash
+gunicorn -c gunicorn.conf.py app:app
+```
+
 ### Systemd
 ```bash
 sudo cp legado-tts.service /etc/systemd/system/
@@ -91,6 +96,10 @@ sudo systemctl enable --now legado-tts
 | `FALLBACK_TO_EDGE` | `1` | 启用自动故障转移(1=是/0=否) |
 | `REQUEST_TIMEOUT` | `30` | 单次Provider请求超时(秒) |
 | `AUDIT_LOG_SIZE` | `200` | 审计日志保留条数 |
+| `WEBHOOK_URL` | `""` | Webhook通知URL(可选) |
+| `WEBHOOK_EVENTS` | `error` | Webhook事件类型(逗号分隔) |
+| `LOG_JSON` | `0` | 启用JSON结构化日志(1=是) |
+| `USE_GUNICORN` | `1` | Docker中使用gunicorn(1=是/0=否) |
 
 ---
 

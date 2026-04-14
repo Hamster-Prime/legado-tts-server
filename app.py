@@ -1377,6 +1377,66 @@ def speech_stream():
         return Response(f'Error: {e}', status=500)
 
 
+@app.route('/speech/stream/chunked', methods=['POST'])
+def speech_stream_chunked():
+    """True streaming TTS: returns audio chunks as they are generated (Edge TTS only).
+    Other providers fall back to full response."""
+    try:
+        client_ip = request.remote_addr or 'unknown'
+        if _check_rate_limit(client_ip):
+            return Response('Rate limit exceeded', status=429, headers={'Retry-After': '60'})
+        key_err = _check_api_key()
+        if key_err:
+            return key_err
+        data = request.get_json(silent=True) or {}
+        text = str(data.get('text', '')).strip()
+        voice = str(data.get('voice', '')).strip().replace('\r', '').replace('\n', '').replace('\x00', '')
+        if not text or not voice:
+            return _error_response('Missing text or voice', 400)
+        if len(text) > MAX_TEXT_LENGTH:
+            return _error_response(f'Text too long (max {MAX_TEXT_LENGTH})', 400)
+        resolved = _VOICE_NAME_TO_ID.get(voice.lower())
+        if resolved:
+            voice = resolved
+        provider = resolve_provider(voice)
+        if not provider:
+            return _error_response(f'Unknown voice: {voice}', 400)
+        request._tts_provider = provider
+        request._tts_voice = voice
+        request._tts_chars = len(text)
+        pct = parse_rate(data.get('rate', '0%'))
+        if provider == 'edge':
+            rate = f'+{int(pct)}%' if pct >= 0 else f'{int(pct)}%'
+            text = _clean_text(text)
+            def generate():
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    comm = edge_tts.Communicate(text, voice, rate=rate)
+                    async def _stream():
+                        async for chunk in comm.stream():
+                            if chunk['type'] == 'audio':
+                                yield chunk['data']
+                    for chunk_data in loop.run_until_complete(_stream()):
+                        yield chunk_data
+                    loop.close()
+                    update_stats(len(text), provider, voice=voice)
+                except Exception as e:
+                    log.error('Chunked stream error: %s', e)
+            return Response(generate(), mimetype='audio/mpeg', headers={
+                'X-TTS-Provider': provider, 'Transfer-Encoding': 'chunked',
+            })
+        else:
+            audio, error = dispatch(provider, text, voice, pct)
+            if audio:
+                update_stats(len(text), provider, voice=voice)
+                return Response(audio, mimetype='audio/mpeg')
+            return _error_response(f'TTS failed: {error}', 502)
+    except Exception as e:
+        log.error('Chunked TTS error: %s', e)
+        return _error_response(str(e), 500)
+
+
 @app.route('/api/config', methods=['GET', 'POST'])
 def api_config():
     err = _check_admin()

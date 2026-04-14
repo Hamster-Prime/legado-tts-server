@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 WORKDIR /app
 
 COPY --from=builder /install /usr/local
-COPY app.py .
+COPY app.py gunicorn.conf.py ./
 COPY legado-tts.service /etc/init.d/legado-tts 2>/dev/null || true
 
 RUN mkdir -p /opt/doubao-tts && chmod 777 /opt/doubao-tts
@@ -24,10 +24,15 @@ ENV CONFIG_FILE=/opt/doubao-tts/config.json \
     MAX_TEXT_LENGTH=5000 \
     CHUNK_SIZE=500 \
     AUDIO_CACHE_SIZE=100 \
+    AUDIO_CACHE_MAX_MB=200 \
     RATE_LIMIT_RPM=120 \
-    PORT=80
+    FALLBACK_TO_EDGE=1 \
+    REQUEST_TIMEOUT=30 \
+    ALLOW_SSML=1 \
+    PORT=80 \
+    USE_GUNICORN=1
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:80/health')"
 
-CMD ["python3", "-u", "app.py"]
+CMD ["sh", "-c", "if [ \"${USE_GUNICORN}\" = \"1\" ] && command -v gunicorn >/dev/null 2>&1; then exec gunicorn -c gunicorn.conf.py app:app; else exec python3 -u app.py; fi"]

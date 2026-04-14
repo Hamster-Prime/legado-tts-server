@@ -2,3 +2,4 @@ flask>=2.0
 flask-cors>=3.0
 requests>=2.25
 edge-tts>=6.1
+gunicorn>=21.2

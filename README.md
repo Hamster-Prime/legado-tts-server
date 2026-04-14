@@ -1,10 +1,11 @@
-# 📖 Legado TTS Server
+# Legado TTS Server
 
 <div align="center">
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.7.0-green.svg)
+![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
 
@@ -12,49 +13,72 @@
 
 ---
 
-## ✨ 特性
+## 特性
 
-- **🎯 多源聚合**：Edge TTS (免费)、火山引擎、腾讯云、小米MiMo、Fish Audio
-- **🧠 智能路由**：单一接口，根据音色参数自动分发
-- **🔗 OpenAI 兼容**：`/v1/audio/speech` + `/v1/models`，支持 MP3/WAV/OGG 输出
-- **📦 长文本分块**：自动按句子边界拆分，逐段合成再拼接
-- **🔊 SSML 支持**：Edge TTS 原生 SSML 1.0 语法（可通过 `ALLOW_SSML` 关闭）
-- **📦 批量合成**：`/api/speech/batch` 一次请求合成最多 20 段文本
-- **💾 智能缓存**：双限制 LRU（条目数 + 内存大小），避免重复合成
-- **🛡️ 安全保护**：ADMIN_TOKEN 管理接口认证 + IP 滑动窗口限流
-- **📊 Prometheus 监控**：`/metrics` 导出请求数、字符数、缓存命中率、P95 响应时间
-- **⚡ Gzip 压缩**：所有 HTML/JSON/TEXT 响应自动压缩
-- **🔗 Legado 订阅**：`/api/legado/subscribe` 一键生成订阅链接
-- **💻 Web 管理界面**：配置、测试、统计、实时系统状态面板（每 30 秒刷新）
-- **🎧 多格式输出**：MP3 / WAV / OGG（需 FFmpeg）
-- **🔄 自动故障转移**：主 Provider 失败时自动 fallback 到 Edge TTS
-- **📖 发音词典**：自定义词语发音替换，解决生僻字/专有名词误读
-- **📡 实时监控**：SSE 事件流 + 审计日志，WebUI 实时活动面板
-- **🔍 音色别名**：支持 OpenAI 音色名称、中文名称、自定义别名
-- **💾 配置导出/导入**：一键备份和迁移配置
+**核心能力**
+- 多源聚合：Edge TTS (免费)、火山引擎、腾讯云、小米MiMo、Fish Audio
+- 智能路由：单一接口，根据音色参数自动分发到对应 provider
+- OpenAI 兼容：`/v1/audio/speech` + `/v1/models`，支持 MP3/WAV/OGG 输出
+- 长文本分块：自动按句子边界拆分，逐段合成再拼接
+- 批量合成：`/api/speech/batch` 一次请求合成最多 20 段文本
+- SSML 支持：Edge TTS 原生 SSML 1.0 语法
+- 音频格式转换：MP3 / WAV / OGG（需 FFmpeg）
 
-## 🎧 支持音色
+**文本智能处理**
+- 文本正规化：数字、日期、时间、百分比、温度、单位自动转中文
+- 发音词典：自定义词语发音替换，解决生僻字/专有名词误读
+- 语速预设：支持 `fast`/`slow`/`快速`/`慢速`/`1.5x`/`2x` 等自然语言语速
+
+**运维与安全**
+- ADMIN_TOKEN 管理接口认证
+- API_KEYS 多密钥访问控制（API_KEYS_REQUIRED=1 强制认证）
+- IP 滑动窗口限流 + 白名单（RATE_LIMIT_WHITELIST）
+- 自动故障转移：主 Provider 失败时自动 fallback 到 Edge TTS
+- 可配置超时：REQUEST_TIMEOUT 环境变量
+- Header 注入防护：voice 参数清理 CRLF/null 字节
+- 请求 ID 追踪：X-Request-ID 贯穿响应和审计日志
+
+**监控与诊断**
+- Prometheus `/metrics` 端点
+- 请求审计日志（环形缓冲区，AUDIT_LOG_SIZE 控制）
+- SSE 实时事件流（`/api/events`）
+- Per-voice 用量统计 + 热门音色排行（`/api/stats/summary`）
+- Kubernetes 就绪/存活探针（`/readyz`、`/livez`）
+- Webhook 通知：合成失败时推送告警
+- JSON 结构化日志（LOG_JSON=1）
+
+**Web 管理界面**
+- 配置管理、TTS 测试、统计面板
+- 实时活动面板（SSE 推送）
+- 音色搜索过滤 + 试听按钮
+- 暗色模式切换
+- 配置导出/导入
+
+---
+
+## 支持音色
 
 | 服务商 | 音色数 | 说明 |
 |--------|--------|------|
-| Edge TTS | 36+ | 免费，中/英/日/韩/粤语/台湾腔 |
+| Edge TTS | 322+ | 免费，中/英/日/韩/粤语/台湾腔，支持情感风格 |
 | 火山引擎 | 8 | 灿灿、思思、贴心女生等 |
 | 腾讯云 | 7 | 智菊、智斌、智兰等 |
 | 小米 MiMo | 3 | 风格控制、方言、歌声合成 |
 | Fish Audio | 5 | 高质量多语言 + 声音克隆 |
 
+**音色别名**：支持 OpenAI 音色名（alloy/echo/nova）、中文名（晓晓/云希）、倍速（1.5x/2x）等
+
 ---
 
-## 🛠 安装
+## 快速开始
 
+### 安装
 ```bash
 git clone https://github.com/Hamster-Prime/legado-tts-server.git
 cd legado-tts-server
 pip install -r requirements.txt
 python3 app.py
 ```
-
-## 🚀 部署
 
 ### Docker
 ```bash
@@ -67,7 +91,7 @@ docker run -d --name legado-tts -p 80:80 -v tts-data:/opt/doubao-tts legado-tts
 docker compose up -d
 ```
 
-### Gunicorn (生产)
+### Gunicorn（生产）
 ```bash
 gunicorn -c gunicorn.conf.py app:app
 ```
@@ -78,7 +102,9 @@ sudo cp legado-tts.service /etc/systemd/system/
 sudo systemctl enable --now legado-tts
 ```
 
-### 环境变量
+---
+
+## 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -90,77 +116,92 @@ sudo systemctl enable --now legado-tts
 | `AUDIO_CACHE_SIZE` | `100` | 缓存最大条目数 |
 | `AUDIO_CACHE_MAX_MB` | `200` | 缓存最大内存(MB) |
 | `RATE_LIMIT_RPM` | `120` | 每IP每分钟请求限制(0=不限) |
+| `RATE_LIMIT_WHITELIST` | `127.0.0.1,::1` | 限流白名单IP |
 | `ADMIN_TOKEN` | `""` | 管理API认证Token |
+| `API_KEYS` | `""` | TTS访问密钥(逗号分隔) |
+| `API_KEYS_REQUIRED` | `0` | 强制API密钥认证(1=是) |
 | `ALLOW_SSML` | `1` | 允许SSML输入(1=是/0=否) |
-| `LOG_LEVEL` | `INFO` | 日志级别 |
 | `FALLBACK_TO_EDGE` | `1` | 启用自动故障转移(1=是/0=否) |
 | `REQUEST_TIMEOUT` | `30` | 单次Provider请求超时(秒) |
+| `TEXT_NORMALIZE` | `1` | 启用文本正规化(1=是/0=否) |
 | `AUDIT_LOG_SIZE` | `200` | 审计日志保留条数 |
-| `WEBHOOK_URL` | `""` | Webhook通知URL(可选) |
-| `WEBHOOK_EVENTS` | `error` | Webhook事件类型(逗号分隔) |
+| `LOG_LEVEL` | `INFO` | 日志级别 |
 | `LOG_JSON` | `0` | 启用JSON结构化日志(1=是) |
-| `USE_GUNICORN` | `1` | Docker中使用gunicorn(1=是/0=否) |
+| `WEBHOOK_URL` | `""` | Webhook通知URL |
+| `WEBHOOK_EVENTS` | `error` | Webhook事件类型 |
+| `USE_GUNICORN` | `1` | Docker中使用gunicorn(1=是) |
 
 ---
 
-## 🔌 API 文档
+## API 端点
 
-### Legado TTS 接口
-`POST /speech/stream`
+### TTS 合成
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/speech/stream` | Legado TTS 合成（支持 style 参数） |
+| POST | `/v1/audio/speech` | OpenAI 兼容 TTS |
+| POST | `/api/speech/batch` | 批量合成（最多20条） |
 
-```json
-{"text": "需要朗读的文本", "voice": "zh-CN-XiaoxiaoNeural", "rate": "+50%"}
-```
+### 音色管理
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/voices?provider=xxx` | 按Provider查询音色 |
+| GET | `/api/voices/all` | 所有音色 |
+| GET | `/api/voices/edge/live` | Edge TTS 动态语音列表(322+) |
+| GET/POST/DELETE | `/api/favorites` | 音色收藏夹 |
 
-### OpenAI 兼容接口
-`POST /v1/audio/speech`
+### 配置管理
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET/POST | `/api/config` | 获取/修改配置 |
+| POST | `/api/config/test` | 测试当前配置 |
+| GET | `/api/config/export` | 导出配置JSON |
+| POST | `/api/config/import` | 导入配置JSON |
+| GET/POST/DELETE | `/api/pronunciation` | 发音词典CRUD |
 
-```json
-{"model": "tts-1", "input": "Hello", "voice": "zh-CN-XiaoxiaoNeural", "speed": 1.5, "response_format": "mp3"}
-```
+### 监控与诊断
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查（详细信息） |
+| GET | `/livez` | K8s 存活探针 |
+| GET | `/readyz` | K8s 就绪探针 |
+| GET | `/metrics` | Prometheus 指标 |
+| GET | `/api/info` | 系统信息总览 |
+| GET | `/api/stats` | 用量统计 |
+| GET | `/api/stats/summary` | 热门音色排行 |
+| DELETE | `/api/stats` | 重置统计 |
+| GET | `/api/cache/stats` | 缓存状态 |
+| DELETE | `/api/cache/clear` | 清除缓存 |
+| GET | `/api/audit` | 审计日志 |
+| GET | `/api/events` | SSE 实时事件流 |
+| GET | `/api/openapi.json` | OpenAPI 3.0 规范 |
 
-### 批量合成
-`POST /api/speech/batch`
-
-```json
-{"voice": "zh-CN-XiaoxiaoNeural", "texts": ["你好", "世界"], "rate": "0%"}
-```
-
-返回：
-```json
-{"results": [{"text": "你好", "audio": "base64...", "error": null}, ...]}
-```
-
-### Legado 订阅
-- `GET /api/legado/config?voice=xxx` — 生成 Legado 配置 JSON
-- `GET /api/legado/subscribe?voice=xxx&auto=true` — 生成订阅链接
-
-### Prometheus 监控
-`GET /metrics` — 导出 `tts_requests_total`、`tts_chars_total`、`tts_cache_hit_ratio`、`tts_response_time_ms_p95` 等
-
-### 管理接口 (需要 ADMIN_TOKEN)
-- `GET/POST /api/config` — 获取/修改配置
-- `POST /api/config/test` — 测试当前配置
-- `DELETE /api/stats` — 重置统计
-- `DELETE /api/cache/clear` — 清除缓存
-- `GET/POST /api/config/export` — 导出配置
-- `POST /api/config/import` — 导入配置
-- `GET/POST/DELETE /api/pronunciation` — 管理发音词典
-- `GET /api/audit` — 查看请求审计日志
-- `GET /api/events` — SSE 实时事件流
-- `GET /api/voices/edge/live` — 动态获取 Edge TTS 全部语音
+### Legado 专用
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/legado/config` | Legado 配置JSON |
+| GET | `/api/legado/subscribe` | Legado 订阅链接 |
 
 ### 音频路由规则
-| 规则 | Provider |
-|------|----------|
-| `voice` 包含 `Neural` 且有 `-` | Edge TTS |
-| `voice` 为纯数字 1-999999 | 腾讯云 |
-| `voice` 以 `zh_` 开头 | 火山引擎 |
-| `voice` 为 `mimo_*` / `default_zh` / `default_eh` | 小米 MiMo |
-| `voice` 以 `fish-` 开头或为 `custom` | Fish Audio |
+| voice 格式 | Provider |
+|------------|----------|
+| 包含 `Neural` 且有 `-` | Edge TTS |
+| 纯数字 1-999999 | 腾讯云 |
+| 以 `zh_` 开头 | 火山引擎 |
+| `mimo_*` / `default_zh` | 小米 MiMo |
+| 以 `fish-` 开头或 `custom` | Fish Audio |
+| 别名/中文名 | 自动解析 |
 
 ---
 
-## 📄 License
+## 安全设计
 
-MIT License © 2024 Hamster-Prime
+- 所有错误响应返回标准化 JSON（含 request_id）
+- 全局 404/405/500 错误处理
+- Voice 参数自动清理 CRLF/null 字节（防 Header 注入）
+- 已认证请求自动绕过限流
+- CORS 开放（TTS 服务需要被任意客户端访问）
+
+## License
+
+MIT License

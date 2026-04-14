@@ -139,6 +139,7 @@ log = logging.getLogger('tts-server')
 # Flask App
 # ──────────────────────────────────────────────
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH', str(10 * 1024 * 1024)))  # 10MB default
 CORS(app, resources={
     r"/api/*": {"origins": "*"},
     r"/speech/*": {"origins": "*"},
@@ -1242,9 +1243,18 @@ def readyz():
         issues.append('doubao: missing access_token')
     if provider == 'tencent' and not config.get('tencent_secret_id'):
         issues.append('tencent: missing secret_id')
+    if provider == 'fishaudio' and not config.get('fishaudio_api_key'):
+        issues.append('fishaudio: missing api_key')
+    # Check cache directory writable
+    try:
+        parent = os.path.dirname(CONFIG_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+    except OSError as e:
+        issues.append(f'config dir not writable: {e}')
     if issues:
         return Response(
-            json.dumps({'ready': False, 'issues': issues}),
+            json.dumps({'ready': False, 'issues': issues}, ensure_ascii=False),
             status=503, mimetype='application/json'
         )
     return Response(
@@ -1267,9 +1277,13 @@ def metrics():
     cache_hit_rate = cache_hits / (total - failed) if (total - failed) > 0 else 0.0
     avg_rt = sum(rts) / len(rts) if rts else 0.0
     p95_rt = 0.0
+    p99_rt = 0.0
+    p50_rt = 0.0
     if rts:
         sorted_rts = sorted(rts)
+        p50_rt = sorted_rts[int(len(sorted_rts) * 0.50)]
         p95_rt = sorted_rts[int(len(sorted_rts) * 0.95)] if len(sorted_rts) > 1 else rts[0]
+        p99_rt = sorted_rts[int(len(sorted_rts) * 0.99)] if len(sorted_rts) > 1 else rts[0]
     out = [
         '# HELP tts_requests_total Total number of TTS requests',
         '# TYPE tts_requests_total counter',
@@ -1292,9 +1306,15 @@ def metrics():
         '# HELP tts_response_time_ms_avg Average response time in milliseconds',
         '# TYPE tts_response_time_ms_avg gauge',
         f'tts_response_time_ms_avg {avg_rt:.2f}',
+        '# HELP tts_response_time_ms_p50 50th percentile response time in milliseconds',
+        '# TYPE tts_response_time_ms_p50 gauge',
+        f'tts_response_time_ms_p50 {p50_rt:.2f}',
         '# HELP tts_response_time_ms_p95 95th percentile response time in milliseconds',
         '# TYPE tts_response_time_ms_p95 gauge',
         f'tts_response_time_ms_p95 {p95_rt:.2f}',
+        '# HELP tts_response_time_ms_p99 99th percentile response time in milliseconds',
+        '# TYPE tts_response_time_ms_p99 gauge',
+        f'tts_response_time_ms_p99 {p99_rt:.2f}',
     ]
     return Response('\n'.join(out) + '\n', mimetype='text/plain')
 

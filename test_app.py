@@ -1285,11 +1285,17 @@ class TestErrorHandlers:
         assert r.status_code == 200
         assert r.data == b'ok'
 
-    def test_readyz_returns_ready(self):
-        r = self.client.get('/readyz')
-        assert r.status_code == 200
-        data = r.get_json()
-        assert data['ready'] is True
+    def test_readyz_returns_ready(self, tmp_path):
+        import app as app_module
+        orig = app_module.CONFIG_FILE
+        app_module.CONFIG_FILE = str(tmp_path / 'config.json')
+        try:
+            r = self.client.get('/readyz')
+            assert r.status_code == 200
+            data = r.get_json()
+            assert data['ready'] is True
+        finally:
+            app_module.CONFIG_FILE = orig
 
 
 class TestEdgeCases:

@@ -1170,3 +1170,52 @@ class TestAuditLog:
         r = self.client.get('/api/audit')
         data = r.get_json()
         assert data['total'] > before
+
+
+class TestTextNormalization:
+    """Test text normalization and number conversion."""
+
+    def test_num_to_chinese_basic(self):
+        from app import _num_to_chinese
+        assert _num_to_chinese(0) == '零'
+        assert _num_to_chinese(5) == '五'
+        assert _num_to_chinese(10) == '十'
+        assert _num_to_chinese(15) == '十五'
+        assert _num_to_chinese(100) == '一百'
+        assert _num_to_chinese(123) == '一百二十三'
+        assert _num_to_chinese(1000) == '一千'
+        assert _num_to_chinese(10000) == '一万'
+
+    def test_num_to_chinese_large(self):
+        from app import _num_to_chinese
+        assert '万' in _num_to_chinese(12345)
+        assert '亿' in _num_to_chinese(100000000)
+
+    def test_num_to_chinese_negative(self):
+        from app import _num_to_chinese
+        assert _num_to_chinese(-5) == '负五'
+
+    def test_normalize_date(self):
+        from app import _normalize_text
+        assert _normalize_text('2024-01-15') == '2024年1月15日'
+        assert _normalize_text('2024/03/05') == '2024年3月5日'
+
+    def test_normalize_time(self):
+        from app import _normalize_text
+        result = _normalize_text('14:30')
+        assert '十四点' in result
+        assert '三十分' in result
+
+    def test_normalize_percentage(self):
+        from app import _normalize_text
+        assert _normalize_text('50%') == '百分之五十'
+
+    def test_normalize_abbreviations(self):
+        from app import _normalize_text
+        assert '博士' in _normalize_text('Dr. Wang')
+        assert '等等' in _normalize_text('etc.')
+
+    def test_clean_text_applies_normalization(self):
+        from app import _clean_text
+        result = _clean_text('50%')
+        assert '百分之' in result

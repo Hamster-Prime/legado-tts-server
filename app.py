@@ -894,7 +894,7 @@ def parse_rate(rate_str):
 
 
 def _clean_text(text):
-    """Normalize text: remove control chars but keep newlines/tabs for TTS."""
+    """Normalize text: remove control chars, normalize numbers/dates, apply pronunciation dict."""
     # Remove NULL and C0 controls except \t (0x09), \n (0x0a), \r (0x0d)
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
     # Collapse multiple blank lines but keep paragraph structure
@@ -903,8 +903,62 @@ def _clean_text(text):
     text = re.sub(r'(?<=\S)[ \t]+', ' ', text)
     text = re.sub(r'^[ \t]+', '', text, flags=re.MULTILINE)
     text = text.strip()
+    # Text normalization for better TTS
+    text = _normalize_text(text)
     # Apply custom pronunciation dictionary
     text = _apply_pronunciation_dict(text)
+    return text
+
+
+# Chinese digit mapping
+_CN_DIGITS = '零一二三四五六七八九'
+_CN_UNITS = {1: '十', 2: '百', 3: '千', 4: '万', 8: '亿'}
+
+def _num_to_chinese(n):
+    """Convert an integer to Chinese characters (simplified, up to 99999999)."""
+    if n < 0:
+        return '负' + _num_to_chinese(-n)
+    if n < 10:
+        return _CN_DIGITS[n]
+    if n < 100:
+        t, r = divmod(n, 10)
+        return ('' if t == 1 else _CN_DIGITS[t]) + '十' + (_CN_DIGITS[r] if r else '')
+    if n < 1000:
+        h, r = divmod(n, 100)
+        return _CN_DIGITS[h] + '百' + ('零' + _num_to_chinese(r) if 0 < r < 10 else _num_to_chinese(r) if r else '')
+    if n < 10000:
+        t, r = divmod(n, 1000)
+        return _CN_DIGITS[t] + '千' + ('零' + _num_to_chinese(r) if 0 < r < 100 else _num_to_chinese(r) if r else '')
+    if n < 100000000:
+        w, r = divmod(n, 10000)
+        return _num_to_chinese(w) + '万' + ('零' + _num_to_chinese(r) if 0 < r < 1000 else _num_to_chinese(r) if r else '')
+    y, r = divmod(n, 100000000)
+    return _num_to_chinese(y) + '亿' + (_num_to_chinese(r) if r else '')
+
+
+def _normalize_text(text):
+    """Normalize numbers, dates, and common patterns for better TTS."""
+    # Expand common abbreviations
+    abbrevs = {
+        'Mr.': '先生', 'Mrs.': '女士', 'Dr.': '博士',
+        'vs.': '对', 'etc.': '等等', 'e.g.': '例如', 'i.e.': '也就是',
+    }
+    for abbr, expansion in abbrevs.items():
+        text = text.replace(abbr, expansion)
+    # Date pattern: 2024年1月1日 or 2024-01-01 or 2024/01/01
+    def _date_repl(m):
+        y, m_val, d = m.group(1), m.group(2), m.group(3)
+        return f'{y}年{int(m_val)}月{int(d)}日'
+    text = re.sub(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', _date_repl, text)
+    # Time pattern: 14:30 -> 十四点三十分
+    def _time_repl(m):
+        h, mi = int(m.group(1)), int(m.group(2))
+        return _num_to_chinese(h) + '点' + (_num_to_chinese(mi) + '分' if mi else '')
+    text = re.sub(r'\b(\d{1,2}):(\d{2})\b', _time_repl, text)
+    # Percentage: 50% -> 百分之五十
+    def _pct_repl(m):
+        return '百分之' + _num_to_chinese(int(m.group(1)))
+    text = re.sub(r'(\d+)%', _pct_repl, text)
     return text
 
 
@@ -1587,6 +1641,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <title>TTS 服务</title>
     <style>
         :root{--primary:#007bff;--bg:#f7f8fa;--card:#fff;--text:#333;--border:#ddd;--danger:#dc3545;--success:#28a745}
+        [data-theme=dark]{--primary:#4dabf7;--bg:#1a1a2e;--card:#16213e;--text:#e0e0e0;--border:#2a2a4a;--danger:#ff6b6b;--success:#51cf66}
         *{box-sizing:border-box;margin:0;padding:0}
         body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
         .container{max-width:800px;margin:20px auto;padding:0 15px}
@@ -1599,6 +1654,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .provider-btn{padding:12px;border:2px solid var(--border);border-radius:8px;cursor:pointer;text-align:center;background:var(--card);transition:all .2s}
         .provider-btn:hover{border-color:#aaa}
         .provider-btn.active{border-color:var(--primary);background:#e7f1ff;box-shadow:0 0 0 2px rgba(0,123,255,.2)}
+        [data-theme=dark] .provider-btn.active{background:#1a365d}
         .provider-btn strong{display:block;font-size:16px}
         .badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:500;margin-top:6px}
         .badge-ok{background:#d4edda;color:#155724}
@@ -1622,6 +1678,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <div class="container">
+    <div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button onclick="toggleTheme()" style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:14px" id="theme-btn">🌙 暗色</button></div>
     <div class="card">
         <h2>服务商选择</h2>
         <div class="provider-grid">
@@ -1715,6 +1772,9 @@ document.addEventListener('DOMContentLoaded',()=>{
     const dv={doubao:'{{ default_voice }}',tencent:'{{ tencent_voice }}',edge:'{{ edge_voice }}',xiaomi:'{{ xiaomi_voice }}'};
     let stats={},prov=cur;
     const $=id=>document.getElementById(id);
+    // Theme toggle
+    window.toggleTheme=()=>{const d=document.documentElement;const dark=d.getAttribute('data-theme')==='dark';d.setAttribute('data-theme',dark?'light':'dark');$('theme-btn').textContent=dark?'🌙 暗色':'☀️ 亮色';localStorage.setItem('tts-theme',dark?'light':'dark')};
+    const saved=localStorage.getItem('tts-theme');if(saved==='dark'){document.documentElement.setAttribute('data-theme','dark');$('theme-btn').textContent='☀️ 亮色'}
     const setStatus=(el,ok)=>{el.textContent=ok?'已配置':'未配置';el.className='badge '+(ok?'badge-ok':'badge-err')};
 
     const loadStats=async()=>{try{const r=await fetch('/api/stats');stats=await r.json();showStats()}catch(e){}};

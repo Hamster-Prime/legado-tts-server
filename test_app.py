@@ -1279,3 +1279,14 @@ class TestErrorHandlers:
     def test_custom_request_id_forwarded(self):
         r = self.client.get('/health', headers={'X-Request-ID': 'test-123'})
         assert r.headers['X-Request-ID'] == 'test-123'
+
+    def test_livez_returns_ok(self):
+        r = self.client.get('/livez')
+        assert r.status_code == 200
+        assert r.data == b'ok'
+
+    def test_readyz_returns_ready(self):
+        r = self.client.get('/readyz')
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data['ready'] is True

@@ -33,6 +33,6 @@ ENV CONFIG_FILE=/opt/doubao-tts/config.json \
     USE_GUNICORN=1
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:80/health')"
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:80/livez')"
 
 CMD ["sh", "-c", "if [ \"${USE_GUNICORN}\" = \"1\" ] && command -v gunicorn >/dev/null 2>&1; then exec gunicorn -c gunicorn.conf.py app:app; else exec python3 -u app.py; fi"]

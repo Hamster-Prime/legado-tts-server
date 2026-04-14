@@ -1185,6 +1185,37 @@ def health():
     })
 
 
+@app.route('/livez')
+def livez():
+    """Kubernetes liveness probe - lightweight, always returns OK if process is alive."""
+    return Response('ok', status=200, mimetype='text/plain')
+
+
+@app.route('/readyz')
+def readyz():
+    """Kubernetes readiness probe - checks if the service can handle requests."""
+    issues = []
+    config = load_config()
+    provider = config.get('provider', 'edge')
+    # Check basic config sanity
+    if provider not in ALL_PROVIDERS:
+        issues.append(f'unknown provider: {provider}')
+    # Check API keys for non-edge providers
+    if provider == 'doubao' and not config.get('access_token'):
+        issues.append('doubao: missing access_token')
+    if provider == 'tencent' and not config.get('tencent_secret_id'):
+        issues.append('tencent: missing secret_id')
+    if issues:
+        return Response(
+            json.dumps({'ready': False, 'issues': issues}),
+            status=503, mimetype='application/json'
+        )
+    return Response(
+        json.dumps({'ready': True, 'provider': provider}),
+        status=200, mimetype='application/json'
+    )
+
+
 @app.route('/metrics')
 @gzipped
 def metrics():

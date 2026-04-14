@@ -1296,6 +1296,95 @@ def api_audit():
     return jsonify({'records': records, 'count': len(records), 'total': len(_audit_log)})
 
 
+@app.route('/api/info', methods=['GET'])
+def api_info():
+    """Complete system info dashboard - combines health, config, stats, and cache."""
+    import platform
+    config = load_config()
+    stats = _read_json(STATS_FILE, {})
+    uptime_sec = time.time() - _metrics.get('_start_time', time.time())
+    with _metrics_lock:
+        total_req = _metrics['requests_total']
+        success_req = _metrics['requests_success']
+        failed_req = _metrics['requests_failed']
+        total_chars = _metrics['chars_total']
+        cache_hits = _metrics['cache_hits_total']
+    return jsonify({
+        'version': __version__,
+        'uptime_seconds': int(uptime_sec),
+        'python_version': platform.python_version(),
+        'config': {
+            'provider': config.get('provider', 'edge'),
+            'ssml_enabled': ALLOW_SSML,
+            'fallback_enabled': FALLBACK_TO_EDGE,
+            'rate_limit_rpm': RATE_LIMIT_RPM,
+            'request_timeout': REQUEST_TIMEOUT,
+            'max_text_length': MAX_TEXT_LENGTH,
+            'chunk_size': CHUNK_SIZE,
+            'pronunciation_dict_size': len(config.get('pronunciation_dict', {})),
+        },
+        'metrics': {
+            'requests_total': total_req,
+            'requests_success': success_req,
+            'requests_failed': failed_req,
+            'success_rate': round(success_req / total_req * 100, 1) if total_req > 0 else 0,
+            'chars_total': total_chars,
+            'cache_hits_total': cache_hits,
+        },
+        'cache': _cache_info(),
+        'providers': ALL_PROVIDERS,
+        'admin_protected': bool(ADMIN_TOKEN),
+        'ffmpeg_available': _FFMPEG_AVAILABLE,
+    })
+
+
+@app.route('/api/openapi.json', methods=['GET'])
+def api_openapi():
+    """Minimal OpenAPI 3.0 spec for the TTS API."""
+    spec = {
+        'openapi': '3.0.0',
+        'info': {'title': 'Legado TTS Server', 'version': __version__,
+                 'description': '开源阅读 TTS 聚合服务 API'},
+        'paths': {
+            '/speech/stream': {
+                'post': {'summary': 'Legado TTS 合成', 'tags': ['TTS'],
+                         'requestBody': {'content': {'application/json': {'schema': {
+                             'type': 'object',
+                             'properties': {
+                                 'text': {'type': 'string', 'description': '合成文本'},
+                                 'voice': {'type': 'string', 'description': '音色ID或别名'},
+                                 'rate': {'type': 'string', 'description': '语速百分比', 'default': '0%'},
+                             },
+                             'required': ['text', 'voice']
+                         }}}},
+                         'responses': {'200': {'description': '音频流', 'content': {'audio/mpeg': {}}}}}
+            },
+            '/v1/audio/speech': {
+                'post': {'summary': 'OpenAI 兼容 TTS', 'tags': ['TTS'],
+                         'requestBody': {'content': {'application/json': {'schema': {
+                             'type': 'object',
+                             'properties': {
+                                 'model': {'type': 'string', 'default': 'tts-1'},
+                                 'input': {'type': 'string'},
+                                 'voice': {'type': 'string'},
+                                 'speed': {'type': 'number', 'default': 1.0},
+                                 'response_format': {'type': 'string', 'enum': ['mp3', 'wav', 'ogg']}
+                             },
+                             'required': ['input', 'voice']
+                         }}}},
+                         'responses': {'200': {'description': '音频数据'}}}
+            },
+            '/health': {'get': {'summary': '健康检查', 'tags': ['系统'],
+                                'responses': {'200': {'description': '服务状态'}}}},
+            '/metrics': {'get': {'summary': 'Prometheus 指标', 'tags': ['系统'],
+                                 'responses': {'200': {'description': 'Prometheus text format'}}}},
+            '/api/info': {'get': {'summary': '系统信息总览', 'tags': ['系统'],
+                                  'responses': {'200': {'description': '完整系统状态'}}}},
+        }
+    }
+    return jsonify(spec)
+
+
 # SSE event subscribers
 _sse_subscribers = []  # list of queue.Queue
 _sse_lock = threading.Lock()

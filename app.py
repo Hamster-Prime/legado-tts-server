@@ -866,13 +866,16 @@ def synthesize_tencent(text, voice, speed=0):
         return None, str(e)
 
 
-def synthesize_edge(text, voice, rate='+0%'):
+def synthesize_edge(text, voice, rate='+0%', style=None):
     async def _synth():
         if ALLOW_SSML and text.strip().startswith('<speak'):
-            # SSML mode: rate parameter is ignored, controlled via SSML tags
+            # SSML mode: rate/style parameters are ignored, controlled via SSML tags
             comm = edge_tts.Communicate(text, voice)
         else:
-            comm = edge_tts.Communicate(text, voice, rate=rate)
+            kwargs = {'rate': rate}
+            if style:
+                kwargs['style'] = style
+            comm = edge_tts.Communicate(text, voice, **kwargs)
         buf = io.BytesIO()
         async for chunk in comm.stream():
             if chunk["type"] == "audio":
@@ -1113,7 +1116,7 @@ def _apply_pronunciation_dict(text):
     return text
 
 
-def dispatch(provider, text, voice, pct):
+def dispatch(provider, text, voice, pct, style=None):
     """Route to the correct TTS provider and return (audio_bytes, error).
     When FALLBACK_TO_EDGE is enabled and a non-edge provider fails,
     automatically retry with Edge TTS using a default Chinese voice."""
@@ -1121,7 +1124,7 @@ def dispatch(provider, text, voice, pct):
     if not text:
         return None, 'Text is empty after cleaning'
 
-    audio, err = _dispatch_impl(provider, text, voice, pct)
+    audio, err = _dispatch_impl(provider, text, voice, pct, style=style)
     if audio:
         return audio, None
 
@@ -1146,24 +1149,24 @@ def dispatch(provider, text, voice, pct):
     return None, err
 
 
-def _dispatch_impl(provider, text, voice, pct):
+def _dispatch_impl(provider, text, voice, pct, style=None):
     """Internal dispatch without fallback."""
     # Auto-chunk long text
     chunks = _split_text_chunks(text)
     if len(chunks) == 1:
-        return _dispatch_single(provider, text, voice, pct)
+        return _dispatch_single(provider, text, voice, pct, style=style)
 
     # Multi-chunk synthesis
     segments = []
     for i, chunk in enumerate(chunks):
-        audio, err = _dispatch_single(provider, chunk, voice, pct)
+        audio, err = _dispatch_single(provider, chunk, voice, pct, style=style)
         if not audio:
             return None, f'Chunk {i+1}/{len(chunks)} failed: {err}'
         segments.append(audio)
     return _concat_mp3(segments), None
 
 
-def _dispatch_single(provider, text, voice, pct):
+def _dispatch_single(provider, text, voice, pct, style=None):
     """Dispatch a single chunk to the correct TTS provider."""
     cache_key = (provider, text, voice, int(pct))
     cached = _cache_get(cache_key)
@@ -1174,7 +1177,7 @@ def _dispatch_single(provider, text, voice, pct):
         return cached, None
     if provider == 'edge':
         rate = f'+{int(pct)}%' if pct >= 0 else f'{int(pct)}%'
-        audio, err = synthesize_edge(text, voice, rate)
+        audio, err = synthesize_edge(text, voice, rate, style=style)
     elif provider == 'tencent':
         audio, err = synthesize_tencent(text, voice, max(-2, min(6, pct / 50)))
     elif provider == 'doubao':
@@ -1311,6 +1314,7 @@ def speech_stream():
         data = request.get_json(silent=True) or {}
         text = str(data.get('text', '')).strip()
         voice = str(data.get('voice', '')).strip().replace('\r', '').replace('\n', '').replace('\x00', '')
+        style = str(data.get('style', '')).strip() or None
         if not text:
             return Response('Missing text', status=400)
         if not voice:
@@ -1332,12 +1336,12 @@ def speech_stream():
         request._tts_chars = len(text)
 
         pct = parse_rate(data.get('rate', '0%'))
-        audio, error = dispatch(provider, text, voice, pct)
+        audio, error = dispatch(provider, text, voice, pct, style=style)
 
         if audio:
             update_stats(len(text), provider, voice=voice)
-            log.info("TTS OK: provider=%s voice=%s chars=%d size=%d",
-                     provider, voice, len(text), len(audio))
+            log.info("TTS OK: provider=%s voice=%s style=%s chars=%d size=%d",
+                     provider, voice, style, len(text), len(audio))
             return Response(audio, mimetype='audio/mpeg', headers={
                 'Content-Length': str(len(audio)),
                 'X-TTS-Provider': provider,

@@ -60,7 +60,7 @@
 
 | 服务商 | 音色数 | 说明 |
 |--------|--------|------|
-| Edge TTS | 322+ | 免费，中/英/日/韩/粤语/台湾腔，支持情感风格 |
+| Edge TTS | 322+ | 免费，中/英/日/韩/粤语/台湾腔，支持情感风格、音量、音调 |
 | 火山引擎 | 8 | 灿灿、思思、贴心女生等 |
 | 腾讯云 | 7 | 智菊、智斌、智兰等 |
 | 小米 MiMo | 3 | 风格控制、方言、歌声合成 |
@@ -138,7 +138,8 @@ sudo systemctl enable --now legado-tts
 ### TTS 合成
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/speech/stream` | Legado TTS 合成（支持 style 参数） |
+| POST | `/speech/stream` | Legado TTS 合成（支持 style/volume/pitch） |
+| POST | `/speech/stream/chunked` | Edge TTS 流式合成（低延迟） |
 | POST | `/v1/audio/speech` | OpenAI 兼容 TTS |
 | POST | `/api/speech/batch` | 批量合成（最多20条） |
 

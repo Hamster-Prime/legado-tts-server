@@ -1,12 +1,15 @@
 services:
   tts:
     build: .
+    # The container listens on 8080 (it runs as an unprivileged user, which
+    # cannot bind ports below 1024). HOST_PORT is what you reach it on.
     ports:
-      - "${PORT:-80}:80"
+      - "${HOST_PORT:-8080}:8080"
     volumes:
+      # Named volume inherits tts:tts ownership from the image's /opt/doubao-tts.
       - tts-data:/opt/doubao-tts
     environment:
-      - PORT=80
+      - PORT=8080
       - CONFIG_FILE=/opt/doubao-tts/config.json
       - STATS_FILE=/opt/doubao-tts/stats.json
       - MAX_TEXT_LENGTH=5000
@@ -14,6 +17,7 @@ services:
       - AUDIO_CACHE_SIZE=100
       - RATE_LIMIT_RPM=120
       # - ADMIN_TOKEN=your-secret-token  # uncomment to enable auth
+      # - GUNICORN_THREADS=16            # concurrency knob (keep workers at 1)
     restart: unless-stopped
 
 volumes:

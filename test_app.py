@@ -2,6 +2,7 @@
 """Unit tests for legado-tts-server"""
 
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -144,6 +145,45 @@ class TestConfigIO:
             tmp = path + '.tmp'
             if os.path.exists(tmp):
                 os.unlink(tmp)
+
+
+class TestStatsPersistenceFailure:
+    """An unusable STATS_FILE must degrade quietly, not flood the log."""
+
+    def test_unwritable_stats_latches_after_one_error(self, caplog, monkeypatch):
+        import app as app_module
+        monkeypatch.setattr(app_module, '_stats_readonly', False)
+        monkeypatch.setattr(app_module, 'STATS_FILE', '/proc/nope/stats.json')
+        with caplog.at_level('ERROR', logger=app_module.log.name):
+            for _ in range(5):
+                app_module.update_stats(10, 'edge', voice='v')
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1, [r.getMessage() for r in errors]
+        assert app_module._stats_readonly is True
+
+    def test_metrics_still_counted_when_stats_unusable(self, monkeypatch):
+        """Synthesis doesn't depend on stats; /metrics must stay accurate."""
+        import app as app_module
+        monkeypatch.setattr(app_module, '_stats_readonly', True)
+        with app_module._metrics_lock:
+            before = app_module._metrics['chars_total']
+        app_module.update_stats(42, 'edge', voice='v')
+        with app_module._metrics_lock:
+            assert app_module._metrics['chars_total'] == before + 42
+
+    def test_fatal_path_errors_are_not_retried(self, monkeypatch):
+        """Retrying a permission/ENOENT failure only adds latency."""
+        import app as app_module
+        calls = []
+
+        def boom(*a, **k):
+            calls.append(1)
+            raise PermissionError(13, 'Permission denied')
+
+        monkeypatch.setattr(app_module, 'load_stats', boom)
+        with pytest.raises(PermissionError):
+            app_module._update_stats_with_retry(1, 'edge')
+        assert len(calls) == 1
 
 
 class TestLoadConfig:
@@ -537,10 +577,11 @@ class TestAPIEndpoints:
             assert r.headers.get('X-TTS-Chars') == '2'
 
     def test_health_version(self):
+        import app as app_module
         r = self.client.get('/health')
         data = r.get_json()
         assert 'version' in data
-        assert data['version'] == '1.5.0'
+        assert data['version'] == app_module.__version__
 
     # OpenAI-compatible API tests
     def test_openai_speech_basic(self):
@@ -702,14 +743,29 @@ class TestAPIEndpoints:
         if r.status_code == 200:
             assert r.content_type.startswith('audio/mpeg')
 
-    def test_openai_speech_response_format_unknown(self):
-        """Unknown format should fall back to mp3."""
+    def test_openai_speech_response_format_flac(self):
+        """A supported non-mp3 format is honoured when ffmpeg is available,
+        and falls back to mp3 (advertised as such) when it is not."""
+        from app import _FORMAT_MIME
         r = self.client.post('/v1/audio/speech', json={
             'model': 'tts-1', 'input': '测试', 'voice': 'zh-CN-XiaoxiaoNeural',
             'response_format': 'flac',
         })
         if r.status_code == 200:
+            actual = r.headers.get('X-TTS-Format')
+            assert actual in ('flac', 'mp3')
+            # The content type must always describe the bytes actually sent.
+            assert r.content_type.startswith(_FORMAT_MIME[actual])
+
+    def test_openai_speech_response_format_unsupported(self):
+        """An unrecognized format falls back to mp3."""
+        r = self.client.post('/v1/audio/speech', json={
+            'model': 'tts-1', 'input': '测试', 'voice': 'zh-CN-XiaoxiaoNeural',
+            'response_format': 'nonsense',
+        })
+        if r.status_code == 200:
             assert r.content_type.startswith('audio/mpeg')
+            assert r.headers.get('X-TTS-Format') == 'mp3'
 
 
 class TestAdminAuth:
@@ -811,15 +867,26 @@ class TestAudioConversion:
         """MP3 input should pass through unchanged."""
         from app import _convert_audio
         fake_mp3 = b'\xff\xfb\x90\x00' + b'\x00' * 100
-        result = _convert_audio(fake_mp3, 'mp3')
+        result, fmt = _convert_audio(fake_mp3, 'mp3')
         assert result == fake_mp3
+        assert fmt == 'mp3'
 
-    def test_convert_unknown_format_passthrough(self):
-        """Unknown format should pass through unchanged."""
+    def test_convert_undecodable_input_reports_mp3(self):
+        """When ffmpeg cannot decode the input, the original bytes are returned
+        and the reported format must be mp3 — not the requested format."""
         from app import _convert_audio
         fake = b'\x00' * 100
-        result = _convert_audio(fake, 'flac')
+        result, fmt = _convert_audio(fake, 'flac')
         assert result == fake
+        assert fmt == 'mp3'
+
+    def test_convert_unsupported_format_reports_mp3(self):
+        """An unrecognized format name is not passed to ffmpeg."""
+        from app import _convert_audio
+        fake = b'\xff\xfb\x90\x00' + b'\x00' * 100
+        result, fmt = _convert_audio(fake, 'nonsense')
+        assert result == fake
+        assert fmt == 'mp3'
 
     def test_format_mime_map(self):
         from app import _FORMAT_MIME
@@ -1003,7 +1070,11 @@ class TestFallback:
         # Edge TTS might work (200) or fail (500), but should not be 400
         assert r.status_code in (200, 500)
         if r.status_code == 200:
-            assert r.headers.get('X-TTS-Provider') == 'doubao'  # original provider in header
+            # X-TTS-Provider reports who actually synthesized the audio; the
+            # requested provider is disclosed separately.
+            assert r.headers.get('X-TTS-Provider') == 'edge'
+            assert r.headers.get('X-TTS-Fallback') == 'true'
+            assert r.headers.get('X-TTS-Requested-Provider') == 'doubao'
 
     def test_fallback_disabled(self):
         """When fallback is disabled, should fail directly."""
@@ -1243,8 +1314,45 @@ class TestTextNormalization:
 
     def test_normalize_date(self):
         from app import _normalize_text
-        assert _normalize_text('2024-01-15') == '2024年1月15日'
-        assert _normalize_text('2024/03/05') == '2024年3月5日'
+        # Years read digit by digit, month/day as numbers
+        assert _normalize_text('2024-01-15') == '二零二四年一月十五日'
+        assert _normalize_text('2024/03/05') == '二零二四年三月五日'
+
+    def test_normalize_date_not_double_converted(self):
+        """The year must not be re-processed by the later 4-digit-year rule."""
+        from app import _normalize_text
+        assert '2024' not in _normalize_text('2024-01-15')
+        assert _normalize_text('2024-01-15').count('年') == 1
+
+    def test_normalize_keeps_standalone_english_letters(self):
+        """Single I/V/X/L are English words, not Roman numerals to speak."""
+        from app import _normalize_text
+        assert _normalize_text('I have 3 apples') == 'I have 3 apples'
+        assert _normalize_text('V for victory') == 'V for victory'
+        assert _normalize_text('X-ray') == 'X-ray'
+
+    def test_normalize_multichar_roman(self):
+        from app import _normalize_text
+        assert _normalize_text('Chapter II') == 'Chapter 二'
+        assert _normalize_text('Part VIII') == 'Part 八'
+
+    def test_normalize_invalid_dates_and_times_untouched(self):
+        from app import _normalize_text
+        assert _normalize_text('99:99') == '99:99'
+
+    def test_num_to_chinese_no_scientific_notation(self):
+        """Huge floats must not leak 'e'/'+' into the digit table."""
+        from app import _num_to_chinese
+        for bad in ('e', '+', '.', 'n', 'i'):
+            assert bad not in _num_to_chinese(1e21)
+        assert _num_to_chinese(float('nan')) == ''
+        assert _num_to_chinese(float('inf')) == ''
+
+    def test_normalize_currency(self):
+        from app import _normalize_text
+        assert _normalize_text('$100') == '一百美元'
+        assert _normalize_text('￥50') == '五十元'
+        assert _normalize_text('100日元') == '一百日元'
 
     def test_normalize_time(self):
         from app import _normalize_text
@@ -1276,6 +1384,78 @@ class TestTextNormalization:
         from app import _clean_text
         result = _clean_text('50%')
         assert '百分之' in result
+
+    def test_normalize_thousands_separator(self):
+        """Comma-grouped numbers must convert whole, not just the first group."""
+        from app import _normalize_text
+        assert _normalize_text('1,234元') == '一千二百三十四元'
+        assert _normalize_text('¥1,000') == '一千元'
+        assert _normalize_text('$1,234.56') == '一千二百三十四点五六美元'
+        assert _normalize_text('1,000,000') == '一百万'
+        assert _normalize_text('人口 1,400,000,000') == '人口 十四亿'
+        assert _normalize_text('12,345km') == '一万二千三百四十五公里'
+        assert _normalize_text('增长 1,234.5%') == '增长 百分之一千二百三十四点五'
+        assert _normalize_text('第1,024章') == '第一千零二十四章'
+
+    def test_normalize_thousands_never_leaves_bare_digits(self):
+        """A stripped separator must not orphan digits no later rule speaks.
+
+        '人'/'个' are in _NUM_UNIT_SUFFIXES but no rule converts them, so the
+        grouped number has to be spoken by the thousands pass itself.
+        """
+        from app import _normalize_text
+        for text in ('共 1,234 人', '有 5,000 个', '共 1,234 项', '1,234名学生'):
+            assert not any(c.isdigit() for c in _normalize_text(text)), text
+
+    def test_normalize_thousands_ignores_non_numbers(self):
+        """Only true 3-digit grouping is stripped; CSV-ish text is left alone."""
+        from app import _normalize_text
+        for text in ('a,b,c', '1,2,3', '版本 1,2', '1,23', '12,34'):
+            assert _normalize_text(text) == text, text
+
+    def test_normalize_grouped_number_not_read_digit_by_digit(self):
+        """Grouping means magnitude: it must not fall through to _LONG_NUM_RE."""
+        from app import _normalize_text
+        # Digit-by-digit would render 1,024 as '一零二四' rather than '一千零二十四'.
+        assert _normalize_text('1,024') == '一千零二十四'
+        # An ungrouped 11-digit run is still an identifier.
+        assert _normalize_text('13800138000') == '一三八零零一三八零零零'
+
+    def test_clean_text_strips_unmapped_emoji(self):
+        """Unmapped pictographs are dropped, not passed upstream verbatim."""
+        from app import _clean_text, _RESIDUAL_EMOJI_RE
+        assert _clean_text('😀未映射') == '未映射'
+        assert _clean_text('测试🚀🔥火箭') == '测试火箭'
+        assert _clean_text('🇨🇳 国旗') == '国旗'
+        # Nothing the residual sweep targets may survive (CJK text is unaffected;
+        # it sits outside the pictograph ranges the regex covers).
+        for text in ('😀未映射', '测试🚀🔥火箭', '🇨🇳 国旗', '👍🏽 手势', '👨‍👩‍👧 家庭'):
+            assert not _RESIDUAL_EMOJI_RE.search(_clean_text(text)), text
+
+    def test_clean_text_maps_known_emoji_with_pauses(self):
+        from app import _clean_text
+        assert _clean_text('你好😊😃再见') == '你好，微笑，大笑，再见'
+
+    def test_clean_text_collapses_punctuation_runs(self):
+        """Emoji substitution inserts '，' that can abut existing punctuation."""
+        from app import _clean_text
+        assert _clean_text('好的😊。') == '好的，微笑。'
+        assert _clean_text('真的吗😲？！') == '真的吗，震惊！'
+        assert _clean_text('什么？？？') == '什么？'
+        assert _clean_text('好的，，，谢谢') == '好的，谢谢'
+
+    def test_clean_text_preserves_ellipsis(self):
+        """An ellipsis is a pause cue; collapsing it to '.' would lose that."""
+        from app import _clean_text
+        assert _clean_text('ok...') == 'ok…'
+        assert _clean_text('是吗。。。') == '是吗…'
+        assert _clean_text('嗯...好的。') == '嗯…好的。'
+        assert _clean_text('不……') == '不……'
+
+    def test_clean_text_preserves_clean_input(self):
+        from app import _clean_text
+        for text in ('正常的句子。没有表情。', 'a.b.c', 'U.S.A.', '版本 2.0.1'):
+            assert _clean_text(text) == text, text
 
 
 class TestErrorHandlers:

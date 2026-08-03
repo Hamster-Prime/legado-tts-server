@@ -8,6 +8,9 @@ import sys
 import tempfile
 import base64
 import uuid
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 # Add parent dir to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -150,6 +153,16 @@ class TestConfigIO:
             tmp = path + '.tmp'
             if os.path.exists(tmp):
                 os.unlink(tmp)
+
+    def test_atomic_write_keeps_file_private(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'config.json')
+            _write_json(path, {'secret': 'first'})
+            assert os.stat(path).st_mode & 0o777 == 0o600
+
+            os.chmod(path, 0o664)
+            _write_json(path, {'secret': 'second'})
+            assert os.stat(path).st_mode & 0o777 == 0o600
 
 
 class TestStatsPersistenceFailure:
@@ -342,6 +355,80 @@ class TestDispatch:
         assert actual_provider is None
         assert actual_voice is None
 
+    def test_fishaudio_preset_ignores_saved_custom_reference(self, monkeypatch):
+        import app as app_module
+        captured = {}
+
+        class Response:
+            status_code = 200
+            content = b'fish-audio'
+            text = ''
+
+        def fake_post(url, **kwargs):
+            captured.update(kwargs)
+            return Response()
+
+        monkeypatch.setattr(app_module._http_session, 'post', fake_post)
+        audio, error = app_module.synthesize_fishaudio(
+            '测试', 'fish-animated', config={
+                'fishaudio_api_key': 'key',
+                'fishaudio_reference_id': 'custom-reference',
+            })
+
+        assert error is None
+        assert audio == b'fish-audio'
+        assert captured['json']['reference_id'] == 'b7f4b37e-6e92-4f72-a650-d2c8a1dc50e3'
+
+    def test_fishaudio_custom_voice_requires_reference_id(self, monkeypatch):
+        import app as app_module
+
+        def unexpected_post(*args, **kwargs):
+            pytest.fail('missing custom reference must fail before the HTTP request')
+
+        monkeypatch.setattr(app_module._http_session, 'post', unexpected_post)
+        audio, error = app_module.synthesize_fishaudio(
+            '测试', 'custom', config={
+                'fishaudio_api_key': 'key',
+                'fishaudio_reference_id': '',
+            })
+
+        assert audio is None
+        assert 'Reference ID' in error
+
+    def test_fishaudio_rejects_unknown_preset_before_request(self, monkeypatch):
+        import app as app_module
+
+        def unexpected_post(*args, **kwargs):
+            pytest.fail('an unknown Fish preset must fail before the HTTP request')
+
+        monkeypatch.setattr(app_module._http_session, 'post', unexpected_post)
+        audio, error = app_module.synthesize_fishaudio(
+            '测试', 'fish-not-a-preset', config={'fishaudio_api_key': 'key'})
+
+        assert audio is None
+        assert '不支持' in error
+
+    def test_cache_key_changes_with_fish_reference(self, monkeypatch, tmp_path):
+        import app as app_module
+        monkeypatch.setattr(app_module, 'CONFIG_FILE', str(tmp_path / 'config.json'))
+        config = app_module.DEFAULT_CONFIG.copy()
+        config.update({
+            'provider': 'fishaudio',
+            'fishaudio_api_key': 'key',
+            'fishaudio_voice': 'custom',
+            'fishaudio_reference_id': 'reference-a',
+        })
+        app_module.save_config(config)
+        first = app_module._cache_key('fishaudio', '测试', 'custom', 0)
+        app_module._cache_put(first, b'old-reference-audio')
+
+        config['fishaudio_reference_id'] = 'reference-b'
+        app_module.save_config(config)
+        second = app_module._cache_key('fishaudio', '测试', 'custom', 0)
+
+        assert second != first
+        assert app_module._cache_get(second) is None
+
 
 class TestXiaomiStyle:
     """Test Xiaomi style tag generation."""
@@ -504,6 +591,7 @@ class TestAPIEndpoints:
     def test_config_get(self):
         r = self.client.get('/api/config')
         assert r.status_code == 200
+        assert r.headers['Cache-Control'] == 'no-store'
         data = r.get_json()
         assert 'provider' in data
         assert 'doubao_api_key' in data
@@ -568,6 +656,10 @@ class TestAPIEndpoints:
         r = self.client.get('/')
         assert r.status_code == 200
         assert b'TTS' in r.data
+        assert b'href="/static/app.css"' in r.data
+        assert b'src="/static/app.js"' in r.data
+        assert self.client.get('/static/app.css').status_code == 200
+        assert self.client.get('/static/app.js').status_code == 200
 
     def test_config_test_endpoint(self):
         r = self.client.post('/api/config/test')
@@ -577,8 +669,92 @@ class TestAPIEndpoints:
         assert 'ok' in data
 
     def test_config_post_unknown_provider(self):
+        import app as app_module
+
+        self.client.post('/api/config', json={
+            'provider': 'edge',
+            'edge_voice': 'zh-CN-YunxiNeural',
+        })
+        before = load_config()
+        with open(app_module.CONFIG_FILE, 'rb') as f:
+            before_bytes = f.read()
+        before_stat = os.stat(app_module.CONFIG_FILE)
+
         r = self.client.post('/api/config', json={'provider': 'nonexistent'})
-        assert r.status_code == 200
+        assert r.status_code == 400
+        assert load_config() == before
+        with open(app_module.CONFIG_FILE, 'rb') as f:
+            assert f.read() == before_bytes
+        after_stat = os.stat(app_module.CONFIG_FILE)
+        assert after_stat.st_ino == before_stat.st_ino
+        assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
+
+    @pytest.mark.parametrize('payload', [
+        {'provider': ['edge']},
+        {'provider': 'doubao'},
+        {'provider': 'fishaudio', 'fishaudio_voice': 'custom'},
+        {'provider': 'fishaudio', 'fishaudio_voice': 'fish-not-a-preset'},
+        {'edge_voice': 'not-a-real-voice'},
+        {'edge_voice': {'id': 'zh-CN-XiaoxiaoNeural'}},
+        {'xiaomi_api_key': 12345},
+    ], ids=['provider-list', 'active-voice-mismatch', 'custom-fish-without-reference',
+            'unknown-fish-preset', 'unknown-voice', 'voice-object', 'credential-number'])
+    def test_config_post_invalid_values_do_not_write(self, payload):
+        import app as app_module
+
+        self.client.post('/api/config', json={
+            'provider': 'edge',
+            'edge_voice': 'zh-CN-XiaoxiaoNeural',
+        })
+        before = load_config()
+        with open(app_module.CONFIG_FILE, 'rb') as f:
+            before_bytes = f.read()
+        before_stat = os.stat(app_module.CONFIG_FILE)
+
+        r = self.client.post('/api/config', json=payload)
+
+        assert r.status_code == 400
+        assert load_config() == before
+        with open(app_module.CONFIG_FILE, 'rb') as f:
+            assert f.read() == before_bytes
+        after_stat = os.stat(app_module.CONFIG_FILE)
+        assert after_stat.st_ino == before_stat.st_ino
+        assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
+
+    def test_concurrent_config_patches_preserve_both_updates(self, monkeypatch):
+        import app as app_module
+        first_inside = threading.Event()
+        second_started = threading.Event()
+        release_first = threading.Event()
+        original_apply = app_module._apply_config_payload
+
+        def delayed_apply(config, data):
+            if data.get('doubao_api_key') == 'doubao-concurrent-key':
+                first_inside.set()
+                assert release_first.wait(timeout=2)
+            return original_apply(config, data)
+
+        monkeypatch.setattr(app_module, '_apply_config_payload', delayed_apply)
+
+        def post(payload):
+            if payload.get('xiaomi_api_key'):
+                second_started.set()
+            with self.app.test_client() as client:
+                return client.post('/api/config', json=payload).status_code
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(post, {'doubao_api_key': 'doubao-concurrent-key'})
+            assert first_inside.wait(timeout=2)
+            second = pool.submit(post, {'xiaomi_api_key': 'xiaomi-concurrent-key'})
+            assert second_started.wait(timeout=2)
+            time.sleep(0.05)
+            release_first.set()
+            assert first.result(timeout=2) == 200
+            assert second.result(timeout=2) == 200
+
+        config = app_module.load_config()
+        assert config['doubao_api_key'] == 'doubao-concurrent-key'
+        assert config['xiaomi_api_key'] == 'xiaomi-concurrent-key'
 
     def test_voices_returns_list(self):
         for p in ALL_PROVIDERS:
@@ -722,16 +898,30 @@ class TestAPIEndpoints:
             assert 'ready' in data['provider_status'][p]
 
     def test_config_get_masks_secrets(self):
-        # Save secrets first
-        self.client.post('/api/config', json={
-            'doubao_api_key': 'my_doubao_key_12345',
-            'tencent_secret_key': 'my_tencent_key_abcdef',
-        })
+        secrets = {
+            'doubao_api_key': 'D@1!',
+            'tencent_secret_id': 'T@2!',
+            'tencent_secret_key': 'K@3!',
+            'xiaomi_api_key': 'X@4!',
+            'fishaudio_api_key': 'F@5!',
+        }
+        saved = self.client.post('/api/config', json=secrets)
+        assert saved.status_code == 200
+
         r = self.client.get('/api/config')
+        assert r.status_code == 200
         data = r.get_json()
-        assert data['doubao_api_key'] == '***'
-        assert data['tencent_secret_key'] == '***'
-        assert 'my_doubao_key' not in str(data)
+        for key, secret in secrets.items():
+            assert data[key] == '***'
+            assert data['configured_fields'][key] is True
+            assert secret not in r.get_data(as_text=True)
+
+        index = self.client.get('/')
+        assert index.status_code == 200
+        page = index.get_data(as_text=True)
+        for secret in secrets.values():
+            assert secret not in page
+
         assert 'appid' not in data
         assert 'access_token' not in data
 
@@ -907,9 +1097,32 @@ class TestAdminAuth:
         r = self.client.get('/api/config', headers=self._auth_headers('wrong-token'))
         assert r.status_code == 401
 
-    def test_token_via_query_param(self):
+    def test_query_token_is_not_accepted_on_config_routes(self):
         r = self.client.get('/api/config?token=test-secret-token')
-        assert r.status_code == 200
+        assert r.status_code == 401
+
+    def test_query_token_is_limited_to_event_source(self):
+        import app as app_module
+        with self.app.test_request_context('/api/events?token=test-secret-token'):
+            assert app_module._extract_bearer_token() == 'test-secret-token'
+
+    def test_protected_home_does_not_embed_fish_reference(self):
+        import app as app_module
+        config = app_module.DEFAULT_CONFIG.copy()
+        config.update({
+            'provider': 'fishaudio',
+            'fishaudio_api_key': 'fish-secret',
+            'fishaudio_voice': 'custom',
+            'fishaudio_reference_id': 'private-reference-id',
+        })
+        app_module.save_config(config)
+
+        page = self.client.get('/')
+
+        assert page.status_code == 200
+        assert b'private-reference-id' not in page.data
+        protected = self.client.get('/api/config', headers=self._auth_headers())
+        assert protected.get_json()['fishaudio_reference_id'] == 'private-reference-id'
 
 
 class TestAudioConversion:
@@ -1180,6 +1393,8 @@ class TestConfigExportImport:
         assert '_exported_at' in data
         assert 'provider' in data
         assert 'Content-Disposition' in r.headers
+        assert r.headers['Cache-Control'] == 'no-store'
+        assert r.headers['Pragma'] == 'no-cache'
 
     def test_import_valid_config(self):
         r = self.client.post('/api/config/import',
@@ -1196,6 +1411,36 @@ class TestConfigExportImport:
         r = self.client.post('/api/config/import',
             data='', content_type='application/json')
         assert r.status_code == 400
+
+    def test_cross_site_admin_requests_are_rejected_without_token(self):
+        headers = {
+            'Origin': 'https://malicious.example',
+            'Sec-Fetch-Site': 'cross-site',
+        }
+        exported = self.client.get('/api/config/export', headers=headers)
+        changed = self.client.post('/api/config', json={'provider': 'edge'}, headers=headers)
+
+        assert exported.status_code == 403
+        assert changed.status_code == 403
+
+    def test_same_origin_admin_request_still_works_without_token(self):
+        r = self.client.get('/api/config/export', headers={
+            'Origin': 'http://localhost',
+            'Sec-Fetch-Site': 'same-origin',
+        })
+        assert r.status_code == 200
+
+    def test_import_rejects_masked_credentials_without_overwriting(self):
+        import app as app_module
+        saved = self.client.post('/api/config', json={'doubao_api_key': 'real-secret'})
+        assert saved.status_code == 200
+        masked = self.client.get('/api/config').get_json()
+
+        result = self.client.post('/api/config/import', json=masked)
+
+        assert result.status_code == 400
+        assert '掩码凭证' in result.get_data(as_text=True)
+        assert app_module.load_config()['doubao_api_key'] == 'real-secret'
 
     def test_import_ignores_unknown_keys(self):
         r = self.client.post('/api/config/import',
@@ -1855,6 +2100,68 @@ class TestDoubaoStreaming:
         assert result.status_code == 200
         assert data['ok'] is False
         assert '45000000' in data['error']
+
+    def test_config_test_uses_draft_without_persisting_and_bypasses_cache(self, monkeypatch):
+        saved = self.app_module.DEFAULT_CONFIG.copy()
+        saved.update({
+            'provider': 'edge',
+            'doubao_api_key': 'saved-key',
+            'default_voice': 'zh_female_cancan_uranus_bigtts',
+        })
+        self.app_module.save_config(saved)
+        with open(self.app_module.CONFIG_FILE, 'rb') as f:
+            before_bytes = f.read()
+        before_stat = os.stat(self.app_module.CONFIG_FILE)
+
+        sample = self.app_module._clean_text('你好，配置测试。')
+        voice = 'zh_female_cancan_uranus_bigtts'
+        self.app_module._cache_put(
+            self.app_module._cache_key('doubao', sample, voice, 0),
+            b'cached-success-that-must-not-be-used',
+        )
+        captured = {}
+
+        def reject_draft(text, selected_voice, speech_rate=0, config=None):
+            captured.update({
+                'text': text,
+                'voice': selected_voice,
+                'speech_rate': speech_rate,
+                'config': config,
+            })
+            return None, 'draft credential rejected'
+
+        def unexpected_edge(*args, **kwargs):
+            pytest.fail('configuration test must not fallback to Edge')
+
+        monkeypatch.setattr(self.app_module, 'synthesize_doubao', reject_draft)
+        monkeypatch.setattr(self.app_module, 'synthesize_edge', unexpected_edge)
+        monkeypatch.setattr(self.app_module, 'FALLBACK_TO_EDGE', True)
+
+        result = self.client.post('/api/config/test', json={
+            'provider': 'doubao',
+            'default_voice': voice,
+            'doubao_api_key': 'draft-only-key',
+        })
+        data = result.get_json()
+
+        assert result.status_code == 200
+        assert data['provider'] == 'doubao'
+        assert data['ok'] is False
+        assert data['error'] == 'draft credential rejected'
+        assert captured['text'] == sample
+        assert captured['voice'] == voice
+        assert captured['speech_rate'] == 0
+        assert captured['config']['provider'] == 'doubao'
+        assert captured['config']['doubao_api_key'] == 'draft-only-key'
+
+        persisted = self.app_module.load_config()
+        assert persisted['provider'] == 'edge'
+        assert persisted['doubao_api_key'] == 'saved-key'
+        with open(self.app_module.CONFIG_FILE, 'rb') as f:
+            assert f.read() == before_bytes
+        after_stat = os.stat(self.app_module.CONFIG_FILE)
+        assert after_stat.st_ino == before_stat.st_ino
+        assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
 
     def test_legado_endpoint_streams_without_content_length(self, monkeypatch):
         response = self._success_response()

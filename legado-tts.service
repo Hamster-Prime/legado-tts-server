@@ -7,7 +7,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Install layout assumed by this unit:
-#   /opt/legado-tts          app.py, gunicorn.conf.py, requirements.txt
+#   /opt/legado-tts          app.py, gunicorn.conf.py, requirements.txt,
+#                            .venv/, templates/, static/
 #   /var/lib/legado-tts      config.json, stats.json  (StateDirectory, below)
 #
 # Create the service account once before enabling:
@@ -16,14 +17,14 @@ User=legado-tts
 Group=legado-tts
 
 WorkingDirectory=/opt/legado-tts
-ExecStart=/usr/bin/python3 -u /opt/legado-tts/app.py
+ExecStart=/usr/bin/env /opt/legado-tts/.venv/bin/python -u /opt/legado-tts/app.py
 
 # systemd creates/chowns /var/lib/legado-tts for us.
 StateDirectory=legado-tts
 Environment=PORT=8080
 Environment=CONFIG_FILE=/var/lib/legado-tts/config.json
 Environment=STATS_FILE=/var/lib/legado-tts/stats.json
-# Set a token to protect the admin API and WebUI:
+# Strongly recommended for every non-loopback deployment:
 # Environment=ADMIN_TOKEN=change-me
 
 # ── Hardening ──

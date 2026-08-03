@@ -51,6 +51,10 @@ proc_name = 'legado-tts'
 
 def on_starting(server):
     """Warn loudly if the operator opted into per-worker limit multiplication."""
+    if not os.environ.get('ADMIN_TOKEN', '').strip():
+        server.log.warning(
+            "ADMIN_TOKEN is not set; direct clients without an Origin header can "
+            "access admin APIs. Set a strong token before network exposure.")
     if workers > 1:
         server.log.warning(
             "GUNICORN_WORKERS=%d: rate limits, daily quota, audio cache and "

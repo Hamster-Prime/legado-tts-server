@@ -13,6 +13,8 @@ WORKDIR /app
 
 COPY --from=builder /install /usr/local
 COPY app.py gunicorn.conf.py ./
+COPY templates ./templates
+COPY static ./static
 
 RUN groupadd --system --gid 10001 tts \
  && useradd --system --uid 10001 --gid tts --no-create-home tts \

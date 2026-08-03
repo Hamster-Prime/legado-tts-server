@@ -24,6 +24,7 @@ import subprocess
 import queue
 import platform
 import shutil
+import contextlib
 from collections import OrderedDict, deque
 try:
     import fcntl
@@ -31,8 +32,9 @@ except ImportError:
     fcntl = None
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
-from flask import Flask, request, Response, render_template_string, jsonify, after_this_request
+from flask import Flask, request, Response, render_template, jsonify, after_this_request
 from flask_cors import CORS
 import requests
 import edge_tts
@@ -268,13 +270,39 @@ _daily_char_lock = threading.Lock()
 _daily_cleanup_counter = 0
 
 
+def _provider_config_fingerprint(provider, voice):
+    """Hash provider settings that can change the rendered audio.
+
+    Keeping the raw credentials out of the cache key avoids retaining secrets
+    in diagnostics while still isolating cache entries across key/reference
+    changes and across workers that reload the same config file.
+    """
+    fields = {
+        'doubao': ('doubao_api_key',),
+        'tencent': ('tencent_secret_id', 'tencent_secret_key', 'tencent_region'),
+        'xiaomi': ('xiaomi_api_key',),
+        'fishaudio': ('fishaudio_api_key', 'fishaudio_reference_id'),
+    }.get(provider)
+    if not fields:
+        return ''
+    config = load_config()
+    values = [str(config.get(field, '')) for field in fields]
+    if provider == 'fishaudio' and voice != 'custom':
+        # Presets never use the saved custom reference.
+        values[-1] = ''
+    payload = json.dumps(values, ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()[:20]
+
+
 def _cache_key(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz'):
     """Cache key covering every parameter that changes the rendered audio.
 
     style/volume/pitch must be part of the key: otherwise two requests for the
     same text and voice with different prosody return each other's audio.
     """
-    return (provider, voice, int(round(pct)), style or '', volume or '', pitch or '', text)
+    fingerprint = _provider_config_fingerprint(provider, voice)
+    return (provider, fingerprint, voice, int(round(pct)), style or '',
+            volume or '', pitch or '', text)
 
 
 def _cache_get(key):
@@ -619,13 +647,17 @@ def _error_response(message, status=400, error_type='invalid_request_error',
 
 
 def _extract_bearer_token():
-    """Extract a bearer token from the Authorization header or ?token= query arg."""
+    """Extract bearer auth; query tokens are limited to browser EventSource."""
     auth = request.headers.get('Authorization', '')
     if auth[:7].lower() == 'bearer ':
         token = auth[7:].strip()
     else:
         token = auth.strip()
-    return token or request.args.get('token', '')
+    if token:
+        return token
+    if request.path == '/api/events':
+        return request.args.get('token', '')
+    return ''
 
 
 def _is_admin():
@@ -635,8 +667,32 @@ def _is_admin():
     return hmac.compare_digest(_extract_bearer_token(), ADMIN_TOKEN)
 
 
+def _admin_origin_allowed():
+    """Block browser cross-site access when admin auth is intentionally disabled.
+
+    Command-line clients do not send Origin/Sec-Fetch-Site and keep the legacy
+    no-token behavior. Browser requests must originate from the same host, which
+    prevents wildcard CORS from exposing or mutating settings from another site.
+    """
+    if request.headers.get('Sec-Fetch-Site', '').lower() == 'cross-site':
+        return False
+    origin = request.headers.get('Origin', '').strip()
+    if not origin:
+        return True
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    return (parsed.scheme in ('http', 'https')
+            and parsed.netloc.lower() == request.host.lower())
+
+
 def _check_admin():
     """Return error Response if ADMIN_TOKEN is set but request lacks auth."""
+    if not ADMIN_TOKEN and not _admin_origin_allowed():
+        return _error_response(
+            'Cross-site admin requests are not allowed', 403,
+            'permission_error')
     if _is_admin():
         return None
     return _error_response('Unauthorized', 401, 'authentication_error')
@@ -850,16 +906,25 @@ def _read_json(path, default):
 
 
 def _write_json(path, data):
-    """Write JSON file atomically via tmp + replace."""
+    """Write JSON atomically and keep credential-bearing files private."""
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     tmp = path + '.tmp'
+    fd = None
     try:
-        with open(tmp, 'w', encoding='utf-8') as f:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, 'O_NOFOLLOW'):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp, flags, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            fd = None
             json.dump(data, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
-    except OSError:
+    except (OSError, TypeError, ValueError):
+        if fd is not None:
+            os.close(fd)
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
@@ -872,6 +937,34 @@ def _write_json(path, data):
 # In-memory config cache with mtime check
 _config_cache = {'data': None, 'mtime': None}
 _config_cache_lock = threading.Lock()
+_config_update_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _config_transaction():
+    """Serialize config read-modify-write operations across threads/processes."""
+    lock_handle = None
+    with _config_update_lock:
+        try:
+            if fcntl is not None:
+                lock_path = CONFIG_FILE + '.lock'
+                parent = os.path.dirname(lock_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                flags = os.O_RDWR | os.O_CREAT
+                if hasattr(os, 'O_NOFOLLOW'):
+                    flags |= os.O_NOFOLLOW
+                fd = os.open(lock_path, flags, 0o600)
+                os.fchmod(fd, 0o600)
+                lock_handle = os.fdopen(fd, 'a+')
+                fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            yield
+        finally:
+            if lock_handle is not None:
+                try:
+                    fcntl.flock(lock_handle, fcntl.LOCK_UN)
+                finally:
+                    lock_handle.close()
 
 
 def _copy_config(cfg):
@@ -1113,9 +1206,9 @@ class ProviderStreamError(RuntimeError):
     """Raised when an upstream streaming TTS response cannot be completed."""
 
 
-def stream_doubao(text, voice, speech_rate=0, section_id=None):
+def stream_doubao(text, voice, speech_rate=0, section_id=None, config=None):
     """Yield MP3 chunks from Volcengine's v3 HTTP Chunked TTS API."""
-    config = load_config()
+    config = load_config() if config is None else config
     api_key = config.get('doubao_api_key', '')
     if not api_key:
         raise ProviderStreamError("未配置火山引擎 API Key")
@@ -1207,12 +1300,13 @@ def stream_doubao(text, voice, speech_rate=0, section_id=None):
             resp.close()
 
 
-def synthesize_doubao(text, voice, speech_rate=0):
+def synthesize_doubao(text, voice, speech_rate=0, config=None):
     """Collect the streaming Volcengine response for non-streaming callers."""
     try:
         section_id = str(uuid.uuid4())
         audio = b''.join(stream_doubao(
-            text, voice, speech_rate=speech_rate, section_id=section_id
+            text, voice, speech_rate=speech_rate, section_id=section_id,
+            config=config,
         ))
         return audio, None
     except ProviderStreamError as e:
@@ -1228,8 +1322,8 @@ def _tencent_sign(secret_key, date, service, string_to_sign):
     return hmac.new(si, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
 
 
-def synthesize_tencent(text, voice, speed=0):
-    config = load_config()
+def synthesize_tencent(text, voice, speed=0, config=None):
+    config = load_config() if config is None else config
     sid, skey = config.get('tencent_secret_id', ''), config.get('tencent_secret_key', '')
     if not sid or not skey:
         return None, "未配置腾讯云SecretId或SecretKey"
@@ -1361,8 +1455,8 @@ def _edge_stream_iter(text, voice, rate='+0%', style=None, volume='+0%', pitch='
         loop.close()
 
 
-def synthesize_fishaudio(text, voice):
-    config = load_config()
+def synthesize_fishaudio(text, voice, config=None):
+    config = load_config() if config is None else config
     api_key = config.get('fishaudio_api_key', '')
     if not api_key:
         return None, "未配置Fish Audio API Key"
@@ -1373,9 +1467,16 @@ def synthesize_fishaudio(text, voice):
         'fish-audio-male': 'a5e6c9db-2b6c-4c3e-8c1e-2e8f0c3a4b5d',
         'fish-narrator': '9d4f0c1e-5a2b-4c8d-9e6f-1a2b3c4d5e6f',
     }
-    ref_id = config.get('fishaudio_reference_id', '')
-    if not ref_id:
-        ref_id = voice_map.get(voice, voice)
+    if voice == 'custom':
+        raw_ref_id = config.get('fishaudio_reference_id', '')
+        ref_id = raw_ref_id.strip() if isinstance(raw_ref_id, str) else ''
+        if not ref_id:
+            return None, "自定义 Fish Audio 音色需要 Reference ID"
+    else:
+        # A saved custom reference must never override the built-in presets.
+        ref_id = voice_map.get(voice)
+        if not ref_id:
+            return None, f"不支持的 Fish Audio 音色: {voice}"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -1411,8 +1512,8 @@ def _build_xiaomi_style(speed_ratio):
     return "<style>语速稍慢 清晰稳重</style>"
 
 
-def synthesize_xiaomi(text, voice, speed_ratio=1.0):
-    config = load_config()
+def synthesize_xiaomi(text, voice, speed_ratio=1.0, config=None):
+    config = load_config() if config is None else config
     api_key = config.get('xiaomi_api_key', '')
     if not api_key:
         return None, "未配置小米API Key"
@@ -2526,77 +2627,242 @@ def speech_stream_chunked():
         return _error_response(str(e), 500, 'server_error')
 
 
+_CONFIG_TEXT_FIELDS = (
+    'provider', 'default_voice', 'tencent_voice', 'edge_voice',
+    'xiaomi_voice', 'fishaudio_voice', 'fishaudio_reference_id',
+)
+_CONFIG_CREDENTIAL_FIELDS = (
+    'doubao_api_key', 'tencent_secret_id', 'tencent_secret_key',
+    'xiaomi_api_key', 'fishaudio_api_key',
+)
+_VOICE_FIELD_PROVIDERS = {
+    'tencent_voice': 'tencent',
+    'edge_voice': 'edge',
+    'xiaomi_voice': 'xiaomi',
+    'fishaudio_voice': 'fishaudio',
+}
+_ACTIVE_VOICE_FIELDS = {
+    'doubao': 'default_voice',
+    'tencent': 'tencent_voice',
+    'edge': 'edge_voice',
+    'xiaomi': 'xiaomi_voice',
+    'fishaudio': 'fishaudio_voice',
+}
+_PROVIDER_VOICE_IDS = {
+    'doubao': {voice['id'] for voice in DOUBAO_VOICES},
+    'tencent': {voice['id'] for voice in TENCENT_VOICES},
+    'edge': {voice['id'] for voice in EDGE_VOICES},
+    'xiaomi': {voice['id'] for voice in XIAOMI_VOICES},
+    'fishaudio': {voice['id'] for voice in FISH_AUDIO_VOICES},
+}
+
+
+def _is_valid_provider_voice(provider, voice):
+    """Validate configured voices while preserving documented dynamic IDs."""
+    if provider == 'fishaudio':
+        return voice in _PROVIDER_VOICE_IDS['fishaudio']
+    return resolve_provider(voice) == provider
+
+
+def _configured_fields(config):
+    """Expose credential presence without ever returning credential values."""
+    return {key: bool(config.get(key)) for key in _CONFIG_CREDENTIAL_FIELDS}
+
+
+def _provider_status(config):
+    configured = _configured_fields(config)
+    fish_voice = config.get('fishaudio_voice')
+    fish_voice_valid = fish_voice in _PROVIDER_VOICE_IDS['fishaudio']
+    fish_reference = config.get('fishaudio_reference_id', '')
+    fish_custom_ready = (
+        fish_voice != 'custom'
+        or (isinstance(fish_reference, str) and bool(fish_reference.strip()))
+    )
+    fish_ready = configured['fishaudio_api_key'] and fish_voice_valid and fish_custom_ready
+    return {
+        'edge': {'ready': True, 'note': '免费使用，无需凭证'},
+        'doubao': {
+            'ready': configured['doubao_api_key'],
+            'note': '已配置' if configured['doubao_api_key'] else '需要 API Key',
+        },
+        'tencent': {
+            'ready': configured['tencent_secret_id'] and configured['tencent_secret_key'],
+            'note': ('已配置' if configured['tencent_secret_id'] and configured['tencent_secret_key']
+                     else '需要 SecretId 与 SecretKey'),
+        },
+        'xiaomi': {
+            'ready': configured['xiaomi_api_key'],
+            'note': '已配置' if configured['xiaomi_api_key'] else '需要 API Key',
+        },
+        'fishaudio': {
+            'ready': fish_ready,
+            'note': ('已配置' if fish_ready else
+                     '音色无效' if configured['fishaudio_api_key'] and not fish_voice_valid else
+                     '需要 Reference ID' if configured['fishaudio_api_key'] and not fish_custom_ready
+                     else '需要 API Key'),
+        },
+    }
+
+
+def _safe_config(config):
+    """Return the public/admin-UI view of config with every credential masked."""
+    safe = _copy_config(config)
+    for key in _CONFIG_CREDENTIAL_FIELDS:
+        if safe.get(key):
+            safe[key] = '***'
+    safe['configured_fields'] = _configured_fields(config)
+    safe['provider_status'] = _provider_status(config)
+    return safe
+
+
+def _validate_config_payload(data):
+    if not isinstance(data, dict):
+        return '请求体必须是 JSON 对象'
+    provider = data.get('provider')
+    if provider is not None and provider not in ALL_PROVIDERS:
+        return f'不支持的服务商: {provider}'
+    for key in (*_CONFIG_TEXT_FIELDS, *_CONFIG_CREDENTIAL_FIELDS):
+        if key in data and not isinstance(data[key], str):
+            return f'{key} 必须是字符串'
+    for voice_key, expected_provider in _VOICE_FIELD_PROVIDERS.items():
+        if voice_key not in data:
+            continue
+        voice = data[voice_key].strip()
+        if not voice:
+            return f'{voice_key} 不能为空'
+        if not _is_valid_provider_voice(expected_provider, voice):
+            return f'音色 {voice} 不属于服务商 {expected_provider}'
+    if 'default_voice' in data:
+        voice = data['default_voice'].strip()
+        if not voice:
+            return 'default_voice 不能为空'
+        resolved = resolve_provider(voice)
+        if resolved is None or (resolved == 'fishaudio' and voice not in _PROVIDER_VOICE_IDS['fishaudio']):
+            return f'无法识别音色: {voice}'
+    return None
+
+
+def _apply_config_payload(config, data):
+    """Merge an API/UI patch and return non-fatal compatibility warnings."""
+    warnings = []
+    for key in _CONFIG_TEXT_FIELDS:
+        if key in data:
+            config[key] = data[key].strip()
+    for key in _CONFIG_CREDENTIAL_FIELDS:
+        value = data.get(key)
+        # Masked values are display placeholders, never real credentials.
+        if value is not None and value != '***':
+            config[key] = value.strip()
+    for voice_key, expected_provider in _VOICE_FIELD_PROVIDERS.items():
+        voice = data.get(voice_key)
+        if not voice:
+            continue
+        if not _is_valid_provider_voice(expected_provider, voice):
+            message = f'{voice_key}={voice} 无法识别为 {expected_provider} 音色'
+            warnings.append(message)
+            log.warning(message)
+    return warnings
+
+
+def _validate_config_state(config):
+    """Validate the active provider after a partial patch has been merged."""
+    provider = config.get('provider')
+    if provider not in ALL_PROVIDERS:
+        return f'不支持的服务商: {provider}'
+    voice_key = _ACTIVE_VOICE_FIELDS[provider]
+    voice = config.get(voice_key)
+    if not isinstance(voice, str) or not _is_valid_provider_voice(provider, voice):
+        return f'音色 {voice or "(空)"} 不属于服务商 {provider}'
+    if provider == 'fishaudio' and voice == 'custom':
+        reference_id = config.get('fishaudio_reference_id', '')
+        if not isinstance(reference_id, str) or not reference_id.strip():
+            return '自定义 Fish Audio 音色需要 Reference ID'
+    return None
+
+
 @app.route('/api/config', methods=['GET', 'POST'])
 def api_config():
     err = _check_admin()
     if err:
         return err
-    config = load_config()
     if request.method == 'POST':
-        data = request.get_json(silent=True) or {}
-        for key in ['provider', 'default_voice', 'tencent_voice',
-                    'edge_voice', 'xiaomi_voice', 'fishaudio_voice',
-                    'fishaudio_reference_id']:
-            if key in data:
-                config[key] = data[key]
-        for key in ['doubao_api_key', 'tencent_secret_id',
-                    'tencent_secret_key', 'xiaomi_api_key', 'fishaudio_api_key']:
-            if key in data and '***' not in str(data[key]):
-                config[key] = data[key]
-        # Validate voice selection
-        for vkey in ['default_voice', 'tencent_voice', 'edge_voice', 'xiaomi_voice', 'fishaudio_voice']:
-            v = data.get(vkey)
-            if v and v not in _ALL_VOICE_IDS:
-                log.warning("Unknown voice selected: %s=%s", vkey, v)
-        save_config(config)
+        data = request.get_json(silent=True)
+        validation_error = _validate_config_payload(data)
+        if validation_error:
+            return _error_response(validation_error, 400, 'invalid_request_error')
+        with _config_transaction():
+            config = load_config()
+            warnings = _apply_config_payload(config, data)
+            state_error = _validate_config_state(config)
+            if state_error:
+                return _error_response(state_error, 400, 'invalid_request_error')
+            save_config(config)
+        # Credential/reference changes must not keep serving audio synthesized
+        # under the previous configuration (Fish reference IDs are not part of
+        # the public voice ID, so the normal cache key cannot distinguish them).
+        _cache_clear()
         log.info("Config updated")
-        return jsonify({'status': 'ok'})
+        return jsonify({
+            'status': 'ok',
+            'message': '设置已保存',
+            'provider': config.get('provider', 'edge'),
+            'provider_status': _provider_status(config),
+            'configured_fields': _configured_fields(config),
+            'warnings': warnings,
+        })
 
-    # GET: return config with masked secrets + provider status
-    safe = config.copy()
-    for key in ['doubao_api_key', 'tencent_secret_key']:
-        if safe.get(key):
-            safe[key] = '***'
-    for key, show in [('xiaomi_api_key', 6)]:
-        val = safe.get(key, '')
-        if len(val) > show + 3:
-            safe[key] = f"{val[:show]}***{val[-3:]}"
-    sid = safe.get('tencent_secret_id', '')
-    if len(sid) > 10:
-        safe['tencent_secret_id'] = f"{sid[:6]}***{sid[-4:]}"
-    safe['provider_status'] = {
-        'edge': {'ready': True, 'note': '免费使用'},
-        'doubao': {'ready': bool(config.get('doubao_api_key')),
-                   'note': '已配置' if config.get('doubao_api_key') else '未配置'},
-        'tencent': {'ready': bool(config.get('tencent_secret_id') and config.get('tencent_secret_key')),
-                    'note': '已配置' if config.get('tencent_secret_id') and config.get('tencent_secret_key') else '未配置'},
-        'xiaomi': {'ready': bool(config.get('xiaomi_api_key')),
-                   'note': '已配置' if config.get('xiaomi_api_key') else '未配置'},
-        'fishaudio': {'ready': bool(config.get('fishaudio_api_key')),
-                      'note': '已配置' if config.get('fishaudio_api_key') else '未配置'},
-    }
-    return jsonify(safe)
+    config = load_config()
+    response = jsonify(_safe_config(config))
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route('/api/config/test', methods=['POST'])
 def api_config_test():
-    """Test current provider config by synthesizing a short sample."""
+    """Test saved config or an unsaved UI draft without writing it to disk."""
     err = _check_admin()
     if err:
         return err
     config = load_config()
+    data = request.get_json(silent=True)
+    if data is not None:
+        validation_error = _validate_config_payload(data)
+        if validation_error:
+            return _error_response(validation_error, 400, 'invalid_request_error')
+        _apply_config_payload(config, data)
+    elif request.data:
+        return _error_response('请求体必须是 JSON 对象', 400, 'invalid_request_error')
+    state_error = _validate_config_state(config)
+    if state_error:
+        return _error_response(state_error, 400, 'invalid_request_error')
     provider = config.get('provider', 'edge')
     result = {'provider': provider, 'ok': True, 'error': None}
-    voice = config.get(f'{provider}_voice') or config.get('default_voice')
+    voice_key = _ACTIVE_VOICE_FIELDS.get(provider)
+    voice = config.get(voice_key) if voice_key else None
     if not voice:
         voice_map = {'edge': EDGE_VOICES[0]['id'], 'doubao': DOUBAO_VOICES[0]['id'],
                      'tencent': TENCENT_VOICES[0]['id'], 'xiaomi': XIAOMI_VOICES[0]['id'],
                      'fishaudio': FISH_AUDIO_VOICES[0]['id']}
         voice = voice_map.get(provider, EDGE_VOICES[0]['id'])
-    # A configuration check must exercise the selected provider itself. Using
-    # dispatch() here could hide an invalid Doubao key behind Edge fallback.
+    if resolve_provider(voice) != provider:
+        return _error_response(
+            f'音色 {voice} 不属于服务商 {provider}', 400, 'invalid_request_error')
+    # Test the provider directly, bypassing fallback and the audio cache. This
+    # prevents an old successful cache entry from hiding a newly-invalid key.
     sample = _clean_text('你好，配置测试。')
-    audio, error = _dispatch_impl(provider, sample, voice, 0)
+    if provider == 'edge':
+        audio, error = synthesize_edge(sample, voice, '+0%')
+    elif provider == 'doubao':
+        audio, error = synthesize_doubao(sample, voice, 0, config=config)
+    elif provider == 'tencent':
+        audio, error = synthesize_tencent(sample, voice, 0, config=config)
+    elif provider == 'xiaomi':
+        audio, error = synthesize_xiaomi(sample, voice, 1.0, config=config)
+    elif provider == 'fishaudio':
+        audio, error = synthesize_fishaudio(sample, voice, config=config)
+    else:  # Defensive: validation above should make this unreachable.
+        return _error_response(
+            f'不支持的服务商: {provider}', 400, 'invalid_request_error')
     if audio:
         result['audio_size'] = len(audio)
         result['voice'] = voice
@@ -2619,7 +2885,11 @@ def api_config_export():
     return Response(
         json.dumps(config, ensure_ascii=False, indent=2),
         mimetype='application/json',
-        headers={'Content-Disposition': 'attachment; filename="tts-config.json"'}
+        headers={
+            'Content-Disposition': 'attachment; filename="tts-config.json"',
+            'Cache-Control': 'no-store',
+            'Pragma': 'no-cache',
+        }
     )
 
 
@@ -2632,18 +2902,45 @@ def api_config_import():
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or not data:
         return _error_response('No JSON data', 400, 'invalid_request_error')
+    data = data.copy()
     data.pop('_version', None)
     data.pop('_exported_at', None)
+    masked_credentials = sorted(
+        key for key in _CONFIG_CREDENTIAL_FIELDS
+        if isinstance(data.get(key), str) and data[key].strip() == '***'
+    )
+    if masked_credentials:
+        return _error_response(
+            '导入文件包含掩码凭证，请使用“导出配置”生成的完整备份文件',
+            400, 'invalid_request_error')
     config = DEFAULT_CONFIG.copy()
     unknown = []
     for k, v in data.items():
         if k in config:
+            default = DEFAULT_CONFIG[k]
+            expected_type = type(default)
+            if expected_type in (str, dict, list) and not isinstance(v, expected_type):
+                return _error_response(
+                    f'{k} 类型无效', 400, 'invalid_request_error')
             config[k] = v
         else:
             unknown.append(k)
+    editable = {
+        key: config[key]
+        for key in (*_CONFIG_TEXT_FIELDS, *_CONFIG_CREDENTIAL_FIELDS)
+        if key in data
+    }
+    validation_error = _validate_config_payload(editable)
+    if validation_error:
+        return _error_response(validation_error, 400, 'invalid_request_error')
+    state_error = _validate_config_state(config)
+    if state_error:
+        return _error_response(state_error, 400, 'invalid_request_error')
     if unknown:
         log.warning('Ignoring unknown config keys on import: %s', ', '.join(sorted(unknown)))
-    save_config(config)
+    with _config_transaction():
+        save_config(config)
+    _cache_clear()
     log.info('Configuration imported')
     return jsonify({'status': 'ok', 'message': 'Configuration imported successfully',
                     'ignored_keys': sorted(unknown)})
@@ -2838,12 +3135,10 @@ def api_pronunciation():
     err = _check_admin()
     if err:
         return err
-    config = load_config()
-    pdict = config.get('pronunciation_dict', {})
-    if not isinstance(pdict, dict):
-        pdict = {}
-
     if request.method == 'GET':
+        pdict = load_config().get('pronunciation_dict', {})
+        if not isinstance(pdict, dict):
+            pdict = {}
         return jsonify({'entries': pdict, 'count': len(pdict)})
 
     if request.method == 'POST':
@@ -2851,11 +3146,16 @@ def api_pronunciation():
         entries = data.get('entries', {})
         if not isinstance(entries, dict):
             return _error_response('entries must be a dict', 400)
-        for word, replacement in entries.items():
-            if isinstance(word, str) and isinstance(replacement, str) and word:
-                pdict[word] = replacement
-        config['pronunciation_dict'] = pdict
-        save_config(config)
+        with _config_transaction():
+            config = load_config()
+            pdict = config.get('pronunciation_dict', {})
+            if not isinstance(pdict, dict):
+                pdict = {}
+            for word, replacement in entries.items():
+                if isinstance(word, str) and isinstance(replacement, str) and word:
+                    pdict[word] = replacement
+            config['pronunciation_dict'] = pdict
+            save_config(config)
         return jsonify({'status': 'ok', 'count': len(pdict)})
 
     if request.method == 'DELETE':
@@ -2863,10 +3163,15 @@ def api_pronunciation():
         words = data.get('words', [])
         if not isinstance(words, list):
             return _error_response('words must be a list', 400)
-        for w in words:
-            pdict.pop(w, None)
-        config['pronunciation_dict'] = pdict
-        save_config(config)
+        with _config_transaction():
+            config = load_config()
+            pdict = config.get('pronunciation_dict', {})
+            if not isinstance(pdict, dict):
+                pdict = {}
+            for w in words:
+                pdict.pop(w, None)
+            config['pronunciation_dict'] = pdict
+            save_config(config)
         return jsonify({'status': 'ok', 'count': len(pdict)})
 
     return _error_response('Method not allowed', 405, 'method_not_allowed')
@@ -2878,29 +3183,29 @@ def api_favorites():
     err = _check_admin()
     if err:
         return err
-    config = load_config()
-    favs = config.get('voice_favorites', [])
-    if not isinstance(favs, list):
-        favs = []
     if request.method == 'GET':
+        favs = load_config().get('voice_favorites', [])
+        if not isinstance(favs, list):
+            favs = []
         return jsonify({'favorites': favs, 'count': len(favs)})
     data = request.get_json(silent=True) or {}
     voice_id = str(data.get('voice', '')).strip()
     if not voice_id:
         return _error_response('Missing voice parameter', 400)
-    if request.method == 'POST':
-        if voice_id not in favs:
-            favs.append(voice_id)
-            if len(favs) > 50:
-                favs = favs[-50:]
+    with _config_transaction():
+        config = load_config()
+        favs = config.get('voice_favorites', [])
+        if not isinstance(favs, list):
+            favs = []
+        if request.method == 'POST':
+            if voice_id not in favs:
+                favs.append(voice_id)
+                if len(favs) > 50:
+                    favs = favs[-50:]
+        elif voice_id in favs:
+            favs.remove(voice_id)
         config['voice_favorites'] = favs
         save_config(config)
-        return jsonify({'status': 'ok', 'favorites': favs, 'count': len(favs)})
-    # DELETE
-    if voice_id in favs:
-        favs.remove(voice_id)
-    config['voice_favorites'] = favs
-    save_config(config)
     return jsonify({'status': 'ok', 'favorites': favs, 'count': len(favs)})
 
 
@@ -3255,358 +3560,39 @@ def api_legado_subscribe():
 @gzipped
 def index():
     config = load_config()
-    def _mask(val, prefix=3, suffix=3):
-        if len(val) > prefix + suffix:
-            return f"{val[:prefix]}***{val[-suffix:]}"
-        return val
-    return render_template_string(HTML_TEMPLATE,
-        server_ip=request.host.split(':')[0],
-        provider=config.get('provider', 'edge'),
-        has_doubao_key=bool(config.get('doubao_api_key')),
-        has_tencent_key=bool(config.get('tencent_secret_key')),
-        has_xiaomi_key=bool(config.get('xiaomi_api_key')),
-        default_voice=config.get('default_voice'),
-        tencent_voice=config.get('tencent_voice'),
-        edge_voice=config.get('edge_voice'),
-        xiaomi_voice=config.get('xiaomi_voice'),
-        tencent_secret_id=_mask(config.get('tencent_secret_id', ''), 6, 4),
-        xiaomi_api_key=_mask(config.get('xiaomi_api_key', ''), 6, 4),
-        fishaudio_api_key=_mask(config.get('fishaudio_api_key', ''), 6, 4),
-        fishaudio_reference_id=config.get('fishaudio_reference_id', ''),
+    def _text_value(key, default=''):
+        value = config.get(key, default)
+        return value if isinstance(value, str) else default
+
+    initial_state = {
+        'version': __version__,
+        'provider': _text_value('provider', 'edge'),
+        'voices': {
+            'doubao': _text_value('default_voice', DEFAULT_CONFIG['default_voice']),
+            'tencent': _text_value('tencent_voice', DEFAULT_CONFIG['tencent_voice']),
+            'edge': _text_value('edge_voice', DEFAULT_CONFIG['edge_voice']),
+            'xiaomi': _text_value('xiaomi_voice', DEFAULT_CONFIG['xiaomi_voice']),
+            'fishaudio': _text_value('fishaudio_voice', DEFAULT_CONFIG['fishaudio_voice']),
+        },
+        # Credential/reference details are hydrated through the authenticated
+        # config endpoint when protection is enabled, never embedded anonymously.
+        'fishaudioReferenceId': '' if ADMIN_TOKEN else _text_value('fishaudio_reference_id'),
+        'providerStatus': {} if ADMIN_TOKEN else _provider_status(config),
+        'configuredFields': {} if ADMIN_TOKEN else _configured_fields(config),
+        'adminProtected': bool(ADMIN_TOKEN),
+    }
+    return render_template(
+        'index.html',
+        version=__version__,
         admin_protected=bool(ADMIN_TOKEN),
+        initial_state=initial_state,
     )
 
 
-# ──────────────────────────────────────────────
-# HTML Template
-# ──────────────────────────────────────────────
-
-HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TTS 服务</title>
-    <style>
-        :root{--primary:#007bff;--bg:#f7f8fa;--card:#fff;--text:#333;--border:#ddd;--danger:#dc3545;--success:#28a745}
-        [data-theme=dark]{--primary:#4dabf7;--bg:#1a1a2e;--card:#16213e;--text:#e0e0e0;--border:#2a2a4a;--danger:#ff6b6b;--success:#51cf66}
-        *{box-sizing:border-box;margin:0;padding:0}
-        body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
-        .container{max-width:800px;margin:20px auto;padding:0 15px}
-        .card{background:var(--card);border-radius:12px;padding:24px;margin-bottom:20px;box-shadow:0 4px 12px rgba(0,0,0,.08)}
-        h1{text-align:center;font-size:28px;margin-bottom:16px}
-        h2{font-size:20px;margin-bottom:16px}
-        .row{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-        .row h2{margin:0}
-        .provider-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
-        .provider-btn{padding:12px;border:2px solid var(--border);border-radius:8px;cursor:pointer;text-align:center;background:var(--card);transition:all .2s}
-        .provider-btn:hover{border-color:#aaa}
-        .provider-btn.active{border-color:var(--primary);background:#e7f1ff;box-shadow:0 0 0 2px rgba(0,123,255,.2)}
-        [data-theme=dark] .provider-btn.active{background:#1a365d}
-        .provider-btn strong{display:block;font-size:16px}
-        .badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:500;margin-top:6px}
-        .badge-ok{background:#d4edda;color:#155724}
-        .badge-err{background:#f8d7da;color:#721c24}
-        .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px}
-        .stat{text-align:center}
-        .stat-val{font-size:26px;font-weight:700;color:var(--primary)}
-        .stat-lbl{font-size:14px;color:#666}
-        .field{margin-bottom:16px}
-        .field label{display:block;margin-bottom:6px;font-weight:500}
-        .field input,.field select{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px}
-        .btn{padding:10px 20px;border:none;border-radius:6px;cursor:pointer;font-size:14px;color:#fff;transition:background .2s}
-        .btn-primary{background:var(--primary)}.btn-primary:hover{background:#0056b3}
-        .btn-success{background:var(--success)}.btn-success:hover{background:#218838}
-        .btn-danger{background:var(--danger)}.btn-danger:hover{background:#c82333}
-        .btn:disabled{background:#999;cursor:not-allowed}
-        .code{background:#2d2d2d;color:#f8f8f2;padding:16px;border-radius:8px;font-family:"SF Mono","Fira Code",monospace;font-size:13px;white-space:pre-wrap;word-break:break-all}
-        .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:12px 24px;background:rgba(0,0,0,.8);color:#fff;border-radius:8px;display:none;z-index:1000}
-        @media(max-width:600px){.provider-grid{grid-template-columns:repeat(2,1fr)}.container{padding:0 10px;margin:10px auto}.card{padding:16px}h1{font-size:22px}}
-    </style>
-</head>
-<body>
-<div class="container">
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px">{% if admin_protected %}<button onclick="setAdminToken()" style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:14px" id="token-btn" title="设置管理令牌">🔑 令牌</button>{% endif %}<button onclick="toggleTheme()" style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:14px" id="theme-btn">🌙 暗色</button></div>
-    <div class="card">
-        <h2>服务商选择</h2>
-        <div class="provider-grid">
-            <div class="provider-btn" data-provider="edge" onclick="setProvider('edge')"><strong>Edge</strong><div class="badge badge-ok">免费</div></div>
-            <div class="provider-btn" data-provider="doubao" onclick="setProvider('doubao')"><strong>火山引擎</strong><div class="badge" id="doubao-status"></div></div>
-            <div class="provider-btn" data-provider="tencent" onclick="setProvider('tencent')"><strong>腾讯云</strong><div class="badge" id="tencent-status"></div></div>
-            <div class="provider-btn" data-provider="xiaomi" onclick="setProvider('xiaomi')"><strong>小米MiMo</strong><div class="badge" id="xiaomi-status"></div></div>
-            <div class="provider-btn" data-provider="fishaudio" onclick="setProvider('fishaudio')"><strong>Fish Audio</strong><div class="badge" id="fishaudio-status"></div></div>
-        </div>
-    </div>
-    <div class="card">
-        <div class="row"><h2>使用统计</h2><button class="btn btn-danger" style="font-size:12px;padding:6px 14px" onclick="resetStats()">重置统计</button></div>
-        <div class="stats">
-            <div class="stat"><div class="stat-val" id="total-chars">-</div><div class="stat-lbl">总字符</div></div>
-            <div class="stat"><div class="stat-val" id="total-requests">-</div><div class="stat-lbl">总请求</div></div>
-            <div class="stat"><div class="stat-val" id="today-chars">-</div><div class="stat-lbl">今日字符</div></div>
-            <div class="stat"><div class="stat-val" id="today-requests">-</div><div class="stat-lbl">今日请求</div></div>
-        </div>
-    </div>
-    <div class="card">
-        <div class="row"><h2>开源阅读配置</h2><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><label for="voice-search" style="font-weight:500">音色</label><input id="voice-search" placeholder="搜索音色..." oninput="filterVoices()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;width:120px"><select id="voice-select" onchange="updateLegadoConfig()" style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px"></select><button class="btn" onclick="previewVoice()" style="padding:4px 10px;font-size:12px">▶ 试听</button><button class="btn" onclick="showAllVoices()" style="padding:4px 10px;font-size:12px">🎵 全部试听</button></div></div>
-        <p style="color:#666;margin-bottom:12px">复制以下配置到开源阅读的朗读引擎，即可使用上方选择的音色。</p>
-        <div class="code" id="legado-config"></div>
-        <div class="card" style="margin-top:16px"><h2>音色对比</h2><p style="font-size:13px;color:#666;margin:0 0 8px">输入文本，对比两个音色的效果</p><textarea id="compare-text" placeholder="输入对比文本..." style="width:100%;height:60px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;resize:vertical;box-sizing:border-box">今天天气真好，我们一起出去散步吧。</textarea><div style="display:flex;gap:12px;margin-top:8px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:200px"><label style="font-size:12px;color:#666">音色 A</label><select id="compare-a" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-top:2px"></select><audio id="audio-a" controls style="width:100%;margin-top:6px"></audio></div><div style="flex:1;min-width:200px"><label style="font-size:12px;color:#666">音色 B</label><select id="compare-b" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-top:2px"></select><audio id="audio-b" controls style="width:100%;margin-top:6px"></audio></div><button class="btn" id="compare-btn" onclick="compareVoices()" style="padding:6px 16px;align-self:flex-end">对比播放</button></div></div>
-        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
-            <button class="btn btn-primary" onclick="copyConfig()">复制配置</button>
-            <button class="btn" onclick="copySubscribeUrl()">复制订阅链接</button>
-        </div>
-    </div>
-    <div class="card">
-        <h2>系统状态</h2>
-        <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px;">
-            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
-                <div style="color:#666; font-size:12px; margin-bottom:4px">总合成字符</div>
-                <div style="font-size:20px; font-weight:600" id="total-chars-all">0</div>
-            </div>
-            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
-                <div style="color:#666; font-size:12px; margin-bottom:4px">总请求数</div>
-                <div style="font-size:20px; font-weight:600" id="total-requests-all">0</div>
-            </div>
-            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
-                <div style="color:#666; font-size:12px; margin-bottom:4px">缓存命中率</div>
-                <div style="font-size:20px; font-weight:600" id="cache-hit-rate">0%</div>
-            </div>
-            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
-                <div style="color:#666; font-size:12px; margin-bottom:4px">P95响应时间</div>
-                <div style="font-size:20px; font-weight:600" id="response-time-p95">0ms</div>
-            </div>
-            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
-                <div style="color:#666; font-size:12px; margin-bottom:4px">缓存条目</div>
-                <div style="font-size:20px; font-weight:600" id="cache-count">0</div>
-            </div>
-            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
-                <div style="color:#666; font-size:12px; margin-bottom:4px">缓存内存</div>
-                <div style="font-size:20px; font-weight:600" id="cache-memory">0MB</div>
-            </div>
-            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
-                <div style="color:#666; font-size:12px; margin-bottom:4px">FFmpeg支持</div>
-                <div style="font-size:20px; font-weight:600; color: var(--success)" id="ffmpeg-status">✓</div>
-            </div>
-            <div style="background:#f8f9fa; padding:12px; border-radius:8px">
-                <div style="color:#666; font-size:12px; margin-bottom:4px">Admin保护</div>
-                <div style="font-size:20px; font-weight:600" id="admin-status">✗</div>
-            </div>
-        </div>
-    </div>
-    <div class="card">
-        <h2>API 设置</h2>
-        <div id="doubao-settings" style="display:none"><div class="field"><label>API Key</label><input type="password" id="doubao-api-key" placeholder="{{ '已配置，留空不修改' if has_doubao_key else '请输入火山引擎 API Key' }}"></div><p style="color:#666;font-size:12px;margin-top:8px">使用公共 2.0 音色资源 seed-tts-2.0</p></div>
-        <div id="tencent-settings" style="display:none"><div class="field"><label>SecretId</label><input type="text" id="tencent-secret-id" value="{{ tencent_secret_id }}"></div><div class="field"><label>SecretKey</label><input type="password" id="tencent-secret-key" placeholder=""></div></div>
-        <div id="xiaomi-settings" style="display:none"><div class="field"><label>API Key</label><input type="password" id="xiaomi-api-key" value="{{ xiaomi_api_key }}" placeholder="请输入小米MiMo API Key"></div></div>
-        <div id="fishaudio-settings" style="display:none"><div class="field"><label>API Key</label><input type="password" id="fishaudio-api-key" value="{{ fishaudio_api_key }}" placeholder="请输入Fish Audio API Key"></div><div class="field"><label>自定义音色Reference ID</label><input type="text" id="fishaudio-reference-id" value="{{ fishaudio_reference_id }}" placeholder="可选，留空使用预设音色"></div></div>
-        <div style="display:flex;gap:8px;align-items:center">
-            <button class="btn btn-primary" id="save-btn" onclick="saveConfig()" style="display:none">保存设置</button>
-            <button class="btn btn-success" id="test-cfg-btn" onclick="testConfig()" style="display:none">测试连接</button>
-            <button class="btn" onclick="exportConfig()" style="font-size:12px">导出配置</button>
-            <label class="btn" style="font-size:12px;cursor:pointer">导入配置<input type="file" accept=".json" onchange="importConfig(event)" style="display:none"></label>
-            <span id="api-note" style="color:#666;font-size:12px;display:none"></span>
-        </div>
-    </div>
-    <div class="card">
-        <h2>测试</h2>
-        <div class="field"><input type="text" id="test-text" value="你好，这是一段测试语音。" style="margin-bottom:12px"></div>
-        <button class="btn btn-primary" id="test-btn" onclick="testTTS()">播放测试</button>
-        <audio id="audio-player" style="margin-top:12px;width:100%"></audio>
-    </div>
-</div>
-<div class="toast" id="toast"></div>
-<script>
-document.addEventListener('DOMContentLoaded',()=>{
-    const IP='{{ server_ip }}',cur='{{ provider }}';
-    const dv={doubao:'{{ default_voice }}',tencent:'{{ tencent_voice }}',edge:'{{ edge_voice }}',xiaomi:'{{ xiaomi_voice }}'};
-    let stats={},prov=cur,_allVoiceOptions=[];
-    const $=id=>document.getElementById(id);
-
-    // ── Authenticated fetch ──
-    // When ADMIN_TOKEN is set, every admin route requires a bearer token. The UI
-    // keeps it in localStorage and injects it here, so no individual call site
-    // has to remember. api() also surfaces a 401 as a prompt for the token
-    // rather than letting the whole page silently fail.
-    const AUTH_REQUIRED={{ 'true' if admin_protected else 'false' }};
-    const getToken=()=>localStorage.getItem('tts-admin-token')||'';
-    window.setAdminToken=()=>{const t=prompt('请输入管理令牌 (ADMIN_TOKEN)',getToken());if(t===null)return;localStorage.setItem('tts-admin-token',t.trim());toast('令牌已保存，正在刷新...');setTimeout(()=>location.reload(),800)};
-    let _authPrompted=false;
-    const api=async(url,opts)=>{
-        opts=opts||{};
-        const t=getToken();
-        if(t){opts.headers=Object.assign({},opts.headers,{'Authorization':'Bearer '+t})}
-        const r=await fetch(url,opts);
-        if(r.status===401&&!_authPrompted){_authPrompted=true;toast('需要管理令牌');setAdminToken()}
-        return r;
-    };
-    if(AUTH_REQUIRED&&!getToken()){setTimeout(()=>{toast('本服务已启用令牌保护，请设置管理令牌');setAdminToken()},500)}
-
-    // Every <audio> element owns at most one blob URL; setting a new one revokes
-    // the old, so repeated previews/comparisons don't leak objects for the
-    // lifetime of the page.
-    const setAudioBlob=(el,blob)=>{if(el._u)URL.revokeObjectURL(el._u);el._u=URL.createObjectURL(blob);el.src=el._u};
-    // Errors come back as standardized JSON; fall back to raw text.
-    const _errText=async r=>{try{const d=await r.clone().json();return (d.error&&d.error.message)||r.statusText}catch(e){try{return await r.text()}catch(e2){return r.statusText}}};
-    // Theme toggle
-    window.toggleTheme=()=>{const d=document.documentElement;const dark=d.getAttribute('data-theme')==='dark';d.setAttribute('data-theme',dark?'light':'dark');$('theme-btn').textContent=dark?'🌙 暗色':'☀️ 亮色';localStorage.setItem('tts-theme',dark?'light':'dark')};
-    const saved=localStorage.getItem('tts-theme');if(saved==='dark'){document.documentElement.setAttribute('data-theme','dark');$('theme-btn').textContent='☀️ 亮色'}
-    const setStatus=(el,ok)=>{el.textContent=ok?'已配置':'未配置';el.className='badge '+(ok?'badge-ok':'badge-err')};
-
-    const loadStats=async()=>{try{const r=await api('/api/stats');stats=await r.json();showStats()}catch(e){}};
-    const showStats=()=>{const d=stats[prov]||{};$('total-chars').textContent=(d.total_chars||0).toLocaleString();$('total-requests').textContent=(d.total_requests||0).toLocaleString();const t=new Date().toISOString().split('T')[0];const td=(d.history||[]).find(h=>h.date===t)||{};$('today-chars').textContent=(td.chars||0).toLocaleString();$('today-requests').textContent=(td.requests||0).toLocaleString();};
-
-    const loadSystemStatus=async()=>{
-        try{
-            const r=await api('/health');
-            const h=await r.json();
-            // 更新系统状态
-            const cache=h.cache||{};
-            $('cache-count').textContent=cache.count||0;
-            $('cache-memory').textContent=((cache.bytes||0)/(1024*1024)).toFixed(1)+'MB';
-            $('ffmpeg-status').textContent=h.ffmpeg_available?'✓':'✗';
-            $('ffmpeg-status').style.color=h.ffmpeg_available?'var(--success)':'var(--danger)';
-            $('admin-status').textContent=h.admin_protected?'✓':'✗';
-            $('admin-status').style.color=h.admin_protected?'var(--success)':'var(--danger)';
-            // 加载metrics
-            const mr=await api('/metrics');
-            const mt=await mr.text();
-            let totalChars=0,totalRequests=0,cacheHitRate=0,rtP95=0;
-            for(const line of mt.split('\\n')){
-                if(line.startsWith('tts_chars_total ')) totalChars=parseInt(line.split(' ')[1])||0;
-                if(line.startsWith('tts_requests_total ')) totalRequests=parseInt(line.split(' ')[1])||0;
-                if(line.startsWith('tts_cache_hit_ratio ')) cacheHitRate=parseFloat(line.split(' ')[1])||0;
-                if(line.startsWith('tts_response_time_ms_p95 ')) rtP95=parseFloat(line.split(' ')[1])||0;
-            }
-            $('total-chars-all').textContent=totalChars.toLocaleString();
-            $('total-requests-all').textContent=totalRequests.toLocaleString();
-            $('cache-hit-rate').textContent=(cacheHitRate*100).toFixed(1)+'%';
-            $('response-time-p95').textContent=Math.round(rtP95)+'ms';
-        }catch(e){}
-    };
-
-    const loadVoices=async p=>{try{const r=await api('/api/voices?provider='+p);const vs=await r.json();_allVoiceOptions=vs;const sel=$('voice-select');sel.innerHTML='';vs.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;if(v.id===dv[p])o.selected=true;sel.appendChild(o)});if($('voice-search'))$('voice-search').value='';// also fill compare selects
-const fillSel=id=>{const s=$(id);if(!s)return;s.innerHTML='';vs.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;s.appendChild(o)})};fillSel('compare-a');fillSel('compare-b');if(vs.length>1&&$('compare-b'))$('compare-b').selectedIndex=1;updateLegadoConfig()}catch(e){console.warn('loadVoices error:',e)}};
-
-    window.updateLegadoConfig=async()=>{const v=$('voice-select').value;if(!v)return;try{const r=await api('/api/legado/config?voice='+encodeURIComponent(v));const d=await r.json();$('legado-config').textContent=JSON.stringify(d,null,2)}catch(e){console.warn('updateLegadoConfig error:',e)}};
-
-    window.copyConfig=async()=>{const t=$('legado-config').textContent;try{await navigator.clipboard.writeText(t);toast('已复制到剪切板')}catch(e){const a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);a.select();try{document.execCommand('copy');toast('已复制到剪切板')}catch(_){toast('复制失败')}document.body.removeChild(a)}};
-    window.copySubscribeUrl=async()=>{const v=$('voice-select').value;if(!v){toast('请先选择音色');return}try{const r=await api('/api/legado/subscribe?voice='+encodeURIComponent(v));const d=await r.json();const u=d.url||window.location.origin+'/api/legado/subscribe?voice='+encodeURIComponent(v)+'&auto=true';await navigator.clipboard.writeText(u);toast('已复制订阅链接')}catch(e){toast('复制失败')}};
-
-    // View-only provider switch: no server write. Splitting this out means the
-    // initial setProvider(cur) on page load no longer POSTs /api/config, and
-    // re-clicking the already-active provider is a no-op.
-    const applyProvider=p=>{prov=p;document.querySelectorAll('.provider-btn').forEach(b=>b.classList.toggle('active',b.dataset.provider===p));$('doubao-settings').style.display=p==='doubao'?'block':'none';$('tencent-settings').style.display=p==='tencent'?'block':'none';$('xiaomi-settings').style.display=p==='xiaomi'?'block':'none';$('fishaudio-settings').style.display=p==='fishaudio'?'block':'none';if(p==='edge'){$('save-btn').style.display='none';$('test-cfg-btn').style.display='none';$('api-note').textContent='Edge TTS 免费使用，无需配置。';$('api-note').style.display='inline'}else{$('save-btn').style.display='inline-block';$('test-cfg-btn').style.display='inline-block';$('api-note').style.display='none'}showStats();loadVoices(p)};
-    let _savedProvider=cur;
-    window.setProvider=async p=>{
-        if(p===prov)return;
-        applyProvider(p);
-        if(p===_savedProvider)return;
-        try{
-            const r=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p})});
-            if(r.ok){_savedProvider=p}else{toast('切换服务商失败')}
-        }catch(e){toast('切换服务商失败: '+e.message)}
-    };
-
-    window.saveConfig=async()=>{const b=$('save-btn');b.disabled=true;b.textContent='保存中...';try{let d={provider:prov};const v=$('voice-select').value;if(prov==='doubao'){d.doubao_api_key=$('doubao-api-key').value||'***';d.default_voice=v}else if(prov==='tencent'){d.tencent_secret_id=$('tencent-secret-id').value;d.tencent_secret_key=$('tencent-secret-key').value||'***';d.tencent_voice=v}else if(prov==='xiaomi'){d.xiaomi_api_key=$('xiaomi-api-key').value||'***';d.xiaomi_voice=v}else if(prov==='fishaudio'){d.fishaudio_api_key=$('fishaudio-api-key').value||'***';d.fishaudio_voice=v;d.fishaudio_reference_id=$('fishaudio-reference-id').value}await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});toast('设置已保存');setTimeout(()=>location.reload(),1000)}finally{b.disabled=false;b.textContent='保存设置'}};
-
-    window.testTTS=async()=>{const b=$('test-btn');b.disabled=true;b.textContent='合成中...';try{const r=await api('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:$('test-text').value,voice:$('voice-select').value,rate:'0%'})});if(r.ok){const p=$('audio-player');setAudioBlob(p,await r.blob());p.play()}else toast('TTS失败: '+await _errText(r))}catch(e){toast('请求错误: '+e.message)}finally{b.disabled=false;b.textContent='播放测试'}};
-
-    window.previewVoice=async()=>{const v=$('voice-select').value;if(!v){toast('请先选择音色');return}try{const r=await api('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'你好，我是您的朗读助手，很高兴认识您。',voice:v,rate:'0%'})});if(r.ok){const p=$('audio-player');setAudioBlob(p,await r.blob());p.play()}else toast('试听失败: '+await _errText(r))}catch(e){toast('试听失败: '+e.message)}};
-    window.compareVoices=async()=>{const b=$('compare-btn');const text=$('compare-text').value;const va=$('compare-a').value;const vb=$('compare-b').value;if(!text||!va||!vb){toast('请填写文本并选择两个音色');return}if(b)b.disabled=true;const synthesize=async voice=>{const r=await api('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,voice,rate:'0%'})});if(!r.ok)throw new Error('TTS failed');return await r.blob()};try{const [ba,bb]=await Promise.all([synthesize(va),synthesize(vb)]);setAudioBlob($('audio-a'),ba);setAudioBlob($('audio-b'),bb);toast('对比音频已加载')}catch(e){toast('对比失败: '+e.message)}finally{if(b)b.disabled=false}};
-    window.filterVoices=()=>{const q=$('voice-search').value.toLowerCase();const sel=$('voice-select');const cur=sel.value;sel.innerHTML='';_allVoiceOptions.filter(v=>!q||v.name.toLowerCase().includes(q)||v.id.toLowerCase().includes(q)).forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.name;if(v.id===cur)o.selected=true;sel.appendChild(o)});updateLegadoConfig()};
-
-    window.testConfig=async()=>{const b=$('test-cfg-btn');b.disabled=true;b.textContent='测试中...';try{const r=await api('/api/config/test',{method:'POST'});const d=await r.json();toast(d.ok?'✅ 连接成功！'+(d.audio_size||0)+'字节':'❌ 失败: '+(d.error||'未知'))}catch(e){toast('请求错误: '+e.message)}finally{b.disabled=false;b.textContent='测试连接'}};
-
-    window.resetStats=async()=>{if(!confirm('确定要重置所有统计数据吗？'))return;await api('/api/stats',{method:'DELETE'});toast('统计已重置');loadStats()};
-    window.exportConfig=async()=>{try{const r=await api('/api/config/export');const b=await r.blob();const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download='tts-config.json';a.click();URL.revokeObjectURL(u);toast('配置已导出')}catch(e){toast('导出失败')}};
-    window.importConfig=async(e)=>{const f=e.target.files[0];if(!f)return;try{const t=await f.text();const d=JSON.parse(t);const r=await api('/api/config/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(r.ok){toast('配置已导入，刷新页面...');setTimeout(()=>location.reload(),1000)}else toast('导入失败')}catch(e){toast('导入失败: '+e.message)}};
-
-    function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
-
-    applyProvider(cur);loadStats();loadSystemStatus();
-    // 每30秒刷新系统状态
-    setInterval(loadSystemStatus,30000);
-    api('/api/config').then(r=>r.json()).then(c=>{if(c.provider_status){const s=c.provider_status;setStatus($('doubao-status'),s.doubao?.ready);setStatus($('tencent-status'),s.tencent?.ready);setStatus($('xiaomi-status'),s.xiaomi?.ready);setStatus($('fishaudio-status'),s.fishaudio?.ready)}}).catch(()=>{});
-    // SSE real-time activity feed
-    try{const _t=getToken();const es=new EventSource('/api/events'+(_t?'?token='+encodeURIComponent(_t):''));const feed=document.createElement('div');feed.id='live-feed';feed.style.cssText='max-height:200px;overflow-y:auto;font-family:monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:12px';const h=document.createElement('h3');h.textContent='📡 实时活动';h.style.cssText='margin:0 0 8px';feed.prepend(h);const main=document.querySelector('.container');if(main)main.appendChild(feed);es.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='tts_request'){const line=document.createElement('div');const ok=d.status>=200&&d.status<300;line.style.color=ok?'#4caf50':'#f44336';line.textContent=`[${d.ts?.split('T')[1]?.split('.')[0]||''}] ${d.provider||'?'} ${d.voice||''} ${d.chars}字 ${d.ms}ms ${d.status}`;feed.appendChild(line);if(feed.children.length>52)feed.removeChild(feed.children[1]);feed.scrollTop=feed.scrollHeight}}catch(ex){}};es.onerror=()=>{}}catch(ex){}
-
-    // 全部音色试听功能
-    window.showAllVoices=()=>{
-        // 创建模态框
-        const modal=document.createElement('div');
-        modal.id='voice-modal';
-        modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px';
-        modal.onclick=(e)=>{if(e.target===modal)modal.remove()};
-        // 内容容器
-        const content=document.createElement('div');
-        content.style.cssText='background:var(--card);border-radius:12px;width:100%;max-width:900px;max-height:80vh;overflow:auto;padding:20px';
-        // 头部
-        const header=document.createElement('div');
-        header.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)';
-        header.innerHTML='<h2 style="margin:0">所有音色试听</h2><button style="background:none;border:none;font-size:24px;cursor:pointer;color:var(--text)">×</button>';
-        header.querySelector('button').onclick=()=>modal.remove();
-        content.appendChild(header);
-        // 搜索框
-        const search=document.createElement('input');
-        search.placeholder='搜索音色...';
-        search.style.cssText='width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-bottom:16px';
-        content.appendChild(search);
-        // 音色网格
-        const grid=document.createElement('div');
-        grid.style.cssText='display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px';
-        // 播放音频的全局元素
-        let currentAudio=null;
-        // 生成所有音色卡片
-        _allVoiceOptions.forEach(v=>{
-            const card=document.createElement('div');
-            card.style.cssText='border:1px solid var(--border);border-radius:8px;padding:12px;display:flex;justify-content:space-between;align-items:center';
-            card.innerHTML=`<span style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v.name}</span><button class="btn" style="padding:4px 8px;font-size:12px">▶ 试听</button>`;
-            const btn=card.querySelector('button');
-            btn.onclick=async()=>{
-                btn.disabled=true;
-                btn.textContent='⏳ 加载中...';
-                try{
-                    if(currentAudio){
-                        currentAudio.pause();
-                        currentAudio.src='';
-                    }
-                    const r=await api('/speech/stream',{
-                        method:'POST',
-                        headers:{'Content-Type':'application/json'},
-                        body:JSON.stringify({text:'你好，我是这个音色的朗读效果。',voice:v.id,rate:'0%'})
-                    });
-                    if(r.ok){
-                        const bl=await r.blob();
-                        const audio=new Audio(URL.createObjectURL(bl));
-                        currentAudio=audio;
-                        audio.play();
-                        btn.textContent='⏸ 播放中';
-                        audio.onended=()=>{btn.textContent='▶ 试听'};
-                    }else toast('试听失败');
-                }catch(e){toast('试听失败: '+e.message)}finally{
-                    btn.disabled=false;
-                }
-            };
-            grid.appendChild(card);
-        });
-        // 搜索过滤
-        search.oninput=()=>{
-            const q=search.value.toLowerCase();
-            Array.from(grid.children).forEach((card,i)=>{
-                const v=_allVoiceOptions[i];
-                card.style.display=q&&!v.name.toLowerCase().includes(q)&&!v.id.toLowerCase().includes(q)?'none':'flex';
-            });
-        };
-        content.appendChild(grid);
-        modal.appendChild(content);
-        document.body.appendChild(modal);
-    };
-});
-</script>
-<!-- 模态框样式已经内联在JS里 -->
-</body>
-</html>"""
-
+@app.route('/favicon.ico')
+def favicon():
+    """Avoid a noisy browser 404; the actual icon is embedded in the page."""
+    return Response(status=204, headers={'Cache-Control': 'public, max-age=604800'})
 
 @app.route('/api/speech/batch', methods=['POST'])
 @gzipped
@@ -3762,5 +3748,9 @@ if __name__ == '__main__':
     log.info("Legado TTS Server v%s starting on port %d", __version__, port)
     log.info("Config: %s | Stats: %s", CONFIG_FILE, STATS_FILE)
     log.info("FFmpeg: %s | Admin: %s", _FFMPEG_AVAILABLE, bool(ADMIN_TOKEN))
+    if not ADMIN_TOKEN:
+        log.warning(
+            "ADMIN_TOKEN is not set; direct clients without an Origin header can access "
+            "admin APIs. Set a strong token before exposing this service to a network.")
     log.info("Rate limit: %d RPM | Cache: %d entries", RATE_LIMIT_RPM, AUDIO_CACHE_SIZE)
     app.run(host='0.0.0.0', port=port, threaded=True)

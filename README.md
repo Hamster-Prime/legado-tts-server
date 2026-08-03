@@ -111,12 +111,16 @@ gunicorn -c gunicorn.conf.py app:app
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin legado-tts
 sudo mkdir -p /opt/legado-tts
 sudo cp app.py gunicorn.conf.py requirements.txt /opt/legado-tts/
+sudo cp -r templates static /opt/legado-tts/
+sudo python3 -m venv /opt/legado-tts/.venv
+sudo /opt/legado-tts/.venv/bin/pip install -r /opt/legado-tts/requirements.txt
 sudo cp legado-tts.service /etc/systemd/system/
 sudo systemctl enable --now legado-tts
 ```
 
 该 unit 以非 root 用户运行，配置与统计写入 `/var/lib/legado-tts/`
-（由 systemd 的 `StateDirectory` 自动创建）。
+（由 systemd 的 `StateDirectory` 自动创建）。若系统未提供 `venv` 模块，
+请先安装发行版对应的 `python3-venv` 软件包。
 
 ### 测试
 ```bash
@@ -173,7 +177,7 @@ pytest -q
 | `AUDIO_CACHE_MAX_MB` | `200` | 缓存最大内存(MB) |
 | `RATE_LIMIT_RPM` | `120` | 每IP每分钟请求限制(0=不限) |
 | `RATE_LIMIT_WHITELIST` | `127.0.0.1,::1` | 限流白名单IP |
-| `ADMIN_TOKEN` | `""` | 管理API认证Token |
+| `ADMIN_TOKEN` | `""` | 管理 API 认证 Token；非本机部署必须设置强随机值 |
 | `API_KEYS` | `""` | TTS访问密钥(逗号分隔) |
 | `API_KEYS_REQUIRED` | `0` | 强制API密钥认证(1=是) |
 | `ALLOW_SSML` | `1` | 允许SSML输入(1=是/0=否) |
@@ -193,6 +197,10 @@ pytest -q
 | `FALLBACK_VOICE` | `zh-CN-XiaoxiaoNeural` | 故障转移时使用的音色 |
 | `GUNICORN_THREADS` | `min(CPU×4, 32)` | gunicorn 线程数(并发调节首选) |
 | `GUNICORN_WORKERS` | `1` | gunicorn 进程数，>1 会使限流/配额/缓存按进程各自独立 |
+
+> 安全提示：未设置 `ADMIN_TOKEN` 时，同源 WebUI 与不携带 `Origin` 的直接客户端
+> 会继续采用兼容开放模式。只要服务会被局域网或公网访问，就必须设置强随机 Token；
+> 跨站浏览器管理请求会被拒绝，但这不能替代身份认证。
 | `SSE_MAX_SUBSCRIBERS` | `20` | `/api/events` 最大并发订阅数 |
 
 ---

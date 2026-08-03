@@ -6,6 +6,8 @@ import logging
 import os
 import sys
 import tempfile
+import base64
+import uuid
 
 # Add parent dir to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -105,7 +107,10 @@ class TestConfigIO:
         with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
             path = f.name
         try:
-            test_config = {'provider': 'edge', 'appid': 'test123', 'access_token': 'tok'}
+            test_config = {
+                'provider': 'edge',
+                'doubao_api_key': 'test-key',
+            }
             _write_json(path, test_config)
             result = _read_json(path, {})
             assert result == test_config
@@ -213,7 +218,37 @@ class TestLoadConfig:
                 assert cfg['provider'] == 'doubao'
                 # Missing keys should get defaults
                 assert cfg['edge_voice'] == 'zh-CN-XiaoxiaoNeural'
-                assert cfg['appid'] == ''
+                assert cfg['doubao_api_key'] == ''
+            finally:
+                app_module.CONFIG_FILE = orig
+        finally:
+            os.unlink(path)
+
+    def test_legacy_doubao_auth_is_purged_without_migration(self):
+        legacy = {
+            'provider': 'doubao',
+            'appid': 'old-app-id',
+            'access_token': 'old-token',
+            'cluster': 'volcano_tts',
+            'doubao_resource_id': 'seed-icl-2.0',
+            'default_voice': 'zh_female_cancan_mars_bigtts',
+        }
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(legacy, f)
+            path = f.name
+        try:
+            import app as app_module
+            orig = app_module.CONFIG_FILE
+            app_module.CONFIG_FILE = path
+            try:
+                cfg = load_config()
+                assert cfg['doubao_api_key'] == ''
+                assert cfg['default_voice'] == 'zh_female_cancan_uranus_bigtts'
+                for key in ('appid', 'access_token', 'cluster', 'doubao_resource_id'):
+                    assert key not in cfg
+                persisted = _read_json(path, {})
+                for key in ('appid', 'access_token', 'cluster', 'doubao_resource_id'):
+                    assert key not in persisted
             finally:
                 app_module.CONFIG_FILE = orig
         finally:
@@ -236,72 +271,76 @@ class TestAllVoicesUnique:
 class TestDispatch:
     """Test dispatch routing."""
 
-    def test_dispatch_unknown_provider(self):
-        from app import dispatch
+    def test_dispatch_unknown_provider(self, monkeypatch):
         import app as app_module
-        orig = app_module.FALLBACK_TO_EDGE
-        app_module.FALLBACK_TO_EDGE = False
-        try:
-            audio, error, _, __ = dispatch('unknown', 'test', 'test', 0)
-            assert audio is None
-            assert 'Unknown provider' in error
-        finally:
-            app_module.FALLBACK_TO_EDGE = orig
+        monkeypatch.setattr(app_module, 'FALLBACK_TO_EDGE', False)
+        audio, error, actual_provider, actual_voice = app_module.dispatch(
+            'unknown', 'test', 'test', 0
+        )
+        assert audio is None
+        assert 'Unknown provider' in error
+        assert actual_provider is None
+        assert actual_voice is None
 
-    def test_dispatch_edge_no_network(self):
-        """Edge TTS should work (free, no API key)."""
-        from app import dispatch
-        audio, error, _, __ = dispatch('edge', '你好', 'zh-CN-XiaoxiaoNeural', 0)
+    def test_dispatch_edge_no_network(self, monkeypatch):
+        """Provider routing can be tested without calling the public Edge service."""
+        import app as app_module
+        app_module._cache_clear()
+        monkeypatch.setattr(
+            app_module, 'synthesize_edge',
+            lambda *args, **kwargs: (b'edge-audio', None),
+        )
+        audio, error, actual_provider, actual_voice = app_module.dispatch(
+            'edge', '你好', 'zh-CN-XiaoxiaoNeural', 0
+        )
         assert audio is not None, f"Edge TTS failed: {error}"
         assert len(audio) > 0
+        assert actual_provider == 'edge'
+        assert actual_voice == 'zh-CN-XiaoxiaoNeural'
 
-    def test_dispatch_doubao_no_config(self):
-        from app import dispatch
+    def test_dispatch_doubao_no_config(self, monkeypatch):
         import app as app_module
-        orig = app_module.FALLBACK_TO_EDGE
-        app_module.FALLBACK_TO_EDGE = False
-        try:
-            audio, error, _, __ = dispatch('doubao', 'test', 'zh_female_cancan_mars_bigtts', 0)
-            assert audio is None
-            assert '未配置' in error
-        finally:
-            app_module.FALLBACK_TO_EDGE = orig
+        monkeypatch.setattr(app_module, 'FALLBACK_TO_EDGE', False)
+        audio, error, actual_provider, actual_voice = app_module.dispatch(
+            'doubao', 'test', 'zh_female_cancan_uranus_bigtts', 0
+        )
+        assert audio is None
+        assert '未配置' in error
+        assert actual_provider is None
+        assert actual_voice is None
 
-    def test_dispatch_tencent_no_config(self):
-        from app import dispatch
+    def test_dispatch_tencent_no_config(self, monkeypatch):
         import app as app_module
-        orig = app_module.FALLBACK_TO_EDGE
-        app_module.FALLBACK_TO_EDGE = False
-        try:
-            audio, error, _, __ = dispatch('tencent', 'test', '501002', 0)
-            assert audio is None
-            assert '未配置' in error
-        finally:
-            app_module.FALLBACK_TO_EDGE = orig
+        monkeypatch.setattr(app_module, 'FALLBACK_TO_EDGE', False)
+        audio, error, actual_provider, actual_voice = app_module.dispatch(
+            'tencent', 'test', '501002', 0
+        )
+        assert audio is None
+        assert '未配置' in error
+        assert actual_provider is None
+        assert actual_voice is None
 
-    def test_dispatch_xiaomi_no_config(self):
-        from app import dispatch
+    def test_dispatch_xiaomi_no_config(self, monkeypatch):
         import app as app_module
-        orig = app_module.FALLBACK_TO_EDGE
-        app_module.FALLBACK_TO_EDGE = False
-        try:
-            audio, error, _, __ = dispatch('xiaomi', 'test', 'mimo_default', 0)
-            assert audio is None
-            assert '未配置' in error
-        finally:
-            app_module.FALLBACK_TO_EDGE = orig
+        monkeypatch.setattr(app_module, 'FALLBACK_TO_EDGE', False)
+        audio, error, actual_provider, actual_voice = app_module.dispatch(
+            'xiaomi', 'test', 'mimo_default', 0
+        )
+        assert audio is None
+        assert '未配置' in error
+        assert actual_provider is None
+        assert actual_voice is None
 
-    def test_dispatch_fishaudio_no_config(self):
-        from app import dispatch
+    def test_dispatch_fishaudio_no_config(self, monkeypatch):
         import app as app_module
-        orig = app_module.FALLBACK_TO_EDGE
-        app_module.FALLBACK_TO_EDGE = False
-        try:
-            audio, error, _, __ = dispatch('fishaudio', 'test', 'fish-animated', 0)
-            assert audio is None
-            assert '未配置' in error
-        finally:
-            app_module.FALLBACK_TO_EDGE = orig
+        monkeypatch.setattr(app_module, 'FALLBACK_TO_EDGE', False)
+        audio, error, actual_provider, actual_voice = app_module.dispatch(
+            'fishaudio', 'test', 'fish-animated', 0
+        )
+        assert audio is None
+        assert '未配置' in error
+        assert actual_provider is None
+        assert actual_voice is None
 
 
 class TestXiaomiStyle:
@@ -396,17 +435,23 @@ class TestAPIEndpoints:
     """Test Flask API endpoints."""
 
     @pytest.fixture(autouse=True)
-    def setup_app(self):
+    def setup_app(self, monkeypatch):
         self.tmpdir = tempfile.mkdtemp()
         import app as app_module
         self.orig_config = app_module.CONFIG_FILE
         self.orig_stats = app_module.STATS_FILE
         app_module.CONFIG_FILE = os.path.join(self.tmpdir, 'config.json')
         app_module.STATS_FILE = os.path.join(self.tmpdir, 'stats.json')
+        app_module._cache_clear()
+        monkeypatch.setattr(
+            app_module, 'synthesize_edge',
+            lambda *args, **kwargs: (b'edge-test-audio', None),
+        )
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
         yield
+        app_module._cache_clear()
         app_module.CONFIG_FILE = self.orig_config
         app_module.STATS_FILE = self.orig_stats
         import shutil
@@ -461,7 +506,9 @@ class TestAPIEndpoints:
         assert r.status_code == 200
         data = r.get_json()
         assert 'provider' in data
-        assert 'access_token' in data
+        assert 'doubao_api_key' in data
+        assert 'appid' not in data
+        assert 'access_token' not in data
 
     def test_config_post(self):
         r = self.client.post('/api/config', json={'provider': 'edge'})
@@ -470,12 +517,12 @@ class TestAPIEndpoints:
 
     def test_config_post_masked_values_preserved(self):
         # First save a real value
-        self.client.post('/api/config', json={'appid': 'real123', 'access_token': 'real_token'})
+        self.client.post('/api/config', json={'doubao_api_key': 'real_key'})
         # Now save with masked token
-        self.client.post('/api/config', json={'access_token': '***'})
+        self.client.post('/api/config', json={'doubao_api_key': '***'})
         # Verify token was not overwritten
         cfg = load_config()
-        assert cfg['access_token'] == 'real_token'
+        assert cfg['doubao_api_key'] == 'real_key'
 
     def test_stats_get(self):
         r = self.client.get('/api/stats')
@@ -677,16 +724,16 @@ class TestAPIEndpoints:
     def test_config_get_masks_secrets(self):
         # Save secrets first
         self.client.post('/api/config', json={
-            'access_token': 'my_secret_token_12345',
+            'doubao_api_key': 'my_doubao_key_12345',
             'tencent_secret_key': 'my_tencent_key_abcdef',
-            'appid': '1234567890'
         })
         r = self.client.get('/api/config')
         data = r.get_json()
-        assert data['access_token'] == '***'
+        assert data['doubao_api_key'] == '***'
         assert data['tencent_secret_key'] == '***'
-        assert '***' in data['appid']
-        assert 'my_secret_token' not in str(data)
+        assert 'my_doubao_key' not in str(data)
+        assert 'appid' not in data
+        assert 'access_token' not in data
 
     def test_multiple_voices_unique_ids(self):
         """All voice IDs across providers must be unique."""
@@ -772,7 +819,7 @@ class TestAdminAuth:
     """Test ADMIN_TOKEN protection."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self, monkeypatch):
         self.tmpdir = tempfile.mkdtemp()
         import app as app_module
         self.orig_config = app_module.CONFIG_FILE
@@ -781,6 +828,11 @@ class TestAdminAuth:
         app_module.CONFIG_FILE = os.path.join(self.tmpdir, 'config.json')
         app_module.STATS_FILE = os.path.join(self.tmpdir, 'stats.json')
         app_module.ADMIN_TOKEN = 'test-secret-token'
+        app_module._cache_clear()
+        monkeypatch.setattr(
+            app_module, 'synthesize_edge',
+            lambda *args, **kwargs: (b'edge-test-audio', None),
+        )
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -982,13 +1034,18 @@ class TestSSEndpoints:
     """Test SSML and batch endpoints."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self, monkeypatch):
         self.tmpdir = tempfile.mkdtemp()
         import app as app_module
         self.orig_config = app_module.CONFIG_FILE
         self.orig_stats = app_module.STATS_FILE
         app_module.CONFIG_FILE = os.path.join(self.tmpdir, 'config.json')
         app_module.STATS_FILE = os.path.join(self.tmpdir, 'stats.json')
+        app_module._cache_clear()
+        monkeypatch.setattr(
+            app_module, 'synthesize_edge',
+            lambda *args, **kwargs: (b'edge-test-audio', None),
+        )
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -1041,7 +1098,7 @@ class TestFallback:
     """Test automatic provider fallback."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self, monkeypatch):
         self.tmpdir = tempfile.mkdtemp()
         import app as app_module
         self.orig_config = app_module.CONFIG_FILE
@@ -1049,6 +1106,11 @@ class TestFallback:
         self.orig_fallback = app_module.FALLBACK_TO_EDGE
         app_module.CONFIG_FILE = os.path.join(self.tmpdir, 'config.json')
         app_module.STATS_FILE = os.path.join(self.tmpdir, 'stats.json')
+        app_module._cache_clear()
+        monkeypatch.setattr(
+            app_module, 'synthesize_edge',
+            lambda *args, **kwargs: (b'edge-fallback-audio', None),
+        )
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -1065,7 +1127,7 @@ class TestFallback:
         app_module.FALLBACK_TO_EDGE = True
         # doubao without config should fail, then fallback to Edge
         r = self.client.post('/speech/stream', json={
-            'text': '测试', 'voice': 'zh_female_cancan_mars_bigtts'
+            'text': '测试', 'voice': 'zh_female_cancan_uranus_bigtts'
         })
         # Edge TTS might work (200) or fail (500), but should not be 400
         assert r.status_code in (200, 500)
@@ -1081,7 +1143,7 @@ class TestFallback:
         import app as app_module
         app_module.FALLBACK_TO_EDGE = False
         r = self.client.post('/speech/stream', json={
-            'text': '测试', 'voice': 'zh_female_cancan_mars_bigtts'
+            'text': '测试', 'voice': 'zh_female_cancan_uranus_bigtts'
         })
         assert r.status_code == 500
         assert '未配置' in r.get_data(as_text=True)
@@ -1121,7 +1183,7 @@ class TestConfigExportImport:
 
     def test_import_valid_config(self):
         r = self.client.post('/api/config/import',
-            json={'provider': 'doubao', 'default_voice': 'zh_female_cancan_mars_bigtts'})
+            json={'provider': 'doubao', 'default_voice': 'zh_female_cancan_uranus_bigtts'})
         assert r.status_code == 200
         data = r.get_json()
         assert data['status'] == 'ok'
@@ -1243,7 +1305,7 @@ class TestAuditLog:
     """Test request audit log endpoint."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self, monkeypatch):
         self.tmpdir = tempfile.mkdtemp()
         import app as app_module
         self.orig_config = app_module.CONFIG_FILE
@@ -1252,6 +1314,11 @@ class TestAuditLog:
         app_module.CONFIG_FILE = os.path.join(self.tmpdir, 'config.json')
         app_module.STATS_FILE = os.path.join(self.tmpdir, 'stats.json')
         app_module.ADMIN_TOKEN = ''
+        app_module._cache_clear()
+        monkeypatch.setattr(
+            app_module, 'synthesize_edge',
+            lambda *args, **kwargs: (b'edge-test-audio', None),
+        )
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -1512,8 +1579,13 @@ class TestEdgeCases:
     """Test boundary conditions and edge cases."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self, monkeypatch):
         import app as app_module
+        app_module._cache_clear()
+        monkeypatch.setattr(
+            app_module, 'synthesize_edge',
+            lambda *args, **kwargs: (b'edge-test-audio', None),
+        )
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -1655,8 +1727,163 @@ class TestVoiceFavorites:
         assert count1 == count2
 
 
+class _FakeDoubaoResponse:
+    def __init__(self, events, status_code=200):
+        self.events = events
+        self.status_code = status_code
+        self.headers = {'X-Tt-Logid': 'test-logid'}
+        self.text = ''
+        self.reason = 'OK'
+        self.closed = False
+
+    def iter_lines(self, decode_unicode=False):
+        for event in self.events:
+            if isinstance(event, (str, bytes)):
+                yield event
+            else:
+                yield json.dumps(event, ensure_ascii=False)
+
+    def close(self):
+        self.closed = True
+
+
+class TestDoubaoStreaming:
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        import app as app_module
+        self.app_module = app_module
+        self.orig_config = app_module.CONFIG_FILE
+        self.orig_stats = app_module.STATS_FILE
+        self.orig_fallback = app_module.FALLBACK_TO_EDGE
+        app_module.CONFIG_FILE = str(tmp_path / 'config.json')
+        app_module.STATS_FILE = str(tmp_path / 'stats.json')
+        app_module.FALLBACK_TO_EDGE = False
+        app_module._cache_clear()
+        config = app_module.DEFAULT_CONFIG.copy()
+        config.update({
+            'provider': 'doubao',
+            'doubao_api_key': 'single-test-key',
+            'default_voice': 'zh_female_cancan_uranus_bigtts',
+        })
+        app_module.save_config(config)
+        self.client = app_module.app.test_client()
+        yield
+        app_module._cache_clear()
+        app_module.CONFIG_FILE = self.orig_config
+        app_module.STATS_FILE = self.orig_stats
+        app_module.FALLBACK_TO_EDGE = self.orig_fallback
+
+    @staticmethod
+    def _success_response():
+        return _FakeDoubaoResponse([
+            {'code': 0, 'message': 'OK',
+             'data': base64.b64encode(b'audio-1').decode()},
+            {'code': 0, 'message': 'OK', 'sentence': {'text': '测试'}},
+            {'code': 0, 'message': 'OK',
+             'data': base64.b64encode(b'audio-2').decode()},
+            {'code': 20000000, 'message': 'ok', 'data': None},
+        ])
+
+    def test_v3_single_key_protocol_and_audio_chunks(self, monkeypatch):
+        captured = {}
+        response = self._success_response()
+
+        def fake_post(url, **kwargs):
+            captured['url'] = url
+            captured.update(kwargs)
+            return response
+
+        monkeypatch.setattr(self.app_module._http_session, 'post', fake_post)
+        chunks = list(self.app_module.stream_doubao(
+            '测试文本',
+            'zh_female_cancan_uranus_bigtts',
+            speech_rate=20,
+            section_id='section-1',
+        ))
+
+        assert chunks == [b'audio-1', b'audio-2']
+        assert captured['url'] == (
+            'https://openspeech.bytedance.com/api/v3/tts/unidirectional'
+        )
+        assert self.app_module.DOUBAO_TTS_URL == captured['url']
+        assert captured['stream'] is True
+        headers = captured['headers']
+        assert headers['X-Api-Key'] == 'single-test-key'
+        assert headers['X-Api-Resource-Id'] == 'seed-tts-2.0'
+        assert self.app_module.DOUBAO_RESOURCE_ID == 'seed-tts-2.0'
+        uuid.UUID(headers['X-Api-Request-Id'])
+        assert 'Authorization' not in headers
+        payload = captured['json']
+        assert set(payload) == {'req_params'}
+        assert payload['req_params']['text'] == '测试文本'
+        assert payload['req_params']['speaker'] == 'zh_female_cancan_uranus_bigtts'
+        assert payload['req_params']['section_id'] == 'section-1'
+        assert payload['req_params']['audio_params']['speech_rate'] == 20
+        assert 'app' not in payload
+        assert response.closed is True
+
+    def test_provider_error_closes_upstream(self, monkeypatch):
+        response = _FakeDoubaoResponse([
+            {'code': 45000000, 'message': 'resource mismatch'},
+        ])
+        monkeypatch.setattr(
+            self.app_module._http_session, 'post',
+            lambda *args, **kwargs: response,
+        )
+        with pytest.raises(self.app_module.ProviderStreamError, match='45000000'):
+            list(self.app_module.stream_doubao(
+                '测试', 'zh_female_cancan_uranus_bigtts'
+            ))
+        assert response.closed is True
+
+    def test_config_test_does_not_hide_doubao_error_with_edge_fallback(self, monkeypatch):
+        response = _FakeDoubaoResponse([
+            {'code': 45000000, 'message': 'resource mismatch'},
+        ])
+        monkeypatch.setattr(
+            self.app_module._http_session, 'post',
+            lambda *args, **kwargs: response,
+        )
+        monkeypatch.setattr(self.app_module, 'FALLBACK_TO_EDGE', True)
+
+        def unexpected_edge(*args, **kwargs):
+            pytest.fail('configuration test must not use Edge fallback')
+
+        monkeypatch.setattr(self.app_module, 'synthesize_edge', unexpected_edge)
+        result = self.client.post('/api/config/test')
+        data = result.get_json()
+        assert result.status_code == 200
+        assert data['ok'] is False
+        assert '45000000' in data['error']
+
+    def test_legado_endpoint_streams_without_content_length(self, monkeypatch):
+        response = self._success_response()
+        monkeypatch.setattr(
+            self.app_module._http_session, 'post',
+            lambda *args, **kwargs: response,
+        )
+        result = self.client.post(
+            '/speech/stream',
+            json={
+                'text': '测试文本',
+                'voice': 'zh_female_cancan_uranus_bigtts',
+                'rate': '+20%',
+            },
+            buffered=False,
+        )
+        assert result.status_code == 200
+        assert result.is_streamed
+        assert result.headers['Content-Type'] == 'audio/mpeg'
+        assert result.headers['X-TTS-Provider'] == 'doubao'
+        assert result.headers['X-Accel-Buffering'] == 'no'
+        assert 'Content-Length' not in result.headers
+        assert b''.join(result.response) == b'audio-1audio-2'
+        result.close()
+        assert response.closed is True
+
+
 class TestStreaming:
-    """Test chunked streaming endpoint."""
+    """Test the Edge-compatible chunked streaming endpoint."""
 
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -1678,6 +1905,33 @@ class TestStreaming:
             'text': 'test', 'voice': 'invalid-voice-xyz'
         })
         assert r.status_code == 400
+
+    def test_chunked_edge_streams_audio(self, monkeypatch):
+        import app as app_module
+
+        class FakeCommunicate:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def stream(self):
+                yield {'type': 'audio', 'data': b'edge-1'}
+                yield {'type': 'WordBoundary', 'text': '测试'}
+                yield {'type': 'audio', 'data': b'edge-2'}
+
+        app_module._cache_clear()
+        monkeypatch.setattr(app_module.edge_tts, 'Communicate', FakeCommunicate)
+        monkeypatch.setattr(app_module, 'update_stats', lambda *args, **kwargs: None)
+        r = self.client.post(
+            '/speech/stream/chunked',
+            json={'text': '测试', 'voice': 'zh-CN-XiaoxiaoNeural'},
+            buffered=False,
+        )
+        assert r.status_code == 200
+        assert r.is_streamed
+        assert r.headers['X-Accel-Buffering'] == 'no'
+        assert 'Content-Length' not in r.headers
+        assert b''.join(r.response) == b'edge-1edge-2'
+        r.close()
 
     def test_rate_limit_headers_present(self):
         r = self.client.get('/health')

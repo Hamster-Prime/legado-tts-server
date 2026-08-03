@@ -5,7 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.9.0-green.svg)
-![Tests](https://img.shields.io/badge/tests-189%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-207%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
 
@@ -18,8 +18,9 @@
 **核心能力**
 - 多源聚合：Edge TTS (免费)、火山引擎、腾讯云、小米MiMo、Fish Audio
 - 智能路由：单一接口，根据音色参数自动分发到对应 provider
+- 听书低延迟：火山引擎 v3 HTTP Chunked 单向流，上游音频分片生成后立即向 Legado 透传
 - OpenAI 兼容：`/v1/audio/speech` + `/v1/models`，支持 MP3/WAV/OGG 输出
-- 长文本分块：自动按句子边界拆分，逐段合成再拼接
+- 长文本分块：自动按句子边界拆分；流式 Provider 逐段连续输出
 - 批量合成：`/api/speech/batch` 一次请求合成最多 20 段文本
 - SSML 支持：Edge TTS 原生 SSML 1.0 语法
 - 音频格式转换：MP3 / WAV / OGG（需 FFmpeg）
@@ -61,7 +62,7 @@
 | 服务商 | 音色数 | 说明 |
 |--------|--------|------|
 | Edge TTS | 36 (精选) / 322 (完整) | 免费，中/英/日/韩/粤语/台湾腔，支持情感风格、音量、音调。`/api/voices` 返回精选列表，`/api/voices/edge/live` 返回微软完整列表 |
-| 火山引擎 | 8 | 灿灿、思思、贴心女生等 |
+| 火山引擎 | 11 | 2.0 音色：灿灿、思思、悬疑解说、少儿故事等 |
 | 腾讯云 | 7 | 智菊、智斌、智兰等 |
 | 小米 MiMo | 3 | 风格控制、方言、歌声合成 |
 | Fish Audio | 5 | 高质量多语言 + 声音克隆 |
@@ -125,6 +126,40 @@ pytest -q
 
 ---
 
+## 火山引擎配置
+
+火山引擎已切换到官方 v3 HTTP Chunked 单向流式语音合成接口，只使用一个 API Key：
+
+1. 在火山引擎控制台的“API Key 管理”创建 Key。
+2. 打开本服务 Web 管理页，选择“火山引擎”。
+3. 填写 API Key。服务固定使用公共 2.0 音色资源 `seed-tts-2.0`。
+
+服务访问火山引擎时仅发送以下鉴权与模型选择请求头：
+
+- `X-Api-Key: <你的 API Key>`
+- `X-Api-Resource-Id: seed-tts-2.0`
+- `X-Api-Request-Id: <每次请求生成的 UUID>`
+
+配置文件中的对应字段为：
+
+```json
+{
+  "doubao_api_key": "your-api-key"
+}
+```
+
+旧的 `appid`、`access_token`、`cluster` 鉴权已完全移除，也不再发送旧的 `Authorization: Bearer; ...` 请求头。服务读取旧配置时会删除这些字段，不会把旧 Token 当作新 API Key。升级后需要重新填写 API Key。旧版 `mars/moon` 音色 ID 会自动映射到对应的 `uranus` 2.0 音色。
+
+注意：`doubao_api_key` 是服务访问火山引擎的出站凭证；环境变量 `API_KEYS` 是限制客户端访问本服务的入站凭证，两者用途不同。
+
+官方参考：
+
+- [单向流式语音合成 HTTP（单 API Key）](https://docs.volcengine.com/docs/6561/2528925?lang=zh)
+- [HTTP Chunked 响应格式与结束帧](https://www.volcengine.com/docs/6561/1598757?lang=zh)
+- [豆包语音合成模型 2.0 音色列表](https://www.volcengine.com/docs/6561/1257544?lang=zh)
+
+---
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -167,8 +202,8 @@ pytest -q
 ### TTS 合成
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/speech/stream` | Legado TTS 合成（支持 style/volume/pitch） |
-| POST | `/speech/stream/chunked` | Edge TTS 流式合成（低延迟） |
+| POST | `/speech/stream` | Legado TTS；火山引擎端到端流式输出 |
+| POST | `/speech/stream/chunked` | 兼容入口；火山引擎和 Edge 流式输出 |
 | POST | `/v1/audio/speech` | OpenAI 兼容 TTS |
 | POST | `/api/speech/batch` | 批量合成（最多 `BATCH_MAX_TEXTS` 条，默认20） |
 | POST | `/api/tts/preview` | 试听短句（返回音频，计入限流与配额） |
@@ -258,6 +293,28 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 
 > 故障转移时 `X-TTS-Provider` / `X-TTS-Voice` 报告**实际**合成方，
 > `X-TTS-Requested-*` 保留原始请求值。
+
+---
+
+## 流式部署说明
+
+- `/speech/stream` 对火山引擎执行真实的端到端流式传输：上游返回按行分隔的 JSON 事件，服务逐块 Base64 解码并以 `audio/mpeg` 立即转发给 Legado，不等待整段音频完成。
+- 流式响应不设置 `Content-Length`，并发送 `X-Accel-Buffering: no`。
+- 如前置 Nginx，请关闭该路径的响应缓冲和缓存，并把读取超时设置得足够覆盖长段落：
+
+```nginx
+location /speech/stream {
+    proxy_pass http://legado_tts;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 300s;
+}
+```
+
+若客户端使用兼容入口 `/speech/stream/chunked`，请对该路径应用相同配置；外层 CDN 或网关也必须关闭响应缓冲，否则会重新变成整段音频完成后才开始播放。
+
+OpenAI 兼容接口和批量接口仍会收集完整音频，以支持格式转换和 Base64 批量返回。
 
 ---
 

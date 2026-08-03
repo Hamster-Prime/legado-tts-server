@@ -643,10 +643,8 @@ def _check_admin():
 
 DEFAULT_CONFIG = {
     'provider': 'edge',
-    'appid': '',
-    'access_token': '',
+    'doubao_api_key': '',
     'default_voice': 'zh-CN-XiaoxiaoNeural',
-    'cluster': 'volcano_tts',
     'tencent_secret_id': '',
     'tencent_secret_key': '',
     'tencent_voice': '501002',
@@ -664,16 +662,32 @@ DEFAULT_CONFIG = {
 # ──────────────────────────────────────────────
 # Voice catalogs
 # ──────────────────────────────────────────────
+DOUBAO_RESOURCE_ID = 'seed-tts-2.0'
+
 DOUBAO_VOICES = [
-    {"id": "zh_female_cancan_mars_bigtts", "name": "知性灿灿"},
-    {"id": "zh_female_shuangkuaisisi_moon_bigtts", "name": "爽快思思"},
-    {"id": "zh_female_tiexinnvsheng_mars_bigtts", "name": "贴心女生"},
-    {"id": "zh_female_jitangmeimei_mars_bigtts", "name": "鸡汤妹妹"},
-    {"id": "zh_female_mengyatou_mars_bigtts", "name": "萌丫头"},
-    {"id": "zh_male_shaonianzixin_moon_bigtts", "name": "少年梓辛"},
-    {"id": "zh_male_wennuanahu_moon_bigtts", "name": "温暖阿虎"},
-    {"id": "zh_male_jieshuonansheng_mars_bigtts", "name": "磁性解说"},
+    {"id": "zh_female_cancan_uranus_bigtts", "name": "知性灿灿"},
+    {"id": "zh_female_shuangkuaisisi_uranus_bigtts", "name": "爽快思思"},
+    {"id": "zh_female_tiexinnvsheng_uranus_bigtts", "name": "贴心女声"},
+    {"id": "zh_female_jitangmei_uranus_bigtts", "name": "鸡汤妹妹"},
+    {"id": "zh_female_mengyatou_uranus_bigtts", "name": "萌丫头"},
+    {"id": "zh_male_shaonianzixin_uranus_bigtts", "name": "少年梓辛"},
+    {"id": "zh_male_wennuanahu_uranus_bigtts", "name": "温暖阿虎"},
+    {"id": "zh_male_cixingjieshuonan_uranus_bigtts", "name": "磁性解说男声"},
+    {"id": "zh_male_xuanyijieshuo_uranus_bigtts", "name": "悬疑解说"},
+    {"id": "zh_male_baqiqingshu_uranus_bigtts", "name": "霸气青叔"},
+    {"id": "zh_female_shaoergushi_uranus_bigtts", "name": "少儿故事"},
 ]
+
+LEGACY_DOUBAO_VOICE_MAP = {
+    'zh_female_cancan_mars_bigtts': 'zh_female_cancan_uranus_bigtts',
+    'zh_female_shuangkuaisisi_moon_bigtts': 'zh_female_shuangkuaisisi_uranus_bigtts',
+    'zh_female_tiexinnvsheng_mars_bigtts': 'zh_female_tiexinnvsheng_uranus_bigtts',
+    'zh_female_jitangmeimei_mars_bigtts': 'zh_female_jitangmei_uranus_bigtts',
+    'zh_female_mengyatou_mars_bigtts': 'zh_female_mengyatou_uranus_bigtts',
+    'zh_male_shaonianzixin_moon_bigtts': 'zh_male_shaonianzixin_uranus_bigtts',
+    'zh_male_wennuanahu_moon_bigtts': 'zh_male_wennuanahu_uranus_bigtts',
+    'zh_male_jieshuonansheng_mars_bigtts': 'zh_male_cixingjieshuonan_uranus_bigtts',
+}
 
 TENCENT_VOICES = [
     {"id": "501002", "name": "智菊 - 阅读女声"},
@@ -772,11 +786,14 @@ _VOICE_ALIASES = {
     '云健': 'zh-CN-YunjianNeural',
     '晓辰': 'zh-CN-XiaochenNeural',
     '晓涵': 'zh-CN-XiaohanNeural',
-    # Doubao shorthand ('甸甘' was a typo for the 知性灿灿 voice; kept as an alias
-    # so any existing Legado config that used it keeps working)
-    '灿灿': 'zh_female_cancan_mars_bigtts',
-    '甸甘': 'zh_female_cancan_mars_bigtts',
+    # Doubao shorthand
+    '灿灿': 'zh_female_cancan_uranus_bigtts',
+    '思思': 'zh_female_shuangkuaisisi_uranus_bigtts',
+    # Historical typo retained as a display-name alias, but it now resolves to
+    # the supported 2.0 voice rather than the removed Mars voice.
+    '甸甘': 'zh_female_cancan_uranus_bigtts',
 }
+_VOICE_ALIASES.update(LEGACY_DOUBAO_VOICE_MAP)
 # Aliases must resolve to a real voice ID, otherwise resolve_provider() sends the
 # request to a provider that will reject it.
 _VOICE_ALIASES = {k: v for k, v in _VOICE_ALIASES.items() if v in _ALL_VOICE_IDS}
@@ -872,7 +889,7 @@ def _copy_config(cfg):
 
 
 def load_config():
-    """Load config with in-memory cache. Re-reads file if mtime changed."""
+    """Load config with mtime caching and purge removed Doubao credentials."""
     try:
         st = os.stat(CONFIG_FILE)
         # Include size and inode: mtime alone has coarse granularity on some
@@ -884,12 +901,35 @@ def load_config():
         if _config_cache['data'] is not None and _config_cache['mtime'] == stamp:
             return _copy_config(_config_cache['data'])
     # Cache miss or file changed
-    cfg = _read_json(CONFIG_FILE, None)
+    raw = _read_json(CONFIG_FILE, None)
+    cfg = raw.copy() if isinstance(raw, dict) else {}
+    changed = False
+    for key in ('appid', 'access_token', 'cluster', 'doubao_resource_id'):
+        if key in cfg:
+            cfg.pop(key, None)
+            changed = True
+    old_voice = cfg.get('default_voice')
+    if old_voice in LEGACY_DOUBAO_VOICE_MAP:
+        cfg['default_voice'] = LEGACY_DOUBAO_VOICE_MAP[old_voice]
+        changed = True
+    favorites = cfg.get('voice_favorites')
+    if isinstance(favorites, list):
+        migrated = [LEGACY_DOUBAO_VOICE_MAP.get(voice, voice) for voice in favorites]
+        if migrated != favorites:
+            cfg['voice_favorites'] = migrated
+            changed = True
     if not isinstance(cfg, dict):
         cfg = {}
     for k, v in DEFAULT_CONFIG.items():
         if k not in cfg:
             cfg[k] = v.copy() if isinstance(v, (dict, list)) else v
+    if changed and os.path.exists(CONFIG_FILE):
+        try:
+            _write_json(CONFIG_FILE, cfg)
+            st = os.stat(CONFIG_FILE)
+            stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError as e:
+            log.warning("Failed to purge legacy Doubao config: %s", e)
     with _config_cache_lock:
         _config_cache['data'] = cfg
         _config_cache['mtime'] = stamp
@@ -897,7 +937,18 @@ def load_config():
 
 
 def save_config(config):
-    _write_json(CONFIG_FILE, config)
+    clean = _copy_config(config)
+    for key in ('appid', 'access_token', 'cluster', 'doubao_resource_id'):
+        clean.pop(key, None)
+    old_voice = clean.get('default_voice')
+    if old_voice in LEGACY_DOUBAO_VOICE_MAP:
+        clean['default_voice'] = LEGACY_DOUBAO_VOICE_MAP[old_voice]
+    favorites = clean.get('voice_favorites')
+    if isinstance(favorites, list):
+        clean['voice_favorites'] = [
+            LEGACY_DOUBAO_VOICE_MAP.get(voice, voice) for voice in favorites
+        ]
+    _write_json(CONFIG_FILE, clean)
     # Invalidate cache
     with _config_cache_lock:
         _config_cache['data'] = None
@@ -1055,35 +1106,116 @@ def _retry(func, retries=2, delay=0.5):
 # TTS Providers
 # ──────────────────────────────────────────────
 
-def synthesize_doubao(text, voice, speed_ratio=1.0):
+DOUBAO_TTS_URL = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional'
+
+
+class ProviderStreamError(RuntimeError):
+    """Raised when an upstream streaming TTS response cannot be completed."""
+
+
+def stream_doubao(text, voice, speech_rate=0, section_id=None):
+    """Yield MP3 chunks from Volcengine's v3 HTTP Chunked TTS API."""
     config = load_config()
-    if not config.get('appid') or not config.get('access_token'):
-        return None, "未配置火山引擎AppID或Token"
+    api_key = config.get('doubao_api_key', '')
+    if not api_key:
+        raise ProviderStreamError("未配置火山引擎 API Key")
+    request_id = str(uuid.uuid4())
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer; {config['access_token']}",
+        "Connection": "keep-alive",
+        "X-Api-Key": api_key,
+        "X-Api-Resource-Id": DOUBAO_RESOURCE_ID,
+        "X-Api-Request-Id": request_id,
     }
+    req_params = {
+        "text": text,
+        "speaker": voice,
+        "audio_params": {
+            "format": "mp3",
+            "sample_rate": 24000,
+            "speech_rate": int(max(-50, min(100, round(speech_rate)))),
+        },
+    }
+    if section_id:
+        req_params["section_id"] = section_id
     payload = {
-        "app": {"appid": config["appid"], "token": "placeholder",
-                "cluster": config.get("cluster", "volcano_tts")},
-        "user": {"uid": "legado_user"},
-        "audio": {"voice_type": voice, "encoding": "mp3", "speed_ratio": speed_ratio},
-        "request": {"reqid": str(uuid.uuid4()), "text": text, "operation": "query"},
+        "req_params": req_params,
     }
-    def _do():
-        resp = _http_session.post(
-            "https://openspeech.bytedance.com/api/v1/tts",
-            headers=headers, json=payload, timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT))
-        result = resp.json()
-        if result.get("code") != 3000:
-            return None, f"火山引擎API错误: {result.get('message', 'Unknown')}"
-        b64 = result.get("data", "")
-        if not b64:
-            return None, "火山引擎返回空音频"
-        return base64.b64decode(b64), None
+    resp = None
+    logid = ''
+    received_audio = False
+    completed = False
     try:
-        return _retry(_do)
+        resp = _http_session.post(
+            DOUBAO_TTS_URL,
+            headers=headers,
+            json=payload,
+            stream=True,
+            timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT),
+        )
+        logid = resp.headers.get('X-Tt-Logid', '')
+        if resp.status_code < 200 or resp.status_code >= 300:
+            detail = (resp.text or '').strip()[:500]
+            suffix = f" logid={logid}" if logid else ''
+            raise ProviderStreamError(
+                f"火山引擎 HTTP {resp.status_code}: "
+                f"{detail or getattr(resp, 'reason', 'Unknown')}{suffix}"
+            )
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            if isinstance(raw_line, bytes):
+                raw_line = raw_line.decode('utf-8')
+            try:
+                event = json.loads(raw_line)
+            except (TypeError, ValueError) as e:
+                raise ProviderStreamError(f"火山引擎返回了无效 JSON: {e}") from e
+            try:
+                code = int(event.get('code', 0))
+            except (TypeError, ValueError) as e:
+                raise ProviderStreamError("火山引擎返回了无效状态码") from e
+            if code == 20000000:
+                completed = True
+                break
+            if code != 0:
+                message = event.get('message', 'Unknown error')
+                suffix = f" logid={logid}" if logid else ''
+                raise ProviderStreamError(f"火山引擎 API 错误 {code}: {message}{suffix}")
+            encoded = event.get('data')
+            if not encoded:
+                continue
+            try:
+                audio_chunk = base64.b64decode(encoded, validate=True)
+            except Exception as e:
+                raise ProviderStreamError(f"火山引擎返回了无效音频数据: {e}") from e
+            if audio_chunk:
+                received_audio = True
+                yield audio_chunk
+        if not completed:
+            suffix = f" logid={logid}" if logid else ''
+            raise ProviderStreamError(f"火山引擎流式响应未正常结束{suffix}")
+        if not received_audio:
+            suffix = f" logid={logid}" if logid else ''
+            raise ProviderStreamError(f"火山引擎返回空音频{suffix}")
     except Exception as e:
+        if isinstance(e, ProviderStreamError):
+            raise
+        suffix = f" logid={logid}" if logid else ''
+        raise ProviderStreamError(f"火山引擎请求失败: {e}{suffix}") from e
+    finally:
+        if resp is not None:
+            resp.close()
+
+
+def synthesize_doubao(text, voice, speech_rate=0):
+    """Collect the streaming Volcengine response for non-streaming callers."""
+    try:
+        section_id = str(uuid.uuid4())
+        audio = b''.join(stream_doubao(
+            text, voice, speech_rate=speech_rate, section_id=section_id
+        ))
+        return audio, None
+    except ProviderStreamError as e:
         return None, str(e)
 
 
@@ -1968,7 +2100,7 @@ def _dispatch_single(provider, text, voice, pct, style=None, volume='+0%',
     elif provider == 'tencent':
         audio, err = synthesize_tencent(text, voice, max(-2, min(6, pct / 50)))
     elif provider == 'doubao':
-        audio, err = synthesize_doubao(text, voice, max(0.2, min(3.0, 1.0 + pct / 100)))
+        audio, err = synthesize_doubao(text, voice, max(-50, min(100, pct)))
     elif provider == 'xiaomi':
         audio, err = synthesize_xiaomi(text, voice, max(0.2, min(3.0, 1.0 + pct / 100)))
     elif provider == 'fishaudio':
@@ -1978,6 +2110,141 @@ def _dispatch_single(provider, text, voice, pct, style=None, volume='+0%',
     if audio:
         _cache_put(cache_key, audio)
     return audio, err
+
+
+def _iter_provider_stream(provider, text, voice, pct, style=None,
+                          volume='+0%', pitch='+0Hz'):
+    """Yield provider audio while lazily processing long-text chunks."""
+    chunks = _split_text_chunks(text)
+    section_id = str(uuid.uuid4()) if provider == 'doubao' else None
+    for chunk in chunks:
+        if provider == 'doubao':
+            yield from stream_doubao(
+                chunk,
+                voice,
+                speech_rate=max(-50, min(100, pct)),
+                section_id=section_id,
+            )
+        elif provider == 'edge':
+            yield from _edge_stream_iter(
+                chunk, voice, rate=_pct_to_rate(pct), style=style,
+                volume=volume, pitch=pitch,
+            )
+        else:
+            raise ProviderStreamError(f'Provider does not support streaming: {provider}')
+
+
+def _doubao_stream_response(text, voice, pct, style=None, volume='+0%',
+                            pitch='+0Hz', chars=None):
+    """Return a Flask response that forwards Volcengine audio incrementally.
+
+    The source is prefetched by one chunk so authentication/protocol failures can
+    still produce a normal error response. Once streaming starts, the upstream
+    generator is closed on completion, failure, or client disconnect. Audio is
+    cached only after the provider emits its normal terminal event.
+    """
+    chars = len(text) if chars is None else chars
+    cache_key = _cache_key('doubao', text, voice, pct, style, volume, pitch)
+    cached = _cache_get(cache_key)
+    with _metrics_lock:
+        _metrics['cache_lookups_total'] += 1
+        if cached is not None:
+            _metrics['cache_hits_total'] += 1
+    should_cache = cached is None
+    source = (iter((cached,)) if cached is not None else
+              _iter_provider_stream('doubao', text, voice, pct,
+                                    style=style, volume=volume, pitch=pitch))
+    try:
+        first_chunk = next(source)
+    except StopIteration:
+        return _error_response('TTS failed: provider returned empty audio', 500,
+                               'synthesis_error')
+    except Exception as e:
+        error = str(e)
+        _send_webhook('error', {
+            'provider': 'doubao',
+            'voice': voice,
+            'error': error,
+            'text_length': chars,
+        })
+        if FALLBACK_TO_EDGE:
+            fallback_voice = FALLBACK_VOICE
+            fb_audio, fb_err = _dispatch_impl(
+                'edge', text, fallback_voice, pct, style=style,
+                volume=volume, pitch=pitch,
+            )
+            if fb_audio:
+                update_stats(chars, 'edge', voice=fallback_voice)
+                return Response(
+                    fb_audio,
+                    mimetype='audio/mpeg',
+                    headers=_tts_headers(
+                        fb_audio, 'doubao', voice,
+                        'edge', fallback_voice, chars,
+                    ),
+                )
+            error = f'Primary: {error}; Fallback(Edge): {fb_err}'
+        log.warning(
+            "TTS stream failed before first audio: provider=doubao voice=%s error=%s",
+            voice, error,
+        )
+        return _error_response(f'TTS failed: {error}', 500, 'synthesis_error')
+
+    def generate():
+        audio = bytearray()
+        completed = False
+        try:
+            audio.extend(first_chunk)
+            yield first_chunk
+            for audio_chunk in source:
+                if not audio_chunk:
+                    continue
+                audio.extend(audio_chunk)
+                yield audio_chunk
+            completed = True
+            if should_cache and audio:
+                _cache_put(cache_key, bytes(audio))
+            update_stats(chars, 'doubao', voice=voice)
+            log.info(
+                "TTS stream OK: provider=doubao voice=%s style=%s chars=%d size=%d",
+                voice, style, chars, len(audio),
+            )
+        except GeneratorExit:
+            log.info(
+                "TTS stream closed by client: provider=doubao voice=%s chars=%d",
+                voice, chars,
+            )
+            raise
+        except Exception as e:
+            log.error(
+                "TTS stream interrupted: provider=doubao voice=%s error=%s",
+                voice, e,
+            )
+            _send_webhook('error', {
+                'provider': 'doubao',
+                'voice': voice,
+                'error': str(e),
+                'text_length': chars,
+            })
+            raise
+        finally:
+            close = getattr(source, 'close', None)
+            if close:
+                close()
+            if not completed:
+                audio.clear()
+
+    response = Response(generate(), mimetype='audio/mpeg', headers={
+        'X-TTS-Provider': 'doubao',
+        'X-TTS-Voice': voice,
+        'Cache-Control': 'no-store',
+        'X-TTS-Chars': str(chars),
+        'X-Accel-Buffering': 'no',
+    })
+    close_source = getattr(source, 'close', None)
+    if close_source:
+        response.call_on_close(close_source)
+    return response
 
 
 # ──────────────────────────────────────────────
@@ -2023,8 +2290,8 @@ def readyz():
     if provider not in ALL_PROVIDERS:
         issues.append(f'unknown provider: {provider}')
     # Check API keys for non-edge providers
-    if provider == 'doubao' and not config.get('access_token'):
-        issues.append('doubao: missing access_token')
+    if provider == 'doubao' and not config.get('doubao_api_key'):
+        issues.append('doubao: missing api_key')
     if provider == 'tencent' and not config.get('tencent_secret_id'):
         issues.append('tencent: missing secret_id')
     if provider == 'fishaudio' and not config.get('fishaudio_api_key'):
@@ -2150,6 +2417,15 @@ def speech_stream():
             return quota_err
 
         pct = parse_rate(data.get('rate', '0%'))
+        if provider == 'doubao':
+            stream_text = _clean_text(text)
+            if not stream_text:
+                return _error_response('Text is empty after cleaning', 400)
+            return _doubao_stream_response(
+                stream_text, voice, pct, style=style, volume=volume,
+                pitch=pitch, chars=len(text),
+            )
+
         audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct, style=style, volume=volume, pitch=pitch)
 
         if audio:
@@ -2172,8 +2448,7 @@ def speech_stream():
 
 @app.route('/speech/stream/chunked', methods=['POST'])
 def speech_stream_chunked():
-    """True streaming TTS: returns audio chunks as they are generated (Edge TTS only).
-    Other providers fall back to full response."""
+    """True streaming TTS for Edge and Volcengine; buffer other providers."""
     try:
         client_ip = request.remote_addr or 'unknown'
         if _check_rate_limit(client_ip):
@@ -2200,6 +2475,11 @@ def speech_stream_chunked():
         if quota_err:
             return quota_err
         pct = parse_rate(data.get('rate', '0%'))
+        if provider == 'doubao':
+            clean = _clean_text(text)
+            if not clean:
+                return _error_response('Text is empty after cleaning', 400)
+            return _doubao_stream_response(clean, voice, pct, chars=len(text))
         if provider == 'edge':
             rate = _pct_to_rate(pct)
             clean = _clean_text(text)
@@ -2230,6 +2510,7 @@ def speech_stream_chunked():
                 'X-TTS-Voice': voice,
                 'X-TTS-Chars': str(chars),
                 'Cache-Control': 'no-store',
+                'X-Accel-Buffering': 'no',
             })
         audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct)
         if audio:
@@ -2254,11 +2535,11 @@ def api_config():
     if request.method == 'POST':
         data = request.get_json(silent=True) or {}
         for key in ['provider', 'default_voice', 'tencent_voice',
-                    'edge_voice', 'xiaomi_voice', 'fishaudio_voice', 'cluster',
+                    'edge_voice', 'xiaomi_voice', 'fishaudio_voice',
                     'fishaudio_reference_id']:
             if key in data:
                 config[key] = data[key]
-        for key in ['appid', 'access_token', 'tencent_secret_id',
+        for key in ['doubao_api_key', 'tencent_secret_id',
                     'tencent_secret_key', 'xiaomi_api_key', 'fishaudio_api_key']:
             if key in data and '***' not in str(data[key]):
                 config[key] = data[key]
@@ -2273,10 +2554,10 @@ def api_config():
 
     # GET: return config with masked secrets + provider status
     safe = config.copy()
-    for key in ['access_token', 'tencent_secret_key']:
+    for key in ['doubao_api_key', 'tencent_secret_key']:
         if safe.get(key):
             safe[key] = '***'
-    for key, show in [('xiaomi_api_key', 6), ('appid', 3)]:
+    for key, show in [('xiaomi_api_key', 6)]:
         val = safe.get(key, '')
         if len(val) > show + 3:
             safe[key] = f"{val[:show]}***{val[-3:]}"
@@ -2285,8 +2566,8 @@ def api_config():
         safe['tencent_secret_id'] = f"{sid[:6]}***{sid[-4:]}"
     safe['provider_status'] = {
         'edge': {'ready': True, 'note': '免费使用'},
-        'doubao': {'ready': bool(config.get('appid') and config.get('access_token')),
-                   'note': '已配置' if config.get('appid') and config.get('access_token') else '未配置'},
+        'doubao': {'ready': bool(config.get('doubao_api_key')),
+                   'note': '已配置' if config.get('doubao_api_key') else '未配置'},
         'tencent': {'ready': bool(config.get('tencent_secret_id') and config.get('tencent_secret_key')),
                     'note': '已配置' if config.get('tencent_secret_id') and config.get('tencent_secret_key') else '未配置'},
         'xiaomi': {'ready': bool(config.get('xiaomi_api_key')),
@@ -2312,11 +2593,14 @@ def api_config_test():
                      'tencent': TENCENT_VOICES[0]['id'], 'xiaomi': XIAOMI_VOICES[0]['id'],
                      'fishaudio': FISH_AUDIO_VOICES[0]['id']}
         voice = voice_map.get(provider, EDGE_VOICES[0]['id'])
-    audio, error, actual_provider, actual_voice = dispatch(provider, '你好，配置测试。', voice, 0)
+    # A configuration check must exercise the selected provider itself. Using
+    # dispatch() here could hide an invalid Doubao key behind Edge fallback.
+    sample = _clean_text('你好，配置测试。')
+    audio, error = _dispatch_impl(provider, sample, voice, 0)
     if audio:
         result['audio_size'] = len(audio)
-        result['voice'] = actual_voice or voice
-        result['actual_provider'] = actual_provider or provider
+        result['voice'] = voice
+        result['actual_provider'] = provider
     else:
         result['ok'] = False
         result['error'] = error
@@ -2419,7 +2703,7 @@ def api_info():
         'providers': ALL_PROVIDERS,
         'provider_status': {
             'edge': {'configured': True, 'note': '免费，无需配置'},
-            'doubao': {'configured': bool(config.get('access_token')), 'note': '需要access_token'},
+            'doubao': {'configured': bool(config.get('doubao_api_key')), 'note': '需要单 API Key'},
             'tencent': {'configured': bool(config.get('tencent_secret_id')), 'note': '需要secret_id+key'},
             'xiaomi': {'configured': bool(config.get('xiaomi_api_key')), 'note': '需要api_key'},
             'fishaudio': {'configured': bool(config.get('fishaudio_api_key')), 'note': '需要api_key'},
@@ -2978,14 +3262,13 @@ def index():
     return render_template_string(HTML_TEMPLATE,
         server_ip=request.host.split(':')[0],
         provider=config.get('provider', 'edge'),
-        has_token=bool(config.get('access_token')),
+        has_doubao_key=bool(config.get('doubao_api_key')),
         has_tencent_key=bool(config.get('tencent_secret_key')),
         has_xiaomi_key=bool(config.get('xiaomi_api_key')),
         default_voice=config.get('default_voice'),
         tencent_voice=config.get('tencent_voice'),
         edge_voice=config.get('edge_voice'),
         xiaomi_voice=config.get('xiaomi_voice'),
-        appid=_mask(config.get('appid', '')),
         tencent_secret_id=_mask(config.get('tencent_secret_id', ''), 6, 4),
         xiaomi_api_key=_mask(config.get('xiaomi_api_key', ''), 6, 4),
         fishaudio_api_key=_mask(config.get('fishaudio_api_key', ''), 6, 4),
@@ -3112,7 +3395,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div class="card">
         <h2>API 设置</h2>
-        <div id="doubao-settings" style="display:none"><div class="field"><label>App ID</label><input type="text" id="appid" value="{{ appid }}"></div><div class="field"><label>Access Token</label><input type="password" id="access-token" placeholder=""></div></div>
+        <div id="doubao-settings" style="display:none"><div class="field"><label>API Key</label><input type="password" id="doubao-api-key" placeholder="{{ '已配置，留空不修改' if has_doubao_key else '请输入火山引擎 API Key' }}"></div><p style="color:#666;font-size:12px;margin-top:8px">使用公共 2.0 音色资源 seed-tts-2.0</p></div>
         <div id="tencent-settings" style="display:none"><div class="field"><label>SecretId</label><input type="text" id="tencent-secret-id" value="{{ tencent_secret_id }}"></div><div class="field"><label>SecretKey</label><input type="password" id="tencent-secret-key" placeholder=""></div></div>
         <div id="xiaomi-settings" style="display:none"><div class="field"><label>API Key</label><input type="password" id="xiaomi-api-key" value="{{ xiaomi_api_key }}" placeholder="请输入小米MiMo API Key"></div></div>
         <div id="fishaudio-settings" style="display:none"><div class="field"><label>API Key</label><input type="password" id="fishaudio-api-key" value="{{ fishaudio_api_key }}" placeholder="请输入Fish Audio API Key"></div><div class="field"><label>自定义音色Reference ID</label><input type="text" id="fishaudio-reference-id" value="{{ fishaudio_reference_id }}" placeholder="可选，留空使用预设音色"></div></div>
@@ -3224,7 +3507,7 @@ const fillSel=id=>{const s=$(id);if(!s)return;s.innerHTML='';vs.forEach(v=>{cons
         }catch(e){toast('切换服务商失败: '+e.message)}
     };
 
-    window.saveConfig=async()=>{const b=$('save-btn');b.disabled=true;b.textContent='保存中...';try{let d={provider:prov};const v=$('voice-select').value;if(prov==='doubao'){d.appid=$('appid').value;d.access_token=$('access-token').value||'***';d.default_voice=v}else if(prov==='tencent'){d.tencent_secret_id=$('tencent-secret-id').value;d.tencent_secret_key=$('tencent-secret-key').value||'***';d.tencent_voice=v}else if(prov==='xiaomi'){d.xiaomi_api_key=$('xiaomi-api-key').value||'***';d.xiaomi_voice=v}else if(prov==='fishaudio'){d.fishaudio_api_key=$('fishaudio-api-key').value||'***';d.fishaudio_voice=v;d.fishaudio_reference_id=$('fishaudio-reference-id').value}await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});toast('设置已保存');setTimeout(()=>location.reload(),1000)}finally{b.disabled=false;b.textContent='保存设置'}};
+    window.saveConfig=async()=>{const b=$('save-btn');b.disabled=true;b.textContent='保存中...';try{let d={provider:prov};const v=$('voice-select').value;if(prov==='doubao'){d.doubao_api_key=$('doubao-api-key').value||'***';d.default_voice=v}else if(prov==='tencent'){d.tencent_secret_id=$('tencent-secret-id').value;d.tencent_secret_key=$('tencent-secret-key').value||'***';d.tencent_voice=v}else if(prov==='xiaomi'){d.xiaomi_api_key=$('xiaomi-api-key').value||'***';d.xiaomi_voice=v}else if(prov==='fishaudio'){d.fishaudio_api_key=$('fishaudio-api-key').value||'***';d.fishaudio_voice=v;d.fishaudio_reference_id=$('fishaudio-reference-id').value}await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});toast('设置已保存');setTimeout(()=>location.reload(),1000)}finally{b.disabled=false;b.textContent='保存设置'}};
 
     window.testTTS=async()=>{const b=$('test-btn');b.disabled=true;b.textContent='合成中...';try{const r=await api('/speech/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:$('test-text').value,voice:$('voice-select').value,rate:'0%'})});if(r.ok){const p=$('audio-player');setAudioBlob(p,await r.blob());p.play()}else toast('TTS失败: '+await _errText(r))}catch(e){toast('请求错误: '+e.message)}finally{b.disabled=false;b.textContent='播放测试'}};
 

@@ -35,6 +35,15 @@ class TestResolveProvider:
         for v in DOUBAO_VOICES:
             assert resolve_provider(v['id']) == 'doubao', f"{v['id']} should route to doubao"
 
+    @pytest.mark.parametrize('voice', [
+        'en_male_tim_uranus_bigtts',
+        'ICL_uranus_en_female_charlie_tob',
+        'saturn_zh_female_aojiaonvyou_tob',
+        'multi_female_maomao_conversation_wvae_bigtts',
+    ])
+    def test_official_doubao_voice_prefixes(self, voice):
+        assert resolve_provider(voice) == 'doubao'
+
     def test_tencent_voices(self):
         for v in TENCENT_VOICES:
             assert resolve_provider(v['id']) == 'tencent', f"{v['id']} should route to tencent"
@@ -62,6 +71,41 @@ class TestResolveProvider:
 
     def test_mimo_prefix(self):
         assert resolve_provider('mimo_custom') == 'xiaomi'
+
+
+class TestDoubaoVoiceCatalog:
+    def test_official_voice_names(self):
+        assert DOUBAO_VOICES == [
+            {'id': 'zh_female_cancan_uranus_bigtts', 'name': '知性灿灿 2.0'},
+            {'id': 'zh_female_shuangkuaisisi_uranus_bigtts', 'name': '爽快思思 2.0'},
+            {'id': 'zh_female_tiexinnvsheng_uranus_bigtts', 'name': '贴心女声 2.0'},
+            {'id': 'zh_female_jitangmei_uranus_bigtts', 'name': '鸡汤妹妹 2.0'},
+            {'id': 'zh_female_mengyatou_uranus_bigtts', 'name': '萌丫头 2.0'},
+            {'id': 'zh_male_shaonianzixin_uranus_bigtts', 'name': '少年梓辛 2.0'},
+            {'id': 'zh_male_wennuanahu_uranus_bigtts', 'name': '温暖阿虎 2.0'},
+            {'id': 'zh_male_cixingjieshuonan_uranus_bigtts', 'name': '磁性解说男声 2.0'},
+            {'id': 'zh_male_xuanyijieshuo_uranus_bigtts', 'name': '悬疑解说 2.0'},
+            {'id': 'zh_male_baqiqingshu_uranus_bigtts', 'name': '霸气青叔 2.0'},
+            {'id': 'zh_female_shaoergushi_uranus_bigtts', 'name': '少儿故事 2.0'},
+        ]
+
+    @pytest.mark.parametrize(('legacy_name', 'voice_id'), [
+        ('知性灿灿', 'zh_female_cancan_uranus_bigtts'),
+        ('爽快思思', 'zh_female_shuangkuaisisi_uranus_bigtts'),
+        ('贴心女声', 'zh_female_tiexinnvsheng_uranus_bigtts'),
+        ('鸡汤妹妹', 'zh_female_jitangmei_uranus_bigtts'),
+        ('萌丫头', 'zh_female_mengyatou_uranus_bigtts'),
+        ('少年梓辛', 'zh_male_shaonianzixin_uranus_bigtts'),
+        ('温暖阿虎', 'zh_male_wennuanahu_uranus_bigtts'),
+        ('磁性解说男声', 'zh_male_cixingjieshuonan_uranus_bigtts'),
+        ('悬疑解说', 'zh_male_xuanyijieshuo_uranus_bigtts'),
+        ('霸气青叔', 'zh_male_baqiqingshu_uranus_bigtts'),
+        ('少儿故事', 'zh_female_shaoergushi_uranus_bigtts'),
+    ])
+    def test_legacy_display_name_aliases(self, legacy_name, voice_id):
+        import app as app_module
+
+        assert app_module._resolve_voice_alias(legacy_name) == voice_id
 
 
 class TestParseRate:
@@ -574,6 +618,154 @@ class TestAPIEndpoints:
         r = self.client.post('/speech/stream', json={'text': 'hello', 'voice': 'invalid'})
         assert r.status_code == 400
 
+    def test_speech_stream_explicit_doubao_accepts_custom_voice(self, monkeypatch):
+        import app as app_module
+        captured = {}
+
+        def fake_stream_response(text, voice, pct, **kwargs):
+            captured.update({'text': text, 'voice': voice, 'pct': pct})
+            return app_module.Response(b'custom-doubao-audio', mimetype='audio/mpeg')
+
+        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+
+        r = self.client.post('/speech/stream', json={
+            'text': '自定义音色测试',
+            'voice': 'S_custom_voice_123',
+            'provider': 'doubao',
+        })
+
+        assert r.status_code == 200
+        assert r.data == b'custom-doubao-audio'
+        assert captured['voice'] == 'S_custom_voice_123'
+
+    def test_explicit_doubao_custom_voice_reaches_all_synthesis_paths(self, monkeypatch):
+        import app as app_module
+
+        custom_voice = 'S_custom_voice_123'
+        assert app_module.resolve_provider(custom_voice) is None
+        captured = []
+
+        def fake_stream_response(text, voice, pct, **kwargs):
+            captured.append(('chunked', 'doubao', voice))
+            return app_module.Response(b'custom-stream-audio', mimetype='audio/mpeg')
+
+        def fake_dispatch(provider, text, voice, pct, **kwargs):
+            captured.append(('dispatch', provider, voice))
+            return b'custom-buffered-audio', None, provider, voice
+
+        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+
+        requests = [
+            ('/speech/stream/chunked', {
+                'text': '流式测试', 'voice': custom_voice, 'provider': 'doubao',
+            }),
+            ('/api/tts/preview', {
+                'voice': custom_voice, 'provider': 'doubao',
+            }),
+            ('/v1/audio/speech', {
+                'model': 'tts-1', 'input': 'OpenAI 测试',
+                'voice': custom_voice, 'provider': 'doubao',
+            }),
+            ('/api/speech/batch', {
+                'texts': ['批量测试'], 'voice': custom_voice, 'provider': 'doubao',
+            }),
+        ]
+        for endpoint, payload in requests:
+            response = self.client.post(endpoint, json=payload)
+            assert response.status_code == 200, (endpoint, response.get_data(as_text=True))
+
+        assert captured == [
+            ('chunked', 'doubao', custom_voice),
+            ('dispatch', 'doubao', custom_voice),
+            ('dispatch', 'doubao', custom_voice),
+            ('dispatch', 'doubao', custom_voice),
+        ]
+
+    @pytest.mark.parametrize('voice', [
+        'zh_bad voice',
+        'zh_' + ('a' * 128),
+    ])
+    def test_speech_stream_rejects_invalid_inferred_doubao_voice(self, monkeypatch, voice):
+        import app as app_module
+
+        def unexpected_stream(*args, **kwargs):
+            pytest.fail('invalid voice must not reach the Doubao provider')
+
+        monkeypatch.setattr(app_module, '_doubao_stream_response', unexpected_stream)
+
+        r = self.client.post('/speech/stream', json={
+            'text': '无效音色测试',
+            'voice': voice,
+        })
+
+        assert r.status_code == 400
+        assert 'Invalid voice ID' in r.get_data(as_text=True)
+
+    def test_speech_stream_explicit_doubao_preserves_alias_shaped_custom_id(self, monkeypatch):
+        import app as app_module
+        captured = {}
+
+        def fake_stream_response(text, voice, pct, **kwargs):
+            captured.update({'text': text, 'voice': voice, 'pct': pct})
+            return app_module.Response(b'alias-shaped-custom-audio', mimetype='audio/mpeg')
+
+        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+
+        r = self.client.post('/speech/stream', json={
+            'text': '别名形态的自定义音色',
+            'voice': 'nova',
+            'provider': 'doubao',
+        })
+
+        assert r.status_code == 200
+        assert r.data == b'alias-shaped-custom-audio'
+        assert captured['voice'] == 'nova'
+
+    def test_speech_stream_explicit_doubao_migrates_legacy_voice_id(self, monkeypatch):
+        import app as app_module
+        captured = {}
+
+        def fake_stream_response(text, voice, pct, **kwargs):
+            captured['voice'] = voice
+            return app_module.Response(b'migrated-doubao-audio', mimetype='audio/mpeg')
+
+        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+
+        r = self.client.post('/speech/stream', json={
+            'text': '旧音色 ID 兼容测试',
+            'voice': 'zh_female_cancan_mars_bigtts',
+            'provider': 'doubao',
+        })
+
+        assert r.status_code == 200
+        assert captured['voice'] == 'zh_female_cancan_uranus_bigtts'
+
+    def test_speech_stream_saved_doubao_custom_voice_without_provider(self, monkeypatch):
+        import app as app_module
+        captured = {}
+
+        def fake_stream_response(text, voice, pct, **kwargs):
+            captured.update({'text': text, 'voice': voice, 'pct': pct})
+            return app_module.Response(b'legacy-legado-custom-audio', mimetype='audio/mpeg')
+
+        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+        custom_voice = 'nova'
+        saved = self.client.post('/api/config', json={
+            'provider': 'doubao',
+            'default_voice': custom_voice,
+        })
+        assert saved.status_code == 200
+
+        r = self.client.post('/speech/stream', json={
+            'text': '旧版 Legado 配置测试',
+            'voice': custom_voice,
+        })
+
+        assert r.status_code == 200
+        assert r.data == b'legacy-legado-custom-audio'
+        assert captured['voice'] == custom_voice
+
     def test_speech_stream_text_too_long(self):
         long_text = 'a' * 10000
         r = self.client.post('/speech/stream', json={'text': long_text, 'voice': 'zh-CN-XiaoxiaoNeural'})
@@ -602,6 +794,26 @@ class TestAPIEndpoints:
         r = self.client.post('/api/config', json={'provider': 'edge'})
         assert r.status_code == 200
         assert r.get_json()['status'] == 'ok'
+
+    def test_config_post_accepts_custom_doubao_voice(self):
+        r = self.client.post('/api/config', json={
+            'provider': 'doubao',
+            'default_voice': 'S_custom_voice_123',
+        })
+
+        assert r.status_code == 200
+        config = load_config()
+        assert config['provider'] == 'doubao'
+        assert config['default_voice'] == 'S_custom_voice_123'
+
+    def test_config_post_rejects_edge_voice_for_doubao(self):
+        r = self.client.post('/api/config', json={
+            'provider': 'doubao',
+            'default_voice': 'zh-CN-XiaoxiaoNeural',
+        })
+
+        assert r.status_code == 400
+        assert load_config()['provider'] == 'edge'
 
     def test_config_post_masked_values_preserved(self):
         # First save a real value
@@ -1225,6 +1437,32 @@ class TestLegadoEndpoints:
         data = r.get_json()
         assert 'YunxiNeural' in data['name']
         assert 'zh-CN-YunxiNeural' in data['url']
+
+    def test_legado_config_includes_provider_in_request_body(self):
+        r = self.client.get('/api/legado/config?provider=doubao')
+
+        assert r.status_code == 200
+        data = r.get_json()
+        request_config = json.loads(data['url'].split(',', 1)[1])
+        assert request_config['body']['provider'] == 'doubao'
+
+    def test_legado_exports_explicit_doubao_custom_voice(self):
+        custom_voice = 'S_custom_voice_123'
+        query = f'?voice={custom_voice}&provider=doubao'
+
+        config_response = self.client.get('/api/legado/config' + query)
+        assert config_response.status_code == 200
+        config = config_response.get_json()
+        request_config = json.loads(config['url'].split(',', 1)[1])
+        assert request_config['body']['voice'] == custom_voice
+        assert request_config['body']['provider'] == 'doubao'
+
+        subscribe_response = self.client.get('/api/legado/subscribe' + query)
+        assert subscribe_response.status_code == 200
+        subscription = subscribe_response.get_json()
+        subscribed_request = json.loads(subscription['config']['url'].split(',', 1)[1])
+        assert subscribed_request['body']['voice'] == custom_voice
+        assert subscribed_request['body']['provider'] == 'doubao'
 
     def test_legado_subscribe_encoded(self):
         r = self.client.get('/api/legado/subscribe?auto=true')
@@ -1906,6 +2144,12 @@ class TestEdgeCases:
         assert data['openapi'] == '3.0.0'
         assert 'paths' in data
         assert '/speech/stream' in data['paths']
+        for path in ('/speech/stream', '/v1/audio/speech'):
+            schema = data['paths'][path]['post']['requestBody']['content'][
+                'application/json']['schema']
+            assert schema['properties']['provider']['type'] == 'string'
+            assert set(schema['properties']['provider']['enum']) == set(ALL_PROVIDERS)
+            assert 'provider' not in schema['required']
 
 
 class TestAPIKeys:

@@ -62,7 +62,7 @@
 | 服务商 | 音色数 | 说明 |
 |--------|--------|------|
 | Edge TTS | 36 (精选) / 322 (完整) | 免费，中/英/日/韩/粤语/台湾腔，支持情感风格、音量、音调。`/api/voices` 返回精选列表，`/api/voices/edge/live` 返回微软完整列表 |
-| 火山引擎 | 11 | 2.0 音色：灿灿、思思、悬疑解说、少儿故事等 |
+| 火山引擎 | 11 个预设 + 自定义 | 官方 2.0 音色名称，并支持手动填写 `voice_type` |
 | 腾讯云 | 7 | 智菊、智斌、智兰等 |
 | 小米 MiMo | 3 | 风格控制、方言、歌声合成 |
 | Fish Audio | 5 | 高质量多语言 + 声音克隆 |
@@ -137,6 +137,7 @@ pytest -q
 1. 在火山引擎控制台的“API Key 管理”创建 Key。
 2. 打开本服务 Web 管理页，选择“火山引擎”。
 3. 填写 API Key。服务固定使用公共 2.0 音色资源 `seed-tts-2.0`。
+4. 在音色来源中选择预设，或切换到“自定义 ID”填写火山引擎的 `voice_type`。
 
 服务访问火山引擎时仅发送以下鉴权与模型选择请求头：
 
@@ -148,9 +149,13 @@ pytest -q
 
 ```json
 {
-  "doubao_api_key": "your-api-key"
+  "doubao_api_key": "your-api-key",
+  "default_voice": "zh_female_cancan_uranus_bigtts"
 }
 ```
+
+自定义音色 ID 会直接保存在 `default_voice`，支持字母、数字、点、下划线、
+连字符和冒号，最长 128 个字符。服务会把该值原样传给上游的 `speaker` 字段。
 
 旧的 `appid`、`access_token`、`cluster` 鉴权已完全移除，也不再发送旧的 `Authorization: Bearer; ...` 请求头。服务读取旧配置时会删除这些字段，不会把旧 Token 当作新 API Key。升级后需要重新填写 API Key。旧版 `mars/moon` 音色 ID 会自动映射到对应的 `uranus` 2.0 音色。
 
@@ -277,7 +282,8 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 |------------|----------|
 | 包含 `Neural` 且有 `-` | Edge TTS |
 | 纯数字 1-999999 | 腾讯云 |
-| 以 `zh_` 开头 | 火山引擎 |
+| 以 `zh_` / `en_` / `multi_` / `ICL_` / `saturn_` 开头 | 火山引擎 |
+| 请求中显式传入 `provider` | 按指定 Provider 路由自定义音色 ID |
 | `mimo_*` / `default_zh` | 小米 MiMo |
 | 以 `fish-` 开头或 `custom` | Fish Audio |
 | 别名/中文名 | 自动解析 |

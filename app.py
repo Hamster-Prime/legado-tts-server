@@ -32,7 +32,7 @@ except ImportError:
     fcntl = None
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from flask import Flask, request, Response, render_template, jsonify, after_this_request
 from flask_cors import CORS
@@ -721,18 +721,24 @@ DEFAULT_CONFIG = {
 DOUBAO_RESOURCE_ID = 'seed-tts-2.0'
 
 DOUBAO_VOICES = [
-    {"id": "zh_female_cancan_uranus_bigtts", "name": "知性灿灿"},
-    {"id": "zh_female_shuangkuaisisi_uranus_bigtts", "name": "爽快思思"},
-    {"id": "zh_female_tiexinnvsheng_uranus_bigtts", "name": "贴心女声"},
-    {"id": "zh_female_jitangmei_uranus_bigtts", "name": "鸡汤妹妹"},
-    {"id": "zh_female_mengyatou_uranus_bigtts", "name": "萌丫头"},
-    {"id": "zh_male_shaonianzixin_uranus_bigtts", "name": "少年梓辛"},
-    {"id": "zh_male_wennuanahu_uranus_bigtts", "name": "温暖阿虎"},
-    {"id": "zh_male_cixingjieshuonan_uranus_bigtts", "name": "磁性解说男声"},
-    {"id": "zh_male_xuanyijieshuo_uranus_bigtts", "name": "悬疑解说"},
-    {"id": "zh_male_baqiqingshu_uranus_bigtts", "name": "霸气青叔"},
-    {"id": "zh_female_shaoergushi_uranus_bigtts", "name": "少儿故事"},
+    {"id": "zh_female_cancan_uranus_bigtts", "name": "知性灿灿 2.0"},
+    {"id": "zh_female_shuangkuaisisi_uranus_bigtts", "name": "爽快思思 2.0"},
+    {"id": "zh_female_tiexinnvsheng_uranus_bigtts", "name": "贴心女声 2.0"},
+    {"id": "zh_female_jitangmei_uranus_bigtts", "name": "鸡汤妹妹 2.0"},
+    {"id": "zh_female_mengyatou_uranus_bigtts", "name": "萌丫头 2.0"},
+    {"id": "zh_male_shaonianzixin_uranus_bigtts", "name": "少年梓辛 2.0"},
+    {"id": "zh_male_wennuanahu_uranus_bigtts", "name": "温暖阿虎 2.0"},
+    {"id": "zh_male_cixingjieshuonan_uranus_bigtts", "name": "磁性解说男声 2.0"},
+    {"id": "zh_male_xuanyijieshuo_uranus_bigtts", "name": "悬疑解说 2.0"},
+    {"id": "zh_male_baqiqingshu_uranus_bigtts", "name": "霸气青叔 2.0"},
+    {"id": "zh_female_shaoergushi_uranus_bigtts", "name": "少儿故事 2.0"},
 ]
+
+# Public 2.0 voices currently use these prefixes. A configured custom speaker
+# may use another identifier (for example a cloned voice), which is handled by
+# the explicit provider path below instead of relying on prefix inference.
+_DOUBAO_VOICE_PREFIXES = ('zh_', 'en_', 'multi_', 'ICL_', 'saturn_')
+_CUSTOM_VOICE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
 
 LEGACY_DOUBAO_VOICE_MAP = {
     'zh_female_cancan_mars_bigtts': 'zh_female_cancan_uranus_bigtts',
@@ -845,6 +851,18 @@ _VOICE_ALIASES = {
     # Doubao shorthand
     '灿灿': 'zh_female_cancan_uranus_bigtts',
     '思思': 'zh_female_shuangkuaisisi_uranus_bigtts',
+    # Display names used before the official "2.0" suffix was added.
+    '知性灿灿': 'zh_female_cancan_uranus_bigtts',
+    '爽快思思': 'zh_female_shuangkuaisisi_uranus_bigtts',
+    '贴心女声': 'zh_female_tiexinnvsheng_uranus_bigtts',
+    '鸡汤妹妹': 'zh_female_jitangmei_uranus_bigtts',
+    '萌丫头': 'zh_female_mengyatou_uranus_bigtts',
+    '少年梓辛': 'zh_male_shaonianzixin_uranus_bigtts',
+    '温暖阿虎': 'zh_male_wennuanahu_uranus_bigtts',
+    '磁性解说男声': 'zh_male_cixingjieshuonan_uranus_bigtts',
+    '悬疑解说': 'zh_male_xuanyijieshuo_uranus_bigtts',
+    '霸气青叔': 'zh_male_baqiqingshu_uranus_bigtts',
+    '少儿故事': 'zh_female_shaoergushi_uranus_bigtts',
     # Historical typo retained as a display-name alias, but it now resolves to
     # the supported 2.0 voice rather than the removed Mars voice.
     '甸甘': 'zh_female_cancan_uranus_bigtts',
@@ -1559,7 +1577,7 @@ def resolve_provider(voice):
         return 'edge'
     if voice.isdigit() and 1 <= int(voice) <= 999999:
         return 'tencent'
-    if voice.startswith('zh_'):
+    if voice.startswith(_DOUBAO_VOICE_PREFIXES):
         return 'doubao'
     if voice in ('mimo_default', 'default_zh', 'default_eh') or voice.startswith('mimo_'):
         return 'xiaomi'
@@ -2502,10 +2520,13 @@ def speech_stream():
         if len(text) > MAX_TEXT_LENGTH:
             return _error_response(f'Text too long (max {MAX_TEXT_LENGTH})', 400)
 
-        # Resolve voice aliases
-        voice = _resolve_voice_alias(voice)
+        # Resolve aliases while preserving an explicitly selected custom voice.
+        voice = _normalize_request_voice(voice, data.get('provider'))
 
-        provider = resolve_provider(voice)
+        provider, provider_error = _resolve_request_provider(
+            voice, data.get('provider'))
+        if provider_error:
+            return _error_response(provider_error, 400)
         if not provider:
             return _error_response(f'Unknown voice format: {voice}', 400)
 
@@ -2564,8 +2585,11 @@ def speech_stream_chunked():
             return _error_response('Missing text or voice', 400)
         if len(text) > MAX_TEXT_LENGTH:
             return _error_response(f'Text too long (max {MAX_TEXT_LENGTH})', 400)
-        voice = _resolve_voice_alias(voice)
-        provider = resolve_provider(voice)
+        voice = _normalize_request_voice(voice, data.get('provider'))
+        provider, provider_error = _resolve_request_provider(
+            voice, data.get('provider'))
+        if provider_error:
+            return _error_response(provider_error, 400)
         if not provider:
             return _error_response(f'Unknown voice: {voice}', 400)
         request._tts_provider = provider
@@ -2659,9 +2683,73 @@ _PROVIDER_VOICE_IDS = {
 
 def _is_valid_provider_voice(provider, voice):
     """Validate configured voices while preserving documented dynamic IDs."""
+    if not isinstance(voice, str) or not voice or not _CUSTOM_VOICE_ID_RE.fullmatch(voice):
+        return False
+    if provider == 'doubao':
+        inferred = resolve_provider(voice)
+        return inferred in (None, 'doubao')
     if provider == 'fishaudio':
         return voice in _PROVIDER_VOICE_IDS['fishaudio']
     return resolve_provider(voice) == provider
+
+
+def _resolve_request_provider(voice, requested_provider=None):
+    """Resolve a request provider, including configured custom voice IDs."""
+    explicit = _sanitize_voice(requested_provider).lower()
+    if explicit:
+        if explicit not in ALL_PROVIDERS:
+            return None, f'Unknown provider: {explicit}'
+        if not _is_valid_provider_voice(explicit, voice):
+            return None, f'Voice {voice} does not belong to provider {explicit}'
+        return explicit, None
+
+    inferred = resolve_provider(voice)
+    if inferred:
+        if not _is_valid_provider_voice(inferred, voice):
+            return None, f'Invalid voice ID for provider {inferred}'
+        return inferred, None
+
+    # Older copied Legado configurations do not include a provider field. Keep
+    # a saved custom voice working when it matches the active server setting.
+    config = load_config()
+    configured_provider = config.get('provider')
+    voice_field = _ACTIVE_VOICE_FIELDS.get(configured_provider)
+    if (voice_field and config.get(voice_field) == voice
+            and _is_valid_provider_voice(configured_provider, voice)):
+        return configured_provider, None
+    return None, None
+
+
+def _normalize_request_voice(voice, requested_provider=None):
+    """Resolve aliases without rewriting an explicitly selected custom voice.
+
+    Short OpenAI-style aliases such as ``nova`` are still supported for Edge,
+    but the same text may also be a valid custom Volcengine voice ID.  An
+    explicit provider, or a matching active saved custom voice from an older
+    provider-less Legado configuration, takes precedence over alias expansion.
+    """
+    voice = _sanitize_voice(voice)
+    explicit = _sanitize_voice(requested_provider).lower()
+    alias = _resolve_voice_alias(voice)
+    if explicit in ALL_PROVIDERS:
+        # Prefer aliases that stay within the selected provider (including the
+        # retired Mars/Moon IDs), but keep cross-provider aliases such as
+        # ``nova`` untouched when Doubao was selected explicitly.
+        if alias != voice and _is_valid_provider_voice(explicit, alias):
+            return alias
+        if _is_valid_provider_voice(explicit, voice):
+            return voice
+        return alias
+
+    if not explicit:
+        config = load_config()
+        configured_provider = config.get('provider')
+        voice_field = _ACTIVE_VOICE_FIELDS.get(configured_provider)
+        if (voice_field and config.get(voice_field) == voice
+                and _is_valid_provider_voice(configured_provider, voice)):
+            return voice
+
+    return alias
 
 
 def _configured_fields(config):
@@ -2737,7 +2825,9 @@ def _validate_config_payload(data):
         if not voice:
             return 'default_voice 不能为空'
         resolved = resolve_provider(voice)
-        if resolved is None or (resolved == 'fishaudio' and voice not in _PROVIDER_VOICE_IDS['fishaudio']):
+        valid_doubao = _is_valid_provider_voice('doubao', voice)
+        if ((resolved is None and not valid_doubao)
+                or (resolved == 'fishaudio' and voice not in _PROVIDER_VOICE_IDS['fishaudio'])):
             return f'无法识别音色: {voice}'
     return None
 
@@ -2844,7 +2934,7 @@ def api_config_test():
                      'tencent': TENCENT_VOICES[0]['id'], 'xiaomi': XIAOMI_VOICES[0]['id'],
                      'fishaudio': FISH_AUDIO_VOICES[0]['id']}
         voice = voice_map.get(provider, EDGE_VOICES[0]['id'])
-    if resolve_provider(voice) != provider:
+    if not _is_valid_provider_voice(provider, voice):
         return _error_response(
             f'音色 {voice} 不属于服务商 {provider}', 400, 'invalid_request_error')
     # Test the provider directly, bypassing fallback and the audio cache. This
@@ -3025,6 +3115,11 @@ def api_openapi():
                              'properties': {
                                  'text': {'type': 'string', 'description': '合成文本'},
                                  'voice': {'type': 'string', 'description': '音色ID或别名'},
+                                 'provider': {
+                                     'type': 'string',
+                                     'enum': ALL_PROVIDERS,
+                                     'description': '自定义音色 ID 需显式指定服务商',
+                                 },
                                  'rate': {'type': 'string', 'description': '语速百分比', 'default': '0%'},
                              },
                              'required': ['text', 'voice']
@@ -3039,6 +3134,11 @@ def api_openapi():
                                  'model': {'type': 'string', 'default': 'tts-1'},
                                  'input': {'type': 'string'},
                                  'voice': {'type': 'string'},
+                                 'provider': {
+                                     'type': 'string',
+                                     'enum': ALL_PROVIDERS,
+                                     'description': '自定义音色 ID 需显式指定服务商',
+                                 },
                                  'speed': {'type': 'number', 'default': 1.0},
                                  'response_format': {'type': 'string', 'enum': ['mp3', 'wav', 'ogg', 'aac', 'flac', 'pcm', 'opus']},
                                  'stream_format': {'type': 'string', 'enum': ['audio', 'sse']},
@@ -3323,13 +3423,12 @@ def api_tts_preview():
     voice = _sanitize_voice(data.get('voice'))
     if not voice:
         return _error_response('Missing voice', 400)
-    # Resolve aliases
-    voice = _resolve_voice_alias(voice)
-    provider = data.get('provider', '').strip().lower()
-    if provider and provider not in ALL_PROVIDERS:
-        return _error_response(f'Unknown provider: {provider}', 400)
-    if not provider:
-        provider = resolve_provider(voice)
+    # Resolve aliases while preserving an explicitly selected custom voice.
+    voice = _normalize_request_voice(voice, data.get('provider'))
+    provider, provider_error = _resolve_request_provider(
+        voice, data.get('provider'))
+    if provider_error:
+        return _error_response(provider_error, 400)
     if not provider:
         return _error_response(f'Cannot determine provider for voice: {voice}', 400)
     preview_text = '你好，我是您的语音助手，很高兴认识您。'
@@ -3415,10 +3514,14 @@ def openai_speech():
             return _error_response(f'Input too long (max {MAX_TEXT_LENGTH})',
                                    400, 'invalid_request_error')
 
-        # Try to resolve voice by name if not a known ID
-        voice = _resolve_voice_alias(voice)
+        # Resolve aliases while preserving an explicitly selected custom voice.
+        voice = _normalize_request_voice(voice, data.get('provider'))
 
-        provider = resolve_provider(voice)
+        provider, provider_error = _resolve_request_provider(
+            voice, data.get('provider'))
+        if provider_error:
+            return _error_response(
+                provider_error, 400, 'invalid_request_error')
         if not provider:
             return _error_response(f'Unknown voice: {voice}', 400, 'invalid_request_error')
 
@@ -3504,6 +3607,58 @@ def openai_models():
     })
 
 
+def _build_legado_config(server, voice, rate, provider=None):
+    """Build a Legado engine config without interpolating values into JSON."""
+    body = {
+        'text': '{{speakText}}',
+        'voice': voice,
+        'rate': '{{String(speakSpeed)}}' + rate,
+    }
+    if provider:
+        body['provider'] = provider
+    request_options = {
+        'method': 'POST',
+        'body': body,
+        'headers': {'Content-Type': 'application/json'},
+    }
+    encoded_options = json.dumps(
+        request_options, ensure_ascii=False, separators=(',', ':'))
+    return {
+        'concurrentRate': '0',
+        'contentType': 'audio/mpeg',
+        'name': f"TTS-{voice.split('-')[-1]}",
+        'url': f'{server}/speech/stream,{encoded_options}',
+    }
+
+
+def _legado_voice_and_provider(config):
+    """Select the requested provider's configured voice for Legado exports."""
+    requested_provider = _sanitize_voice(request.args.get('provider')).lower()
+    if requested_provider and requested_provider not in ALL_PROVIDERS:
+        return '', None, f'Unknown provider: {requested_provider}'
+
+    raw_voice = request.args.get('voice')
+    if raw_voice is None and requested_provider:
+        voice_field = _ACTIVE_VOICE_FIELDS[requested_provider]
+        raw_voice = config.get(voice_field)
+        if not _is_valid_provider_voice(requested_provider, raw_voice):
+            defaults = {
+                'edge': EDGE_VOICES[0]['id'],
+                'doubao': DOUBAO_VOICES[0]['id'],
+                'tencent': TENCENT_VOICES[0]['id'],
+                'xiaomi': XIAOMI_VOICES[0]['id'],
+                'fishaudio': FISH_AUDIO_VOICES[0]['id'],
+            }
+            raw_voice = defaults[requested_provider]
+    elif raw_voice is None:
+        raw_voice = config.get('default_voice', 'zh-CN-XiaoxiaoNeural')
+
+    voice = _normalize_request_voice(raw_voice, requested_provider)
+    provider, provider_error = _resolve_request_provider(
+        voice, requested_provider)
+    return voice, provider, provider_error
+
+
 @app.route('/api/legado/config', methods=['GET'])
 def api_legado_config():
     """Generate Legado-compatible TTS engine configuration JSON.
@@ -3513,20 +3668,15 @@ def api_legado_config():
         server - server URL (default: auto-detect from request)
     """
     config = load_config()
-    voice = request.args.get('voice', config.get('default_voice', 'zh-CN-XiaoxiaoNeural')).strip()
+    voice, provider, provider_error = _legado_voice_and_provider(config)
+    if provider_error:
+        return _error_response(provider_error, 400, 'invalid_request_error')
     server = request.args.get('server', '').strip()
     if not server:
         # Auto-detect from request
         server = request.host_url.rstrip('/')
     rate = request.args.get('rate', '+0%').strip()
-    legado_url = (server + '/speech/stream,{"method":"POST","body":{"text":"{{speakText}}","voice":"' +
-                  voice + '","rate":"{{String(speakSpeed)}}' + rate + '"},"headers":{"Content-Type":"application/json"}}')
-    legado_cfg = {
-        "concurrentRate": "0",
-        "contentType": "audio/mpeg",
-        "name": f"TTS-{voice.split('-')[-1]}",
-        "url": legado_url
-    }
+    legado_cfg = _build_legado_config(server, voice, rate, provider)
     return jsonify(legado_cfg)
 
 
@@ -3537,20 +3687,19 @@ def api_legado_subscribe():
     Usage: Import this URL directly into Legado as a speech engine.
     """
     config = load_config()
-    voice = request.args.get('voice', config.get('default_voice', 'zh-CN-XiaoxiaoNeural')).strip()
+    voice, provider, provider_error = _legado_voice_and_provider(config)
+    if provider_error:
+        return _error_response(provider_error, 400, 'invalid_request_error')
     server = request.args.get('server', '').strip()
     if not server:
         server = request.host_url.rstrip('/')
     rate = request.args.get('rate', '+0%').strip()
-    legado_cfg = {
-        "concurrentRate": "0",
-        "contentType": "audio/mpeg",
-        "name": f"TTS-{voice.split('-')[-1]}",
-        "url": (server + '/speech/stream,{"method":"POST","body":{"text":"{{speakText}}","voice":"' +
-                voice + '","rate":"{{String(speakSpeed)}}' + rate + '"},"headers":{"Content-Type":"application/json"}}')
-    }
+    legado_cfg = _build_legado_config(server, voice, rate, provider)
     encoded = base64.b64encode(json.dumps(legado_cfg, ensure_ascii=False).encode()).decode()
-    subscribe_url = f"{server}/api/legado/subscribe?voice={voice}&auto=true"
+    subscribe_query = {'voice': voice, 'auto': 'true'}
+    if provider:
+        subscribe_query['provider'] = provider
+    subscribe_url = f"{server}/api/legado/subscribe?{urlencode(subscribe_query)}"
     if request.args.get('auto') == 'true':
         return Response(encoded, mimetype='text/plain')
     return jsonify({'url': subscribe_url, 'config': legado_cfg, 'encoded': encoded})
@@ -3564,16 +3713,21 @@ def index():
         value = config.get(key, default)
         return value if isinstance(value, str) else default
 
+    doubao_voice = _text_value('default_voice', DEFAULT_CONFIG['default_voice'])
     initial_state = {
         'version': __version__,
         'provider': _text_value('provider', 'edge'),
         'voices': {
-            'doubao': _text_value('default_voice', DEFAULT_CONFIG['default_voice']),
+            'doubao': doubao_voice,
             'tencent': _text_value('tencent_voice', DEFAULT_CONFIG['tencent_voice']),
             'edge': _text_value('edge_voice', DEFAULT_CONFIG['edge_voice']),
             'xiaomi': _text_value('xiaomi_voice', DEFAULT_CONFIG['xiaomi_voice']),
             'fishaudio': _text_value('fishaudio_voice', DEFAULT_CONFIG['fishaudio_voice']),
         },
+        'doubaoVoiceIsCustom': (
+            _is_valid_provider_voice('doubao', doubao_voice)
+            and doubao_voice not in _PROVIDER_VOICE_IDS['doubao']
+        ),
         # Credential/reference details are hydrated through the authenticated
         # config endpoint when protection is enabled, never embedded anonymously.
         'fishaudioReferenceId': '' if ADMIN_TOKEN else _text_value('fishaudio_reference_id'),
@@ -3644,10 +3798,14 @@ def batch_speech():
         if resp_format not in _FORMAT_MIME:
             resp_format = 'mp3'
 
-        # Try to resolve voice by name if not a known ID
-        voice = _resolve_voice_alias(voice)
+        # Resolve aliases while preserving an explicitly selected custom voice.
+        voice = _normalize_request_voice(voice, data.get('provider'))
 
-        provider = resolve_provider(voice)
+        provider, provider_error = _resolve_request_provider(
+            voice, data.get('provider'))
+        if provider_error:
+            return _error_response(
+                provider_error, 400, 'invalid_request_error')
         if not provider:
             return _error_response(f'Unknown voice: {voice}', 400, 'invalid_request_error')
 

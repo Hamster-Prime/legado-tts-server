@@ -23,10 +23,13 @@
         xiaomi: ['xiaomi_api_key'],
         fishaudio: ['fishaudio_api_key'],
     };
+    const CUSTOM_VOICE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
     const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
     const invalidInitialProvider = Boolean(INITIAL.provider && !hasOwn(PROVIDERS, INITIAL.provider));
     const initialProvider = invalidInitialProvider ? 'edge' : (INITIAL.provider || 'edge');
+    const initialDoubaoCustomVoice = INITIAL.doubaoVoiceIsCustom
+        ? String((INITIAL.voices && INITIAL.voices.doubao) || '') : '';
     const state = {
         provider: initialProvider,
         savedProvider: initialProvider,
@@ -42,6 +45,9 @@
         voiceCatalogs: {},
         voiceTouched: new Set(),
         voiceLoading: false,
+        doubaoVoiceMode: initialDoubaoCustomVoice ? 'custom' : 'preset',
+        doubaoCustomVoice: initialDoubaoCustomVoice,
+        doubaoPresetVoice: 'zh_female_cancan_uranus_bigtts',
         stats: {},
         baselineCore: '',
         dirty: false,
@@ -60,6 +66,7 @@
         previewRequestId: 0,
         testRequestId: 0,
         compareRequestId: 0,
+        legadoUpdateTimer: null,
     };
 
     const $ = id => document.getElementById(id);
@@ -345,10 +352,41 @@
         return Boolean(credentialValue(field) || state.configuredFields[field]);
     }
 
+    function isPotentialDoubaoVoiceId(value) {
+        const voice = String(value || '').trim();
+        if (!CUSTOM_VOICE_ID_PATTERN.test(voice)) return false;
+        if (voice.includes('Neural') && voice.includes('-')) return false;
+        if (/^\d+$/.test(voice)) return false;
+        if (voice === 'default_zh' || voice === 'default_eh' || voice.startsWith('mimo_')) return false;
+        if (voice === 'custom' || voice.startsWith('fish-')) return false;
+        return true;
+    }
+
+    function isDoubaoCustomMode(provider = state.provider) {
+        return provider === 'doubao' && state.doubaoVoiceMode === 'custom';
+    }
+
+    function hasUsableCurrentVoice() {
+        const voice = currentVoiceId();
+        if (!voice) return false;
+        if (isDoubaoCustomMode()) return isPotentialDoubaoVoiceId(voice);
+        return (state.voiceCatalogs[state.provider] || []).some(item => item.id === voice);
+    }
+
     function validateProviderDraft(provider = state.provider) {
         const voices = state.voiceCatalogs[provider];
-        if (state.voiceLoading || !voices) return '请等待当前服务商的音色列表加载完成。';
-        if (!voices.some(voice => voice.id === state.selectedVoices[provider])) return '当前音色无效，请重新选择。';
+        if (provider === 'doubao' && isDoubaoCustomMode(provider)) {
+            const customVoice = state.selectedVoices.doubao || '';
+            if (!customVoice) return '请输入自定义音色 ID。';
+            if (!isPotentialDoubaoVoiceId(customVoice)) {
+                return '自定义音色 ID 仅支持字母、数字、点、下划线、连字符和冒号，最长 128 个字符。';
+            }
+        } else {
+            if (state.voiceLoading || !voices) return '请等待当前服务商的音色列表加载完成。';
+            if (!voices.some(voice => voice.id === state.selectedVoices[provider])) {
+                return '当前音色无效，请重新选择。';
+            }
+        }
         if (provider === 'fishaudio' && state.selectedVoices.fishaudio === 'custom'
             && !$('fishaudio-reference-id').value.trim()) {
             return '自定义 Fish Audio 音色需要填写 Reference ID。';
@@ -407,13 +445,14 @@
         $('save-state-description').textContent = state.dirty
             ? '可以先测试当前草稿，确认后再保存到服务器。'
             : '切换服务商和音色不会立即影响服务器。';
+        const waitingForVoiceCatalog = state.voiceLoading && !isDoubaoCustomMode();
         const saveButton = $('save-button');
-        if (!saveButton.hasAttribute('aria-busy')) saveButton.disabled = !state.dirty || state.voiceLoading;
+        if (!saveButton.hasAttribute('aria-busy')) saveButton.disabled = !state.dirty || waitingForVoiceCatalog;
         const testButton = $('test-config-button');
-        if (!testButton.hasAttribute('aria-busy')) testButton.disabled = state.voiceLoading;
+        if (!testButton.hasAttribute('aria-busy')) testButton.disabled = waitingForVoiceCatalog;
         const testTtsButton = $('test-tts-button');
         if (!testTtsButton.hasAttribute('aria-busy')) {
-            testTtsButton.disabled = state.voiceLoading || !(state.voiceCatalogs[state.provider] || []).length;
+            testTtsButton.disabled = waitingForVoiceCatalog || !hasUsableCurrentVoice();
         }
     }
 
@@ -462,6 +501,9 @@
     function voiceName(voiceId, provider = state.provider) {
         const list = state.voiceCatalogs[provider] || [];
         const voice = list.find(item => item.id === voiceId);
+        if (!voice && provider === 'doubao' && voiceId === state.doubaoCustomVoice) {
+            return `自定义 · ${voiceId}`;
+        }
         return voice ? voice.name : voiceId || '未选择';
     }
 
@@ -480,6 +522,84 @@
         input.title = customSelected ? '' : '选择 Fish 自定义音色后可编辑';
     }
 
+    function updateDoubaoVoiceModeUI() {
+        const isDoubao = state.provider === 'doubao';
+        const customMode = isDoubaoCustomMode();
+        $('doubao-voice-mode').hidden = !isDoubao;
+        $('voice-preset-fields').hidden = customMode;
+        $('doubao-custom-voice-field').hidden = !customMode;
+        $$('[data-voice-mode]').forEach(button => {
+            const active = button.dataset.voiceMode === state.doubaoVoiceMode;
+            button.classList.toggle('is-active', active);
+            button.setAttribute('aria-checked', String(active));
+            button.tabIndex = active ? 0 : -1;
+        });
+        const input = $('doubao-custom-voice');
+        if (document.activeElement !== input && input.value !== state.doubaoCustomVoice) {
+            input.value = state.doubaoCustomVoice;
+        }
+    }
+
+    function setDoubaoVoiceMode(mode, focusInput = true) {
+        if (state.provider !== 'doubao' || !['preset', 'custom'].includes(mode)
+            || state.doubaoVoiceMode === mode) return;
+        clearSynthesisOutputs();
+        if (state.legadoUpdateTimer) window.clearTimeout(state.legadoUpdateTimer);
+        state.legadoUpdateTimer = null;
+        const voices = state.voiceCatalogs.doubao || [];
+        if (mode === 'custom') {
+            const current = state.selectedVoices.doubao;
+            if (voices.some(voice => voice.id === current)) state.doubaoPresetVoice = current;
+            state.doubaoVoiceMode = 'custom';
+            state.selectedVoices.doubao = state.doubaoCustomVoice.trim();
+        } else {
+            state.doubaoCustomVoice = $('doubao-custom-voice').value.trim();
+            state.doubaoVoiceMode = 'preset';
+            const fallback = voices.some(voice => voice.id === state.doubaoPresetVoice)
+                ? state.doubaoPresetVoice : ((voices[0] && voices[0].id) || '');
+            state.selectedVoices.doubao = fallback;
+        }
+        state.voiceTouched.add('doubao');
+        $('voice-search').value = '';
+        renderVoiceSelect();
+        updateDirtyState();
+        updateLegadoConfig();
+        if (mode === 'custom' && focusInput) {
+            window.setTimeout(() => {
+                if (isDoubaoCustomMode()) $('doubao-custom-voice').focus();
+            }, 0);
+        }
+    }
+
+    function invalidateLegadoConfig(message = '正在生成配置…') {
+        state.configRequestId += 1;
+        state.legadoConfigText = '';
+        $('legado-config').textContent = message;
+        $('copy-config-button').disabled = true;
+        $('copy-subscribe-button').disabled = true;
+        setFeedback('integration-feedback');
+    }
+
+    function updateDoubaoCustomVoice() {
+        if (!isDoubaoCustomMode()) return;
+        clearSynthesisOutputs();
+        state.doubaoCustomVoice = $('doubao-custom-voice').value.trim();
+        state.selectedVoices.doubao = state.doubaoCustomVoice;
+        state.voiceTouched.add('doubao');
+        renderVoiceSelect();
+        updateDirtyState();
+        if (state.legadoUpdateTimer) window.clearTimeout(state.legadoUpdateTimer);
+        state.legadoUpdateTimer = null;
+        const valid = isPotentialDoubaoVoiceId(state.doubaoCustomVoice);
+        invalidateLegadoConfig(valid ? '正在生成配置…' : '请先填写有效的音色 ID。');
+        if (valid) {
+            state.legadoUpdateTimer = window.setTimeout(() => {
+                state.legadoUpdateTimer = null;
+                updateLegadoConfig();
+            }, 250);
+        }
+    }
+
     function applyProvider(provider, markDirty = true) {
         if (!hasOwn(PROVIDERS, provider)) return;
         const changed = state.provider !== provider;
@@ -496,6 +616,7 @@
         });
         renderCurrentCredentialState();
         updateFishReferenceState();
+        updateDoubaoVoiceModeUI();
         updateSetupSummary();
         renderStats();
         loadVoices(provider);
@@ -509,6 +630,7 @@
         const list = state.voiceCatalogs[state.provider] || [];
         const query = $('voice-search').value.trim().toLowerCase();
         const selectedId = currentVoiceId();
+        const customMode = isDoubaoCustomMode();
         const matches = list.filter(voice => !query || voice.name.toLowerCase().includes(query) || voice.id.toLowerCase().includes(query));
         const selectedVoice = list.find(voice => voice.id === selectedId);
         const options = selectedVoice && !matches.some(voice => voice.id === selectedId)
@@ -532,13 +654,23 @@
             option.selected = true;
             select.appendChild(option);
         }
-        select.disabled = !list.length;
-        if (!$('preview-button').hasAttribute('aria-busy')) $('preview-button').disabled = !selectedId || !list.length;
+        select.disabled = customMode || !list.length;
+        const usableVoice = hasUsableCurrentVoice();
+        if (!$('preview-button').hasAttribute('aria-busy')) $('preview-button').disabled = !usableVoice;
         $('all-voices-button').disabled = !list.length;
-        $('voice-count').textContent = query ? `${matches.length} / ${list.length} 个音色` : `${list.length} 个音色`;
-        fillCompareSelects(list);
+        $('voice-count').textContent = customMode
+            ? (usableVoice ? '自定义音色' : '等待输入音色 ID')
+            : (query ? `${matches.length} / ${list.length} 个音色` : `${list.length} 个音色`);
+        fillCompareSelects(comparisonVoiceList(list));
         updateFishReferenceState();
+        updateDoubaoVoiceModeUI();
         updateSetupSummary();
+    }
+
+    function comparisonVoiceList(list) {
+        if (!isDoubaoCustomMode() || !isPotentialDoubaoVoiceId(state.doubaoCustomVoice)
+            || list.some(voice => voice.id === state.doubaoCustomVoice)) return list;
+        return [{id: state.doubaoCustomVoice, name: '自定义音色'}, ...list];
     }
 
     function fillCompareSelects(list) {
@@ -602,8 +734,23 @@
             if (requestId !== state.voiceRequestId || provider !== state.provider) return;
             state.voiceLoading = false;
             state.voiceCatalogs[provider] = voices;
-            if (!voices.some(voice => voice.id === state.selectedVoices[provider]) && voices.length) {
+            const selectedVoice = state.selectedVoices[provider];
+            const selectedPreset = voices.find(voice => voice.id === selectedVoice);
+            if (provider === 'doubao' && state.doubaoVoiceMode === 'custom') {
+                state.doubaoCustomVoice = $('doubao-custom-voice').value.trim();
+                state.selectedVoices.doubao = state.doubaoCustomVoice;
+            } else if (provider === 'doubao' && selectedPreset) {
+                state.doubaoVoiceMode = 'preset';
+                state.doubaoPresetVoice = selectedPreset.id;
+            } else if (provider === 'doubao' && isPotentialDoubaoVoiceId(selectedVoice)) {
+                state.doubaoVoiceMode = 'custom';
+                state.doubaoCustomVoice = selectedVoice;
+            } else if (!selectedPreset && voices.length) {
                 state.selectedVoices[provider] = voices[0].id;
+                if (provider === 'doubao') {
+                    state.doubaoVoiceMode = 'preset';
+                    state.doubaoPresetVoice = voices[0].id;
+                }
                 if (provider === state.savedProvider) state.voiceTouched.add(provider);
                 else normalizeBaselineVoice(provider, voices[0].id);
             }
@@ -613,16 +760,21 @@
         } catch (error) {
             if (requestId !== state.voiceRequestId || provider !== state.provider) return;
             state.voiceLoading = false;
-            $('voice-select').replaceChildren(new Option('音色加载失败'));
-            $('voice-select').disabled = true;
-            $('voice-count').textContent = '加载失败';
-            $('preview-button').disabled = true;
-            $('all-voices-button').disabled = true;
-            $('compare-a').replaceChildren();
-            $('compare-b').replaceChildren();
-            $('compare-a').disabled = true;
-            $('compare-b').disabled = true;
-            $('compare-button').disabled = true;
+            if (isDoubaoCustomMode()) {
+                renderVoiceSelect();
+                updateLegadoConfig();
+            } else {
+                $('voice-select').replaceChildren(new Option('音色加载失败'));
+                $('voice-select').disabled = true;
+                $('voice-count').textContent = '加载失败';
+                $('preview-button').disabled = true;
+                $('all-voices-button').disabled = true;
+                $('compare-a').replaceChildren();
+                $('compare-b').replaceChildren();
+                $('compare-a').disabled = true;
+                $('compare-b').disabled = true;
+                $('compare-button').disabled = true;
+            }
             setFeedback('voice-feedback', `音色加载失败：${error.message}`, 'error');
             updateDirtyState();
         }
@@ -630,7 +782,10 @@
 
     async function updateLegadoConfig() {
         const voice = currentVoiceId();
-        if (!voice) return;
+        if (!voice || (isDoubaoCustomMode() && !isPotentialDoubaoVoiceId(voice))) {
+            invalidateLegadoConfig(voice ? '请先填写有效的音色 ID。' : '请先选择或填写音色。');
+            return;
+        }
         const requestId = ++state.configRequestId;
         const code = $('legado-config');
         code.textContent = '正在生成配置…';
@@ -638,7 +793,7 @@
         $('copy-subscribe-button').disabled = true;
         setFeedback('integration-feedback');
         try {
-            const data = await jsonRequest(`/api/legado/config?voice=${encodeURIComponent(voice)}`);
+            const data = await jsonRequest(`/api/legado/config?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}`);
             if (requestId !== state.configRequestId || voice !== currentVoiceId()) return;
             state.legadoConfigText = JSON.stringify(data, null, 2);
             code.textContent = state.legadoConfigText;
@@ -670,11 +825,16 @@
     async function copySubscribeUrl() {
         const voice = currentVoiceId();
         if (!voice) return;
+        const selectedProvider = state.provider;
         const button = $('copy-subscribe-button');
         setButtonBusy(button, true, '生成中');
         try {
-            const data = await jsonRequest(`/api/legado/subscribe?voice=${encodeURIComponent(voice)}`);
-            const url = data.url || `${window.location.origin}/api/legado/subscribe?voice=${encodeURIComponent(voice)}&auto=true`;
+            const provider = encodeURIComponent(selectedProvider);
+            const data = await jsonRequest(`/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${provider}`);
+            const url = data.url || `${window.location.origin}/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${provider}&auto=true`;
+            if (voice !== currentVoiceId() || selectedProvider !== state.provider) {
+                throw new Error('音色已更改，请重新复制');
+            }
             await copyText(url);
             notify('订阅链接已复制', 'success');
             setFeedback('integration-feedback', '订阅链接已复制，可直接导入开源阅读。', 'success');
@@ -682,7 +842,7 @@
             setFeedback('integration-feedback', `复制订阅链接失败：${error.message}`, 'error');
         } finally {
             setButtonBusy(button, false);
-            button.disabled = !currentVoiceId() || !(state.voiceCatalogs[state.provider] || []).length;
+            button.disabled = !hasUsableCurrentVoice();
         }
     }
 
@@ -690,7 +850,7 @@
         const response = await expectOk(await api('/speech/stream', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({text, voice, rate: '0%'}),
+            body: JSON.stringify({text, voice, provider: state.provider, rate: '0%'}),
         }));
         return {response, blob: await response.blob()};
     }
@@ -726,7 +886,7 @@
         } finally {
             if (requestId === state.previewRequestId) {
                 setButtonBusy(button, false);
-                button.disabled = !currentVoiceId() || !(state.voiceCatalogs[state.provider] || []).length;
+                button.disabled = !hasUsableCurrentVoice();
             }
         }
     }
@@ -1138,6 +1298,10 @@
 
     function chooseVoiceFromLibrary(voiceId) {
         clearSynthesisOutputs();
+        if (state.provider === 'doubao') {
+            state.doubaoVoiceMode = 'preset';
+            state.doubaoPresetVoice = voiceId;
+        }
         state.selectedVoices[state.provider] = voiceId;
         state.voiceTouched.add(state.provider);
         $('voice-search').value = '';
@@ -1236,6 +1400,22 @@
         target.focus();
     }
 
+    function handleVoiceModeKeydown(event) {
+        const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
+        if (!keys.includes(event.key)) return;
+        event.preventDefault();
+        const buttons = $$('[data-voice-mode]');
+        const current = buttons.indexOf(event.currentTarget);
+        let next = current;
+        if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = buttons.length - 1;
+        else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (current - 1 + buttons.length) % buttons.length;
+        else next = (current + 1) % buttons.length;
+        const target = buttons[next];
+        setDoubaoVoiceMode(target.dataset.voiceMode, false);
+        target.focus();
+    }
+
     function bindEvents() {
         $('theme-button').addEventListener('click', toggleTheme);
         if ($('token-button')) $('token-button').addEventListener('click', setAdminToken);
@@ -1253,12 +1433,28 @@
         $('voice-select').addEventListener('change', event => {
             if (!event.currentTarget.value) return;
             clearSynthesisOutputs();
+            if (state.provider === 'doubao') {
+                state.doubaoVoiceMode = 'preset';
+                state.doubaoPresetVoice = event.currentTarget.value;
+            }
             state.selectedVoices[state.provider] = event.currentTarget.value;
             state.voiceTouched.add(state.provider);
             updateFishReferenceState();
             updateDirtyState();
             updateSetupSummary();
             updateLegadoConfig();
+        });
+        $$('[data-voice-mode]').forEach(button => {
+            button.addEventListener('click', () => setDoubaoVoiceMode(button.dataset.voiceMode));
+            button.addEventListener('keydown', handleVoiceModeKeydown);
+        });
+        $('doubao-custom-voice').addEventListener('input', updateDoubaoCustomVoice);
+        $('doubao-custom-voice').addEventListener('change', () => {
+            if (!state.legadoUpdateTimer) return;
+            window.clearTimeout(state.legadoUpdateTimer);
+            state.legadoUpdateTimer = null;
+            if (hasUsableCurrentVoice()) updateLegadoConfig();
+            else invalidateLegadoConfig('请先填写有效的音色 ID。');
         });
         $('preview-button').addEventListener('click', previewVoice);
         $('all-voices-button').addEventListener('click', openVoiceDialog);

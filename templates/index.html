@@ -178,12 +178,26 @@
                                     <span class="surface-note" id="voice-count">正在加载</span>
                                 </div>
                                 <div class="voice-picker">
-                                    <label class="search-field" for="voice-search">
-                                        <span aria-hidden="true">⌕</span>
-                                        <input id="voice-search" type="search" placeholder="搜索名称或音色 ID" autocomplete="off">
+                                    <div class="voice-mode-switch" id="doubao-voice-mode" hidden>
+                                        <span class="field-label">音色来源</span>
+                                        <div class="segmented-control" role="radiogroup" aria-label="火山引擎音色来源">
+                                            <button class="segment is-active" type="button" role="radio" aria-checked="true" tabindex="0" data-voice-mode="preset">预设音色</button>
+                                            <button class="segment" type="button" role="radio" aria-checked="false" tabindex="-1" data-voice-mode="custom">自定义 ID</button>
+                                        </div>
+                                    </div>
+                                    <div class="voice-preset-fields" id="voice-preset-fields">
+                                        <label class="search-field" for="voice-search">
+                                            <span aria-hidden="true">⌕</span>
+                                            <input id="voice-search" type="search" placeholder="搜索名称或音色 ID" autocomplete="off">
+                                        </label>
+                                        <label class="sr-only" for="voice-select">音色</label>
+                                        <select id="voice-select" disabled><option>正在加载音色…</option></select>
+                                    </div>
+                                    <label class="field custom-voice-field" id="doubao-custom-voice-field" hidden>
+                                        <span>自定义音色 ID</span>
+                                        <input id="doubao-custom-voice" type="text" autocomplete="off" maxlength="128" spellcheck="false" placeholder="输入 voice_type">
+                                        <small>填写火山引擎控制台或官方音色列表中的 voice_type。</small>
                                     </label>
-                                    <label class="sr-only" for="voice-select">音色</label>
-                                    <select id="voice-select" disabled><option>正在加载音色…</option></select>
                                     <div class="button-row compact-row">
                                         <button class="button secondary" id="preview-button" type="button" disabled>
                                             <span aria-hidden="true">▶</span> 试听当前音色

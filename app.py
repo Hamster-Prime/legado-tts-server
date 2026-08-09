@@ -821,6 +821,20 @@ FISH_AUDIO_VOICES = [
 ]
 
 ALL_PROVIDERS = ['doubao', 'tencent', 'edge', 'xiaomi', 'fishaudio']
+_PROVIDER_DISPLAY_NAMES = {
+    'doubao': '火山引擎',
+    'tencent': '腾讯云 TTS',
+    'edge': 'Edge TTS',
+    'xiaomi': '小米 MiMo',
+    'fishaudio': 'Fish Audio',
+}
+_PROVIDER_VOICE_CATALOGS = {
+    'doubao': DOUBAO_VOICES,
+    'tencent': TENCENT_VOICES,
+    'edge': EDGE_VOICES,
+    'xiaomi': XIAOMI_VOICES,
+    'fishaudio': FISH_AUDIO_VOICES,
+}
 _ALL_VOICE_IDS = set()
 # ──────────────────────────────────────────────
 # Voice name -> ID lookup (for OpenAI compat)
@@ -3607,6 +3621,22 @@ def openai_models():
     })
 
 
+def _legado_engine_name(provider, voice):
+    """Return a readable, stable provider/voice label for exported engines."""
+    provider_name = _PROVIDER_DISPLAY_NAMES.get(provider, 'TTS')
+    voice_name = next(
+        (item['name'] for item in _PROVIDER_VOICE_CATALOGS.get(provider, ())
+         if item['id'] == voice),
+        voice,
+    )
+    return f'{provider_name} - {voice_name}'
+
+
+def _serialize_legado_config(config):
+    """Serialize exports as strict, human-readable UTF-8 JSON."""
+    return json.dumps(config, ensure_ascii=False, indent=2, allow_nan=False)
+
+
 def _build_legado_config(server, voice, rate, provider=None):
     """Build a Legado engine config without interpolating values into JSON."""
     body = {
@@ -3626,7 +3656,7 @@ def _build_legado_config(server, voice, rate, provider=None):
     return {
         'concurrentRate': '0',
         'contentType': 'audio/mpeg',
-        'name': f"TTS-{voice.split('-')[-1]}",
+        'name': _legado_engine_name(provider, voice),
         'url': f'{server}/speech/stream,{encoded_options}',
     }
 
@@ -3677,7 +3707,10 @@ def api_legado_config():
         server = request.host_url.rstrip('/')
     rate = request.args.get('rate', '+0%').strip()
     legado_cfg = _build_legado_config(server, voice, rate, provider)
-    return jsonify(legado_cfg)
+    return Response(
+        _serialize_legado_config(legado_cfg),
+        content_type='application/json; charset=utf-8',
+    )
 
 
 @app.route('/api/legado/subscribe', methods=['GET'])
@@ -3695,7 +3728,9 @@ def api_legado_subscribe():
         server = request.host_url.rstrip('/')
     rate = request.args.get('rate', '+0%').strip()
     legado_cfg = _build_legado_config(server, voice, rate, provider)
-    encoded = base64.b64encode(json.dumps(legado_cfg, ensure_ascii=False).encode()).decode()
+    encoded = base64.b64encode(
+        _serialize_legado_config(legado_cfg).encode('utf-8')
+    ).decode('ascii')
     subscribe_query = {'voice': voice, 'auto': 'true'}
     if provider:
         subscribe_query['provider'] = provider

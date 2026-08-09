@@ -795,8 +795,8 @@
         try {
             const data = await jsonRequest(`/api/legado/config?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}`);
             if (requestId !== state.configRequestId || voice !== currentVoiceId()) return;
-            state.legadoConfigText = JSON.stringify(data, null, 2);
-            code.textContent = state.legadoConfigText;
+            state.legadoConfigText = JSON.stringify(data);
+            code.textContent = JSON.stringify(data, null, 2);
             if (!$('copy-config-button').hasAttribute('aria-busy')) $('copy-config-button').disabled = false;
             if (!$('copy-subscribe-button').hasAttribute('aria-busy')) $('copy-subscribe-button').disabled = false;
         } catch (error) {

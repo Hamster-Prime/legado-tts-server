@@ -1426,7 +1426,7 @@ class TestLegadoEndpoints:
         r = self.client.get('/api/legado/config')
         assert r.status_code == 200
         data = r.get_json()
-        assert 'name' in data
+        assert data['name'] == 'Edge TTS - 晓晓 - 女声'
         assert 'url' in data
         assert 'speech/stream' in data['url']
         assert 'audio/mpeg' in data['contentType']
@@ -1435,8 +1435,49 @@ class TestLegadoEndpoints:
         r = self.client.get('/api/legado/config?voice=zh-CN-YunxiNeural')
         assert r.status_code == 200
         data = r.get_json()
-        assert 'YunxiNeural' in data['name']
+        assert data['name'] == 'Edge TTS - 云希 - 男声'
         assert 'zh-CN-YunxiNeural' in data['url']
+
+    @pytest.mark.parametrize(('provider', 'voice', 'expected_name'), [
+        ('doubao', 'zh_male_shaonianzixin_uranus_bigtts',
+         '火山引擎 - 少年梓辛 2.0'),
+        ('tencent', '501002', '腾讯云 TTS - 智菊 - 阅读女声'),
+        ('edge', 'zh-CN-XiaoxiaoNeural', 'Edge TTS - 晓晓 - 女声'),
+        ('xiaomi', 'default_zh', '小米 MiMo - 中文女声'),
+        ('fishaudio', 'fish-animated',
+         'Fish Audio - Fish Animated - 活泼女声'),
+    ])
+    def test_legado_config_uses_provider_and_voice_display_name(
+            self, provider, voice, expected_name):
+        r = self.client.get(
+            f'/api/legado/config?provider={provider}&voice={voice}'
+        )
+
+        assert r.status_code == 200
+        assert r.get_json()['name'] == expected_name
+
+    def test_legado_config_uses_voice_id_for_uncatalogued_custom_voice(self):
+        custom_voice = 'S_custom_voice_123'
+        r = self.client.get(
+            f'/api/legado/config?provider=doubao&voice={custom_voice}'
+        )
+
+        assert r.status_code == 200
+        assert r.get_json()['name'] == f'火山引擎 - {custom_voice}'
+
+    def test_legado_config_is_pretty_utf8_json(self):
+        r = self.client.get(
+            '/api/legado/config'
+            '?provider=doubao'
+            '&voice=zh_male_shaonianzixin_uranus_bigtts'
+        )
+
+        assert r.status_code == 200
+        assert r.headers['Content-Type'] == 'application/json; charset=utf-8'
+        raw = r.data.decode('utf-8')
+        assert raw.startswith('{\n  "concurrentRate": "0",')
+        assert '火山引擎 - 少年梓辛 2.0' in raw
+        assert json.loads(raw) == r.get_json()
 
     def test_legado_config_includes_provider_in_request_body(self):
         r = self.client.get('/api/legado/config?provider=doubao')
@@ -1453,6 +1494,7 @@ class TestLegadoEndpoints:
         config_response = self.client.get('/api/legado/config' + query)
         assert config_response.status_code == 200
         config = config_response.get_json()
+        assert config['name'] == f'火山引擎 - {custom_voice}'
         request_config = json.loads(config['url'].split(',', 1)[1])
         assert request_config['body']['voice'] == custom_voice
         assert request_config['body']['provider'] == 'doubao'
@@ -1465,11 +1507,18 @@ class TestLegadoEndpoints:
         assert subscribed_request['body']['provider'] == 'doubao'
 
     def test_legado_subscribe_encoded(self):
-        r = self.client.get('/api/legado/subscribe?auto=true')
+        r = self.client.get(
+            '/api/legado/subscribe'
+            '?provider=doubao'
+            '&voice=zh_male_shaonianzixin_uranus_bigtts'
+            '&auto=true'
+        )
         assert r.status_code == 200
         import base64
-        decoded = json.loads(base64.b64decode(r.data).decode())
-        assert 'name' in decoded
+        decoded_text = base64.b64decode(r.data).decode('utf-8')
+        assert decoded_text.startswith('{\n  "concurrentRate": "0",')
+        decoded = json.loads(decoded_text)
+        assert decoded['name'] == '火山引擎 - 少年梓辛 2.0'
         assert 'speech/stream' in decoded['url']
 
     def test_legado_subscribe_json(self):

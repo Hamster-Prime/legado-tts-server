@@ -224,6 +224,43 @@
                         </div>
                     </div>
 
+                    <article class="surface fallback-surface">
+                        <div class="surface-heading compact">
+                            <div><span class="step-label">运行策略</span><h2>重试与故障转移</h2></div>
+                            <span class="surface-note">瞬时失败先重试，耗尽后可切换 Edge</span>
+                        </div>
+                        <label class="toggle-control" for="fallback-enabled">
+                            <span class="toggle-copy">
+                                <strong>失败后切换到 Edge</strong>
+                                <small>关闭后仍会重试原服务，但不会更换服务商或音色。</small>
+                            </span>
+                            <input class="toggle-input" id="fallback-enabled" data-config-field="fallback_enabled" type="checkbox" role="switch" checked>
+                            <span class="toggle-track" aria-hidden="true"><span></span></span>
+                        </label>
+                        <div class="fallback-layout" id="fallback-fields">
+                            <label class="field">
+                                <span>备用 Edge 音色</span>
+                                <select id="fallback-voice" data-config-field="fallback_voice">
+                                    <option value="zh-CN-XiaoxiaoNeural">正在加载 Edge 音色…</option>
+                                </select>
+                                <small>仅支持 Edge 音色列表中的 voice ID。</small>
+                            </label>
+                            <div class="field-grid fallback-number-grid">
+                                <label class="field">
+                                    <span>额外重试次数</span>
+                                    <input id="fallback-retry-count" data-config-field="fallback_retry_count" type="number" min="0" max="3" step="1" inputmode="numeric" value="1">
+                                    <small>范围 0–3 次，不含首次请求。</small>
+                                </label>
+                                <label class="field">
+                                    <span>初始重试间隔（毫秒）</span>
+                                    <input id="fallback-retry-delay-ms" data-config-field="fallback_retry_delay_ms" type="number" min="0" max="5000" step="1" inputmode="numeric" value="500">
+                                    <small>本地退避单次最多 5 秒；上游限流指令可能延长至 60 秒。</small>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="inline-feedback" id="fallback-feedback" role="status" aria-live="polite" hidden></div>
+                    </article>
+
                     <div class="save-bar">
                         <div class="save-message">
                             <strong id="save-state-title">所有更改均已保存</strong>

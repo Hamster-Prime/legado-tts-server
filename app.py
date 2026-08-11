@@ -31,10 +31,14 @@ try:
 except ImportError:
     fcntl = None
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode, urlsplit
 
-from flask import Flask, request, Response, render_template, jsonify, after_this_request
+from flask import (
+    Flask, request, Response, render_template, jsonify, after_this_request,
+    has_request_context,
+)
 from flask_cors import CORS
 import requests
 import edge_tts
@@ -84,6 +88,9 @@ _metrics = {
     'chars_total': 0,
     'cache_hits_total': 0,
     'cache_lookups_total': 0,  # denominator for the hit ratio (same granularity as hits)
+    'provider_retries_total': 0,
+    'fallback_attempts_total': 0,
+    'fallback_success_total': 0,
     'response_time_ms': deque(maxlen=1000),
     '_start_time': time.time(),
 }
@@ -97,7 +104,8 @@ AUDIT_LOG_SIZE = int(os.environ.get('AUDIT_LOG_SIZE', '200'))
 _audit_log = deque(maxlen=AUDIT_LOG_SIZE)
 _audit_lock = threading.Lock()
 
-def _audit_record(method, path, status, provider=None, voice=None, chars=0, ms=0, ip='', request_id=''):
+def _audit_record(method, path, status, provider=None, voice=None, chars=0,
+                  ms=0, ip='', request_id='', retries=0, fallback=False):
     """Append a request record to the audit ring buffer."""
     rec = {
         'ts': datetime.now().isoformat(),
@@ -110,6 +118,9 @@ def _audit_record(method, path, status, provider=None, voice=None, chars=0, ms=0
         'ms': round(ms, 1),
         'ip': ip,
         'request_id': request_id,
+        'retries': retries,
+        'fallback': fallback,
+        'outcome': 'success' if 200 <= status < 300 else 'failed',
     }
     with _audit_lock:
         _audit_log.append(rec)  # deque(maxlen=AUDIT_LOG_SIZE) self-trims
@@ -118,6 +129,32 @@ def _audit_record(method, path, status, provider=None, voice=None, chars=0, ms=0
         _sse_publish('tts_request', rec)
     except Exception:
         pass
+    return rec
+
+
+def _mark_stream_failure(stream_state, error):
+    """Reclassify a response whose streamed body failed after HTTP headers."""
+    if not stream_state or stream_state.get('failed'):
+        return
+    stream_state['failed'] = True
+    if not stream_state.get('counted_success'):
+        return
+    with _metrics_lock:
+        if _metrics['requests_success'] > 0:
+            _metrics['requests_success'] -= 1
+        _metrics['requests_failed'] += 1
+    updated_record = None
+    with _audit_lock:
+        record = stream_state.get('audit_record')
+        if record is not None:
+            record['outcome'] = 'stream_failed'
+            record['stream_error'] = str(error)[:500]
+            updated_record = dict(record)
+    if updated_record is not None:
+        try:
+            _sse_publish('tts_request_update', updated_record)
+        except Exception:
+            pass
 
 # ──────────────────────────────────────────────
 # Logging
@@ -177,6 +214,8 @@ def _before_request():
     request._start_time = time.time()
     request._request_id = request.headers.get('X-Request-ID', uuid.uuid4().hex[:12])
     request._rate_limit_info = {'limit': RATE_LIMIT_RPM, 'remaining': -1, 'reset': -1}
+    request._tts_retry_count = 0
+    request._tts_stream_state = {}
 
 
 @app.after_request
@@ -184,7 +223,10 @@ def _after_request(response):
     # _start_time is missing when the request is rejected before before_request runs
     # (e.g. 413 from MAX_CONTENT_LENGTH), so fall back rather than raising in the hook.
     rt_ms = (time.time() - getattr(request, '_start_time', time.time())) * 1000
-    if '/speech/stream' in request.path or '/v1/audio/speech' in request.path or '/api/speech/batch' in request.path:
+    if ('/speech/stream' in request.path
+            or '/v1/audio/speech' in request.path
+            or '/api/speech/batch' in request.path
+            or '/api/tts/preview' in request.path):
         with _metrics_lock:
             _metrics['requests_total'] += 1
             if 200 <= response.status_code < 300:
@@ -193,17 +235,30 @@ def _after_request(response):
                 _metrics['requests_failed'] += 1
             _metrics['response_time_ms'].append(int(rt_ms))  # deque(maxlen=1000) self-trims
         # Audit log for TTS requests
-        _audit_record(
+        try:
+            retry_count = int(response.headers.get(
+                'X-TTS-Retry-Count', getattr(request, '_tts_retry_count', 0)))
+        except (TypeError, ValueError):
+            retry_count = getattr(request, '_tts_retry_count', 0)
+        audit_record = _audit_record(
             method=request.method,
             path=request.path,
             status=response.status_code,
-            provider=getattr(request, '_tts_provider', None),
-            voice=getattr(request, '_tts_voice', None),
+            provider=(response.headers.get('X-TTS-Provider')
+                      or getattr(request, '_tts_provider', None)),
+            voice=(response.headers.get('X-TTS-Voice')
+                   or getattr(request, '_tts_voice', None)),
             chars=getattr(request, '_tts_chars', 0),
             ms=rt_ms,
             ip=request.remote_addr or '',
             request_id=getattr(request, '_request_id', ''),
+            retries=retry_count,
+            fallback=response.headers.get('X-TTS-Fallback') == 'true',
         )
+        stream_state = getattr(request, '_tts_stream_state', None)
+        if stream_state is not None:
+            stream_state['audit_record'] = audit_record
+            stream_state['counted_success'] = 200 <= response.status_code < 300
     response.headers['X-Response-Time'] = str(int(rt_ms)) + 'ms'
     response.headers['X-Request-ID'] = getattr(request, '_request_id', '')
     response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -238,6 +293,19 @@ API_KEYS_REQUIRED = os.environ.get('API_KEYS_REQUIRED', '0') == '1'  # require A
 ALLOW_SSML = os.environ.get('ALLOW_SSML', '1') == '1'  # allow SSML input
 FALLBACK_TO_EDGE = os.environ.get('FALLBACK_TO_EDGE', '1') == '1'  # auto-fallback to Edge on failure
 FALLBACK_VOICE = os.environ.get('FALLBACK_VOICE', 'zh-CN-XiaoxiaoNeural')  # voice to use when fallback to Edge
+# Keep the imported defaults so tests/embedding applications that deliberately
+# patch the legacy globals remain compatible; persisted UI values take priority
+# during normal operation.
+_FALLBACK_ENV_ENABLED = FALLBACK_TO_EDGE
+_FALLBACK_ENV_VOICE = FALLBACK_VOICE
+try:
+    FALLBACK_RETRY_COUNT = max(0, min(3, int(os.environ.get('FALLBACK_RETRY_COUNT', '1'))))
+except (TypeError, ValueError):
+    FALLBACK_RETRY_COUNT = 1
+try:
+    FALLBACK_RETRY_DELAY_MS = max(0, min(5000, int(os.environ.get('FALLBACK_RETRY_DELAY_MS', '500'))))
+except (TypeError, ValueError):
+    FALLBACK_RETRY_DELAY_MS = 500
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')  # optional webhook for error notifications
 WEBHOOK_EVENTS = os.environ.get('WEBHOOK_EVENTS', 'error')  # comma-separated: error,synthesis,startup
 REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))  # seconds per provider request
@@ -246,10 +314,11 @@ FFMPEG_TIMEOUT = int(os.environ.get('FFMPEG_TIMEOUT', '30'))  # seconds per ffmp
 if LOG_LEVEL != 'INFO':
     log.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 
-# Shared HTTP session with connection pooling & retry
+# Shared HTTP session with connection pooling. Retries are exclusively handled
+# by the application policy so request counts, delays, headers, and metrics agree.
 _http_session = requests.Session()
 _http_session.headers.update({'User-Agent': f'LegadoTTS/{__version__}'})
-_adapter_kwargs = dict(pool_connections=10, pool_maxsize=20, max_retries=2, pool_block=False)
+_adapter_kwargs = dict(pool_connections=10, pool_maxsize=20, max_retries=0, pool_block=False)
 _http_session.mount('https://', requests.adapters.HTTPAdapter(**_adapter_kwargs))
 _http_session.mount('http://', requests.adapters.HTTPAdapter(**_adapter_kwargs))
 
@@ -540,16 +609,26 @@ def _send_webhook(event_type, data):
     if event_type not in events:
         return
     def _do_send():
-        try:
-            payload = {
-                'event': event_type,
-                'timestamp': datetime.now().isoformat(),
-                'version': __version__,
-                'data': data,
-            }
-            _http_session.post(WEBHOOK_URL, json=payload, timeout=(5, 10))
-        except Exception as e:
-            log.debug('Webhook send failed: %s', e)
+        payload = {
+            'event': event_type,
+            'timestamp': datetime.now().isoformat(),
+            'version': __version__,
+            'data': data,
+        }
+        for attempt in range(3):
+            try:
+                response = _http_session.post(
+                    WEBHOOK_URL, json=payload, timeout=(5, 10))
+                response.close()
+                return
+            except (requests.ConnectionError, requests.Timeout) as e:
+                if attempt == 2:
+                    log.debug('Webhook send failed after retries: %s', e)
+                    return
+                time.sleep(0.5 * (attempt + 1))
+            except Exception as e:
+                log.debug('Webhook send failed: %s', e)
+                return
     threading.Thread(target=_do_send, daemon=True).start()
 
 
@@ -711,6 +790,12 @@ DEFAULT_CONFIG = {
     'fishaudio_api_key': '',
     'fishaudio_voice': 'fish-animated',
     'fishaudio_reference_id': '',
+    # These values are persisted by the admin UI. The legacy environment
+    # variables above are used only as defaults for older config files.
+    'fallback_enabled': FALLBACK_TO_EDGE,
+    'fallback_voice': FALLBACK_VOICE,
+    'fallback_retry_count': FALLBACK_RETRY_COUNT,
+    'fallback_retry_delay_ms': FALLBACK_RETRY_DELAY_MS,
     'pronunciation_dict': {},  # custom word->replacement mapping
     'voice_favorites': [],  # list of voice IDs the user has bookmarked
 }
@@ -911,10 +996,28 @@ def _tts_headers(audio, requested_provider, requested_voice,
     """Standard audio response headers, including fallback disclosure."""
     headers = {
         'Content-Length': str(len(audio)),
-        'X-TTS-Provider': final_provider,
-        'X-TTS-Voice': final_voice,
         'X-TTS-Chars': str(chars),
         'Cache-Control': 'no-store',
+    }
+    headers.update(_tts_metadata_headers(
+        requested_provider, requested_voice, final_provider, final_voice))
+    return headers
+
+
+def _tts_retry_headers():
+    """Expose the application-level retry count on success and failure."""
+    count = (getattr(request, '_tts_retry_count', 0)
+             if has_request_context() else 0)
+    return {'X-TTS-Retry-Count': str(count)}
+
+
+def _tts_metadata_headers(requested_provider, requested_voice,
+                          final_provider, final_voice):
+    """Describe the actual synthesis target without assuming an audio body."""
+    headers = {
+        'X-TTS-Provider': final_provider,
+        'X-TTS-Voice': final_voice,
+        **_tts_retry_headers(),
     }
     if final_provider != requested_provider or final_voice != requested_voice:
         headers['X-TTS-Requested-Provider'] = requested_provider
@@ -1216,15 +1319,97 @@ def update_stats(chars, provider, voice=None):
 # Retry helper
 # ──────────────────────────────────────────────
 
-def _retry(func, retries=2, delay=0.5):
+def _retry_delay_seconds(base_delay_ms, retry_number):
+    """Return capped exponential backoff for a one-based retry number."""
+    if base_delay_ms <= 0:
+        return 0.0
+    multiplier = 2 ** max(0, retry_number - 1)
+    return min(5000, base_delay_ms * multiplier) / 1000.0
+
+
+def _retry_after_seconds(response):
+    """Parse an HTTP Retry-After value, capped to avoid tying up a worker."""
+    raw = (getattr(response, 'headers', {}).get('Retry-After')
+           if response is not None else None)
+    if raw is None:
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(raw).strip())
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return min(60.0, max(0.0, seconds))
+
+
+def _retry_wait_seconds(base_delay_ms, retry_number, retry_after=None):
+    """Combine local exponential backoff with an upstream retry hint."""
+    local_delay = _retry_delay_seconds(base_delay_ms, retry_number)
+    if retry_after is None:
+        return local_delay
+    return max(local_delay, min(60.0, max(0.0, retry_after)))
+
+
+def _retry(func, retries=None, delay=None, provider='provider', config=None):
+    policy = _fallback_policy(config)
+    if retries is None or delay is None:
+        if retries is None:
+            retries = policy['retry_count'] + 1
+    base_delay_ms = (policy['retry_delay_ms'] if delay is None
+                     else max(0, float(delay) * 1000.0))
     for attempt in range(1, retries + 1):
         try:
             return func()
-        except (requests.ConnectionError, requests.Timeout) as e:
-            if attempt == retries:
+        except requests.RequestException as e:
+            status_code = getattr(getattr(e, 'response', None), 'status_code', None)
+            retryable = (
+                isinstance(e, (
+                    requests.ConnectionError,
+                    requests.Timeout,
+                    requests.exceptions.ChunkedEncodingError,
+                    requests.exceptions.ContentDecodingError,
+                ))
+                or (isinstance(e, requests.HTTPError)
+                    and status_code is not None
+                    and _is_retryable_http_status(status_code))
+            )
+            failed_response = getattr(e, 'response', None)
+            retry_after = _retry_after_seconds(failed_response)
+            close = getattr(failed_response, 'close', None)
+            if close:
+                close()
+            if not retryable or attempt == retries:
                 raise
-            log.warning("Request failed (attempt %d/%d): %s", attempt, retries, e)
-            time.sleep(delay * attempt)
+            _record_provider_retry(provider)
+            log.warning("Request failed; retrying provider=%s attempt=%d/%d: %s",
+                        provider, attempt + 1, retries, e)
+            sleep_seconds = _retry_wait_seconds(
+                base_delay_ms, attempt, retry_after=retry_after)
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+
+
+def _record_provider_retry(provider='doubao'):
+    """Record one upstream retry for metrics and the current HTTP response."""
+    with _metrics_lock:
+        _metrics['provider_retries_total'] += 1
+    if has_request_context():
+        request._tts_retry_count = getattr(request, '_tts_retry_count', 0) + 1
+    log.info("TTS provider retry: provider=%s retry_count=%s",
+             provider,
+             getattr(request, '_tts_retry_count', '?') if has_request_context() else '?')
+
+
+def _record_fallback(success=False):
+    """Record a fallback attempt and, when applicable, a successful handoff."""
+    with _metrics_lock:
+        _metrics['fallback_attempts_total'] += 1
+        if success:
+            _metrics['fallback_success_total'] += 1
 
 
 # ──────────────────────────────────────────────
@@ -1234,8 +1419,35 @@ def _retry(func, retries=2, delay=0.5):
 DOUBAO_TTS_URL = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional'
 
 
+_DOUBAO_RETRYABLE_EXCEPTIONS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ContentDecodingError,
+)
+
+
+def _is_retryable_http_status(status_code):
+    """Return whether an HTTP response normally represents a transient error."""
+    return status_code in (408, 425, 429) or 500 <= status_code < 600
+
+
 class ProviderStreamError(RuntimeError):
-    """Raised when an upstream streaming TTS response cannot be completed."""
+    """Raised when an upstream streaming TTS response cannot be completed.
+
+    ``retryable`` deliberately describes the upstream failure, not whether the
+    current request is allowed to retry it. The caller still enforces its own
+    retry budget and the streaming first-byte boundary.
+    """
+
+    def __init__(self, message, *, retryable=False, status_code=None,
+                 provider_code=None, retry_after=None):
+        super().__init__(message)
+        self.retryable = bool(retryable)
+        self.status_code = status_code
+        self.status = status_code
+        self.provider_code = provider_code
+        self.retry_after = retry_after
 
 
 def stream_doubao(text, voice, speech_rate=0, section_id=None, config=None):
@@ -1243,7 +1455,7 @@ def stream_doubao(text, voice, speech_rate=0, section_id=None, config=None):
     config = load_config() if config is None else config
     api_key = config.get('doubao_api_key', '')
     if not api_key:
-        raise ProviderStreamError("未配置火山引擎 API Key")
+        raise ProviderStreamError("未配置火山引擎 API Key", retryable=False)
     request_id = str(uuid.uuid4())
     headers = {
         "Content-Type": "application/json",
@@ -1284,7 +1496,10 @@ def stream_doubao(text, voice, speech_rate=0, section_id=None, config=None):
             suffix = f" logid={logid}" if logid else ''
             raise ProviderStreamError(
                 f"火山引擎 HTTP {resp.status_code}: "
-                f"{detail or getattr(resp, 'reason', 'Unknown')}{suffix}"
+                f"{detail or getattr(resp, 'reason', 'Unknown')}{suffix}",
+                retryable=_is_retryable_http_status(resp.status_code),
+                status_code=resp.status_code,
+                retry_after=_retry_after_seconds(resp),
             )
         for raw_line in resp.iter_lines(decode_unicode=True):
             if not raw_line:
@@ -1305,7 +1520,11 @@ def stream_doubao(text, voice, speech_rate=0, section_id=None, config=None):
             if code != 0:
                 message = event.get('message', 'Unknown error')
                 suffix = f" logid={logid}" if logid else ''
-                raise ProviderStreamError(f"火山引擎 API 错误 {code}: {message}{suffix}")
+                raise ProviderStreamError(
+                    f"火山引擎 API 错误 {code}: {message}{suffix}",
+                    retryable=False,
+                    provider_code=code,
+                )
             encoded = event.get('data')
             if not encoded:
                 continue
@@ -1318,15 +1537,19 @@ def stream_doubao(text, voice, speech_rate=0, section_id=None, config=None):
                 yield audio_chunk
         if not completed:
             suffix = f" logid={logid}" if logid else ''
-            raise ProviderStreamError(f"火山引擎流式响应未正常结束{suffix}")
+            raise ProviderStreamError(
+                f"火山引擎流式响应未正常结束{suffix}", retryable=True)
         if not received_audio:
             suffix = f" logid={logid}" if logid else ''
-            raise ProviderStreamError(f"火山引擎返回空音频{suffix}")
+            raise ProviderStreamError(f"火山引擎返回空音频{suffix}", retryable=True)
     except Exception as e:
         if isinstance(e, ProviderStreamError):
             raise
         suffix = f" logid={logid}" if logid else ''
-        raise ProviderStreamError(f"火山引擎请求失败: {e}{suffix}") from e
+        raise ProviderStreamError(
+            f"火山引擎请求失败: {e}{suffix}",
+            retryable=isinstance(e, _DOUBAO_RETRYABLE_EXCEPTIONS),
+        ) from e
     finally:
         if resp is not None:
             resp.close()
@@ -1334,15 +1557,35 @@ def stream_doubao(text, voice, speech_rate=0, section_id=None, config=None):
 
 def synthesize_doubao(text, voice, speech_rate=0, config=None):
     """Collect the streaming Volcengine response for non-streaming callers."""
-    try:
-        section_id = str(uuid.uuid4())
-        audio = b''.join(stream_doubao(
-            text, voice, speech_rate=speech_rate, section_id=section_id,
-            config=config,
-        ))
-        return audio, None
-    except ProviderStreamError as e:
-        return None, str(e)
+    config = load_config() if config is None else config
+    policy = _fallback_policy(config)
+    attempts = policy['retry_count'] + 1
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            # A buffered caller has not sent bytes to its client yet, so a
+            # failed attempt can safely be synthesized from the beginning.
+            section_id = str(uuid.uuid4())
+            audio = b''.join(stream_doubao(
+                text, voice, speech_rate=speech_rate, section_id=section_id,
+                config=config,
+            ))
+            return audio, None
+        except ProviderStreamError as e:
+            last_error = e
+            if (not e.retryable) or attempt >= attempts - 1:
+                break
+            _record_provider_retry('doubao')
+            log.warning(
+                "Retrying buffered Doubao synthesis: attempt=%d/%d status=%s code=%s error=%s",
+                attempt + 2, attempts, e.status_code, e.provider_code, e,
+            )
+            sleep_seconds = _retry_wait_seconds(
+                policy['retry_delay_ms'], attempt + 1,
+                retry_after=e.retry_after)
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+    return None, str(last_error) if last_error else '火山引擎返回空音频'
 
 
 def _tencent_sign(secret_key, date, service, string_to_sign):
@@ -1383,13 +1626,17 @@ def synthesize_tencent(text, voice, speed=0, config=None):
             'X-TC-Version': ver, 'X-TC-Region': region}
     def _do():
         resp = _http_session.post(f'https://{host}', headers=hdrs, data=payload, timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT))
+        status_code = getattr(resp, 'status_code', 200)
+        if _is_retryable_http_status(status_code):
+            raise requests.HTTPError(
+                f'Tencent HTTP {status_code}', response=resp)
         result = resp.json()
         if 'Response' in result and 'Audio' in result['Response']:
             return base64.b64decode(result['Response']['Audio']), None
         err = result.get('Response', {}).get('Error', {})
         return None, f"腾讯云错误: {err.get('Message', str(result))}"
     try:
-        return _retry(_do)
+        return _retry(_do, provider='tencent', config=config)
     except Exception as e:
         return None, str(e)
 
@@ -1522,11 +1769,14 @@ def synthesize_fishaudio(text, voice, config=None):
         resp = _http_session.post(
             "https://api.fish.audio/v1/tts",
             headers=headers, json=payload, timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT))
+        if _is_retryable_http_status(resp.status_code):
+            raise requests.HTTPError(
+                f'Fish Audio HTTP {resp.status_code}', response=resp)
         if resp.status_code != 200:
             return None, f"Fish Audio API错误 ({resp.status_code}): {resp.text[:200]}"
         return resp.content, None
     try:
-        return _retry(_do)
+        return _retry(_do, provider='fishaudio', config=config)
     except Exception as e:
         return None, str(e)
 
@@ -1572,7 +1822,7 @@ def synthesize_xiaomi(text, voice, speed_ratio=1.0, config=None):
                 return base64.b64decode(audio['data']), None
         return None, f"小米API返回错误: {resp.text[:200]}"
     try:
-        return _retry(_do)
+        return _retry(_do, provider='xiaomi', config=config)
     except Exception as e:
         return None, str(e)
 
@@ -2150,8 +2400,8 @@ def _apply_pronunciation_dict(text):
 
 def dispatch(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz'):
     """Route to the correct TTS provider and return (audio_bytes, error, actual_provider, actual_voice).
-    When FALLBACK_TO_EDGE is enabled and a non-edge provider fails,
-    automatically retry with Edge TTS using a default Chinese voice."""
+    When enabled in the persisted fallback policy and a non-edge provider
+    fails, synthesize with the configured Edge voice after provider retries."""
     text = _clean_text(text)
     if not text:
         return None, 'Text is empty after cleaning', None, None
@@ -2168,15 +2418,25 @@ def dispatch(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz')
         'text_length': len(text),
     })
 
-    # Fallback to Edge TTS if enabled and primary provider is not edge
-    if FALLBACK_TO_EDGE and provider != 'edge':
-        fallback_voice = FALLBACK_VOICE
-        log.warning("Fallback to Edge TTS: provider=%s voice=%s error=%s",
-                    provider, voice, err)
+    # Fallback to Edge TTS if enabled and primary provider is not edge.
+    policy = _fallback_policy()
+    if policy['enabled'] and provider != 'edge':
+        fallback_voice = policy['voice']
+        log.warning(
+            "Fallback to Edge TTS: provider=%s voice=%s fallback_voice=%s retries=%d error=%s",
+            provider, voice, fallback_voice,
+            getattr(request, '_tts_retry_count', 0) if has_request_context() else 0,
+            err,
+        )
         fb_audio, fb_err = _dispatch_impl('edge', text, fallback_voice, pct,
                                           style=style, volume=volume, pitch=pitch)
+        _record_fallback(success=bool(fb_audio))
         if fb_audio:
+            log.info("Edge fallback succeeded: provider=%s fallback_voice=%s",
+                     provider, fallback_voice)
             return fb_audio, None, 'edge', fallback_voice
+        log.error("Edge fallback failed: provider=%s primary_error=%s fallback_error=%s",
+                  provider, err, fb_err)
         return None, f'Primary: {err}; Fallback(Edge): {fb_err}', None, None
     return None, err, None, None
 
@@ -2246,7 +2506,7 @@ def _dispatch_single(provider, text, voice, pct, style=None, volume='+0%',
 
 
 def _iter_provider_stream(provider, text, voice, pct, style=None,
-                          volume='+0%', pitch='+0Hz'):
+                          volume='+0%', pitch='+0Hz', config=None):
     """Yield provider audio while lazily processing long-text chunks."""
     chunks = _split_text_chunks(text)
     section_id = str(uuid.uuid4()) if provider == 'doubao' else None
@@ -2257,6 +2517,7 @@ def _iter_provider_stream(provider, text, voice, pct, style=None,
                 voice,
                 speech_rate=max(-50, min(100, pct)),
                 section_id=section_id,
+                config=config,
             )
         elif provider == 'edge':
             yield from _edge_stream_iter(
@@ -2267,8 +2528,53 @@ def _iter_provider_stream(provider, text, voice, pct, style=None,
             raise ProviderStreamError(f'Provider does not support streaming: {provider}')
 
 
+def _iter_doubao_stream_with_retry(text, voice, pct, style=None,
+                                   volume='+0%', pitch='+0Hz', config=None):
+    """Retry Doubao only until its first audio chunk has been yielded.
+
+    Once a chunk has crossed this generator boundary, retrying would duplicate
+    audio already sent to the client. Each retry creates a fresh provider
+    generator (and therefore a fresh request ID and response object).
+    """
+    config = load_config() if config is None else config
+    policy = _fallback_policy(config)
+    attempts = policy['retry_count'] + 1
+    for attempt in range(attempts):
+        source = _iter_provider_stream(
+            'doubao', text, voice, pct, style=style, volume=volume,
+            pitch=pitch, config=config)
+        yielded = False
+        try:
+            for chunk in source:
+                yielded = True
+                yield chunk
+            return
+        except Exception as e:
+            retryable = getattr(e, 'retryable', False)
+            if yielded or not retryable or attempt >= attempts - 1:
+                raise
+            close = getattr(source, 'close', None)
+            if close:
+                close()
+            _record_provider_retry('doubao')
+            log.warning(
+                "Retrying Doubao stream before first audio: attempt=%d/%d status=%s code=%s error=%s",
+                attempt + 2, attempts, getattr(e, 'status_code', None),
+                getattr(e, 'provider_code', None), e,
+            )
+            sleep_seconds = _retry_wait_seconds(
+                policy['retry_delay_ms'], attempt + 1,
+                retry_after=getattr(e, 'retry_after', None))
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+        finally:
+            close = getattr(source, 'close', None)
+            if close:
+                close()
+
+
 def _doubao_stream_response(text, voice, pct, style=None, volume='+0%',
-                            pitch='+0Hz', chars=None):
+                            pitch='+0Hz', chars=None, config=None):
     """Return a Flask response that forwards Volcengine audio incrementally.
 
     The source is prefetched by one chunk so authentication/protocol failures can
@@ -2277,6 +2583,8 @@ def _doubao_stream_response(text, voice, pct, style=None, volume='+0%',
     cached only after the provider emits its normal terminal event.
     """
     chars = len(text) if chars is None else chars
+    config = load_config() if config is None else config
+    policy = _fallback_policy(config)
     cache_key = _cache_key('doubao', text, voice, pct, style, volume, pitch)
     cached = _cache_get(cache_key)
     with _metrics_lock:
@@ -2285,28 +2593,43 @@ def _doubao_stream_response(text, voice, pct, style=None, volume='+0%',
             _metrics['cache_hits_total'] += 1
     should_cache = cached is None
     source = (iter((cached,)) if cached is not None else
-              _iter_provider_stream('doubao', text, voice, pct,
-                                    style=style, volume=volume, pitch=pitch))
+              _iter_doubao_stream_with_retry(
+                  text, voice, pct, style=style, volume=volume,
+                  pitch=pitch, config=config))
     try:
         first_chunk = next(source)
     except StopIteration:
-        return _error_response('TTS failed: provider returned empty audio', 500,
-                               'synthesis_error')
+        error = 'provider returned empty audio'
     except Exception as e:
         error = str(e)
+    else:
+        error = None
+    if error is not None:
+        close_source = getattr(source, 'close', None)
+        if close_source:
+            close_source()
         _send_webhook('error', {
             'provider': 'doubao',
             'voice': voice,
             'error': error,
             'text_length': chars,
         })
-        if FALLBACK_TO_EDGE:
-            fallback_voice = FALLBACK_VOICE
+        if policy['enabled']:
+            fallback_voice = policy['voice']
+            log.warning(
+                "Fallback to Edge TTS after Doubao retries: voice=%s retry_count=%d error=%s",
+                fallback_voice,
+                getattr(request, '_tts_retry_count', 0) if has_request_context() else 0,
+                error,
+            )
             fb_audio, fb_err = _dispatch_impl(
                 'edge', text, fallback_voice, pct, style=style,
                 volume=volume, pitch=pitch,
             )
+            _record_fallback(success=bool(fb_audio))
             if fb_audio:
+                log.info("Edge fallback succeeded after Doubao stream failure: voice=%s",
+                         fallback_voice)
                 update_stats(chars, 'edge', voice=fallback_voice)
                 return Response(
                     fb_audio,
@@ -2316,12 +2639,17 @@ def _doubao_stream_response(text, voice, pct, style=None, volume='+0%',
                         'edge', fallback_voice, chars,
                     ),
                 )
+            log.error("Edge fallback failed after Doubao stream failure: error=%s",
+                      fb_err)
             error = f'Primary: {error}; Fallback(Edge): {fb_err}'
-        log.warning(
-            "TTS stream failed before first audio: provider=doubao voice=%s error=%s",
-            voice, error,
-        )
-        return _error_response(f'TTS failed: {error}', 500, 'synthesis_error')
+        log.warning("TTS stream failed before first audio: provider=doubao voice=%s error=%s",
+                    voice, error)
+        return _error_response(
+            f'TTS failed: {error}', 500, 'synthesis_error',
+            headers=_tts_retry_headers())
+
+    stream_state = (getattr(request, '_tts_stream_state', None)
+                    if has_request_context() else None)
 
     def generate():
         audio = bytearray()
@@ -2353,6 +2681,7 @@ def _doubao_stream_response(text, voice, pct, style=None, volume='+0%',
                 "TTS stream interrupted: provider=doubao voice=%s error=%s",
                 voice, e,
             )
+            _mark_stream_failure(stream_state, e)
             _send_webhook('error', {
                 'provider': 'doubao',
                 'voice': voice,
@@ -2370,6 +2699,9 @@ def _doubao_stream_response(text, voice, pct, style=None, volume='+0%',
     response = Response(generate(), mimetype='audio/mpeg', headers={
         'X-TTS-Provider': 'doubao',
         'X-TTS-Voice': voice,
+        'X-TTS-Retry-Count': str(
+            getattr(request, '_tts_retry_count', 0)
+            if has_request_context() else 0),
         'Cache-Control': 'no-store',
         'X-TTS-Chars': str(chars),
         'X-Accel-Buffering': 'no',
@@ -2388,6 +2720,7 @@ def _doubao_stream_response(text, voice, pct, style=None, volume='+0%',
 @gzipped
 def health():
     config = load_config()
+    fallback = _fallback_policy(config)
     uptime_sec = time.time() - _metrics.get('_start_time', time.time())
     return jsonify({
         'status': 'ok', 'version': __version__,
@@ -2400,7 +2733,10 @@ def health():
         'admin_protected': bool(ADMIN_TOKEN),
         'ffmpeg_available': _FFMPEG_AVAILABLE,
         'ssml_enabled': ALLOW_SSML,
-        'fallback_enabled': FALLBACK_TO_EDGE,
+        'fallback_enabled': fallback['enabled'],
+        'fallback_voice': fallback['voice'],
+        'fallback_retry_count': fallback['retry_count'],
+        'fallback_retry_delay_ms': fallback['retry_delay_ms'],
         'rate_limit_rpm': RATE_LIMIT_RPM,
         'request_timeout': REQUEST_TIMEOUT,
         'pronunciation_dict_size': len(config.get('pronunciation_dict', {})),
@@ -2458,6 +2794,9 @@ def metrics():
         chars = _metrics['chars_total']
         cache_hits = _metrics['cache_hits_total']
         cache_lookups = _metrics['cache_lookups_total']
+        provider_retries = _metrics['provider_retries_total']
+        fallback_attempts = _metrics['fallback_attempts_total']
+        fallback_success = _metrics['fallback_success_total']
         rts = list(_metrics['response_time_ms'])
     # Hits and lookups are both counted per cache probe, so the ratio stays in [0,1].
     # (Dividing per-chunk hits by per-request counts could exceed 1.0.)
@@ -2492,6 +2831,15 @@ def metrics():
         '# HELP tts_cache_hit_ratio Cache hit ratio (0.0-1.0)',
         '# TYPE tts_cache_hit_ratio gauge',
         f'tts_cache_hit_ratio {cache_hit_rate:.4f}',
+        '# HELP tts_provider_retries_total Total upstream provider retries',
+        '# TYPE tts_provider_retries_total counter',
+        f'tts_provider_retries_total {provider_retries}',
+        '# HELP tts_fallback_attempts_total Total Edge fallback attempts',
+        '# TYPE tts_fallback_attempts_total counter',
+        f'tts_fallback_attempts_total {fallback_attempts}',
+        '# HELP tts_fallback_success_total Successful Edge fallbacks',
+        '# TYPE tts_fallback_success_total counter',
+        f'tts_fallback_success_total {fallback_success}',
         '# HELP tts_response_time_ms_avg Average response time in milliseconds',
         '# TYPE tts_response_time_ms_avg gauge',
         f'tts_response_time_ms_avg {avg_rt:.2f}',
@@ -2576,10 +2924,14 @@ def speech_stream():
                             headers=_tts_headers(audio, provider, voice,
                                                  final_provider, final_voice, len(text)))
         log.warning("TTS failed: provider=%s voice=%s error=%s", provider, voice, error)
-        return _error_response(f'TTS failed: {error}', 500, 'synthesis_error')
+        return _error_response(
+            f'TTS failed: {error}', 500, 'synthesis_error',
+            headers=_tts_retry_headers())
     except Exception as e:
         log.error("speech_stream error: %s", e, exc_info=True)
-        return _error_response(f'Error: {e}', 500, 'server_error')
+        return _error_response(
+            f'Error: {e}', 500, 'server_error',
+            headers=_tts_retry_headers())
 
 
 @app.route('/speech/stream/chunked', methods=['POST'])
@@ -2625,6 +2977,7 @@ def speech_stream_chunked():
             if not clean:
                 return _error_response('Text is empty after cleaning', 400)
             chars = len(clean)
+            stream_state = getattr(request, '_tts_stream_state', None)
 
             def generate():
                 """Yield audio chunks as edge-tts produces them (real streaming).
@@ -2633,20 +2986,27 @@ def speech_stream_chunked():
                 generator body runs after the response has already been returned.
                 """
                 sent = 0
+                completed = False
                 try:
                     for chunk_data in _edge_stream_iter(clean, voice, rate):
                         sent += len(chunk_data)
                         yield chunk_data
+                    if not sent:
+                        raise RuntimeError('Edge TTS returned empty audio')
+                    completed = True
                 except Exception as e:
                     log.error('Chunked stream error: %s', e)
+                    _mark_stream_failure(stream_state, e)
+                    raise
                 finally:
-                    if sent:
+                    if completed:
                         update_stats(chars, provider, voice=voice)
             # Do not set Transfer-Encoding by hand: the WSGI server owns the
             # framing and a manual header desynchronizes the response body.
             return Response(generate(), mimetype='audio/mpeg', headers={
                 'X-TTS-Provider': provider,
                 'X-TTS-Voice': voice,
+                'X-TTS-Retry-Count': str(getattr(request, '_tts_retry_count', 0)),
                 'X-TTS-Chars': str(chars),
                 'Cache-Control': 'no-store',
                 'X-Accel-Buffering': 'no',
@@ -2659,16 +3019,22 @@ def speech_stream_chunked():
             return Response(audio, mimetype='audio/mpeg',
                             headers=_tts_headers(audio, provider, voice,
                                                  final_provider, final_voice, len(text)))
-        return _error_response(f'TTS failed: {error}', 502, 'synthesis_error')
+        return _error_response(
+            f'TTS failed: {error}', 502, 'synthesis_error',
+            headers=_tts_retry_headers())
     except Exception as e:
         log.error('Chunked TTS error: %s', e)
-        return _error_response(str(e), 500, 'server_error')
+        return _error_response(
+            str(e), 500, 'server_error', headers=_tts_retry_headers())
 
 
 _CONFIG_TEXT_FIELDS = (
     'provider', 'default_voice', 'tencent_voice', 'edge_voice',
     'xiaomi_voice', 'fishaudio_voice', 'fishaudio_reference_id',
+    'fallback_voice',
 )
+_CONFIG_BOOL_FIELDS = ('fallback_enabled',)
+_CONFIG_INT_FIELDS = ('fallback_retry_count', 'fallback_retry_delay_ms')
 _CONFIG_CREDENTIAL_FIELDS = (
     'doubao_api_key', 'tencent_secret_id', 'tencent_secret_key',
     'xiaomi_api_key', 'fishaudio_api_key',
@@ -2678,6 +3044,7 @@ _VOICE_FIELD_PROVIDERS = {
     'edge_voice': 'edge',
     'xiaomi_voice': 'xiaomi',
     'fishaudio_voice': 'fishaudio',
+    'fallback_voice': 'edge',
 }
 _ACTIVE_VOICE_FIELDS = {
     'doubao': 'default_voice',
@@ -2705,6 +3072,44 @@ def _is_valid_provider_voice(provider, voice):
     if provider == 'fishaudio':
         return voice in _PROVIDER_VOICE_IDS['fishaudio']
     return resolve_provider(voice) == provider
+
+
+def _fallback_policy(config=None):
+    """Return a bounded fallback policy from persisted config.
+
+    The legacy module globals remain a deliberate compatibility override for
+    embedding callers that patch them at runtime (and for old tests). In a
+    normal process they equal their environment defaults, so values saved by
+    the WebUI take precedence.
+    """
+    config = load_config() if config is None else config
+    enabled = config.get('fallback_enabled', _FALLBACK_ENV_ENABLED)
+    if FALLBACK_TO_EDGE != _FALLBACK_ENV_ENABLED:
+        enabled = FALLBACK_TO_EDGE
+    if type(enabled) is not bool:
+        enabled = _FALLBACK_ENV_ENABLED
+
+    voice = config.get('fallback_voice', _FALLBACK_ENV_VOICE)
+    if FALLBACK_VOICE != _FALLBACK_ENV_VOICE:
+        voice = FALLBACK_VOICE
+    if not _is_valid_provider_voice('edge', voice):
+        voice = 'zh-CN-XiaoxiaoNeural'
+
+    retry_count = config.get('fallback_retry_count', FALLBACK_RETRY_COUNT)
+    if type(retry_count) is not int:
+        retry_count = FALLBACK_RETRY_COUNT
+    retry_count = max(0, min(3, retry_count))
+
+    delay_ms = config.get('fallback_retry_delay_ms', FALLBACK_RETRY_DELAY_MS)
+    if type(delay_ms) is not int:
+        delay_ms = FALLBACK_RETRY_DELAY_MS
+    delay_ms = max(0, min(5000, delay_ms))
+    return {
+        'enabled': enabled,
+        'voice': voice,
+        'retry_count': retry_count,
+        'retry_delay_ms': delay_ms,
+    }
 
 
 def _resolve_request_provider(voice, requested_provider=None):
@@ -2814,6 +3219,13 @@ def _safe_config(config):
             safe[key] = '***'
     safe['configured_fields'] = _configured_fields(config)
     safe['provider_status'] = _provider_status(config)
+    fallback = _fallback_policy(config)
+    safe.update({
+        'fallback_enabled': fallback['enabled'],
+        'fallback_voice': fallback['voice'],
+        'fallback_retry_count': fallback['retry_count'],
+        'fallback_retry_delay_ms': fallback['retry_delay_ms'],
+    })
     return safe
 
 
@@ -2826,6 +3238,18 @@ def _validate_config_payload(data):
     for key in (*_CONFIG_TEXT_FIELDS, *_CONFIG_CREDENTIAL_FIELDS):
         if key in data and not isinstance(data[key], str):
             return f'{key} 必须是字符串'
+    for key in _CONFIG_BOOL_FIELDS:
+        if key in data and type(data[key]) is not bool:
+            return f'{key} 必须是布尔值'
+    for key in _CONFIG_INT_FIELDS:
+        if key in data and type(data[key]) is not int:
+            return f'{key} 必须是整数'
+    retry_count = data.get('fallback_retry_count')
+    if retry_count is not None and not 0 <= retry_count <= 3:
+        return 'fallback_retry_count 必须在 0 到 3 之间'
+    retry_delay_ms = data.get('fallback_retry_delay_ms')
+    if retry_delay_ms is not None and not 0 <= retry_delay_ms <= 5000:
+        return 'fallback_retry_delay_ms 必须在 0 到 5000 之间'
     for voice_key, expected_provider in _VOICE_FIELD_PROVIDERS.items():
         if voice_key not in data:
             continue
@@ -2857,6 +3281,9 @@ def _apply_config_payload(config, data):
         # Masked values are display placeholders, never real credentials.
         if value is not None and value != '***':
             config[key] = value.strip()
+    for key in (*_CONFIG_BOOL_FIELDS, *_CONFIG_INT_FIELDS):
+        if key in data:
+            config[key] = data[key]
     for voice_key, expected_provider in _VOICE_FIELD_PROVIDERS.items():
         voice = data.get(voice_key)
         if not voice:
@@ -2881,6 +3308,15 @@ def _validate_config_state(config):
         reference_id = config.get('fishaudio_reference_id', '')
         if not isinstance(reference_id, str) or not reference_id.strip():
             return '自定义 Fish Audio 音色需要 Reference ID'
+    fallback_error = _validate_config_payload({
+        key: config.get(key)
+        for key in (
+            'fallback_enabled', 'fallback_voice',
+            'fallback_retry_count', 'fallback_retry_delay_ms',
+        )
+    })
+    if fallback_error:
+        return fallback_error
     return None
 
 
@@ -2906,12 +3342,17 @@ def api_config():
         # the public voice ID, so the normal cache key cannot distinguish them).
         _cache_clear()
         log.info("Config updated")
+        fallback = _fallback_policy(config)
         return jsonify({
             'status': 'ok',
             'message': '设置已保存',
             'provider': config.get('provider', 'edge'),
             'provider_status': _provider_status(config),
             'configured_fields': _configured_fields(config),
+            'fallback_enabled': fallback['enabled'],
+            'fallback_voice': fallback['voice'],
+            'fallback_retry_count': fallback['retry_count'],
+            'fallback_retry_delay_ms': fallback['retry_delay_ms'],
             'warnings': warnings,
         })
 
@@ -2974,6 +3415,7 @@ def api_config_test():
     else:
         result['ok'] = False
         result['error'] = error
+    result['retry_count'] = getattr(request, '_tts_retry_count', 0)
     return jsonify(result)
 
 
@@ -3023,6 +3465,12 @@ def api_config_import():
         if k in config:
             default = DEFAULT_CONFIG[k]
             expected_type = type(default)
+            if expected_type is bool and type(v) is not bool:
+                return _error_response(
+                    f'{k} 类型无效', 400, 'invalid_request_error')
+            if expected_type is int and type(v) is not int:
+                return _error_response(
+                    f'{k} 类型无效', 400, 'invalid_request_error')
             if expected_type in (str, dict, list) and not isinstance(v, expected_type):
                 return _error_response(
                     f'{k} 类型无效', 400, 'invalid_request_error')
@@ -3031,7 +3479,10 @@ def api_config_import():
             unknown.append(k)
     editable = {
         key: config[key]
-        for key in (*_CONFIG_TEXT_FIELDS, *_CONFIG_CREDENTIAL_FIELDS)
+        for key in (
+            *_CONFIG_TEXT_FIELDS, *_CONFIG_CREDENTIAL_FIELDS,
+            *_CONFIG_BOOL_FIELDS, *_CONFIG_INT_FIELDS,
+        )
         if key in data
     }
     validation_error = _validate_config_payload(editable)
@@ -3070,6 +3521,7 @@ def api_audit():
 def api_info():
     """Complete system info dashboard - combines health, config, stats, and cache."""
     config = load_config()
+    fallback = _fallback_policy(config)
     stats = _read_json(STATS_FILE, {})
     uptime_sec = time.time() - _metrics.get('_start_time', time.time())
     with _metrics_lock:
@@ -3078,6 +3530,9 @@ def api_info():
         failed_req = _metrics['requests_failed']
         total_chars = _metrics['chars_total']
         cache_hits = _metrics['cache_hits_total']
+        provider_retries = _metrics['provider_retries_total']
+        fallback_attempts = _metrics['fallback_attempts_total']
+        fallback_success = _metrics['fallback_success_total']
     return jsonify({
         'version': __version__,
         'uptime_seconds': int(uptime_sec),
@@ -3085,7 +3540,10 @@ def api_info():
         'config': {
             'provider': config.get('provider', 'edge'),
             'ssml_enabled': ALLOW_SSML,
-            'fallback_enabled': FALLBACK_TO_EDGE,
+            'fallback_enabled': fallback['enabled'],
+            'fallback_voice': fallback['voice'],
+            'fallback_retry_count': fallback['retry_count'],
+            'fallback_retry_delay_ms': fallback['retry_delay_ms'],
             'rate_limit_rpm': RATE_LIMIT_RPM,
             'request_timeout': REQUEST_TIMEOUT,
             'max_text_length': MAX_TEXT_LENGTH,
@@ -3099,6 +3557,9 @@ def api_info():
             'success_rate': round(success_req / total_req * 100, 1) if total_req > 0 else 0,
             'chars_total': total_chars,
             'cache_hits_total': cache_hits,
+            'provider_retries_total': provider_retries,
+            'fallback_attempts_total': fallback_attempts,
+            'fallback_success_total': fallback_success,
         },
         'cache': _cache_info(),
         'providers': ALL_PROVIDERS,
@@ -3446,21 +3907,33 @@ def api_tts_preview():
     if not provider:
         return _error_response(f'Cannot determine provider for voice: {voice}', 400)
     preview_text = '你好，我是您的语音助手，很高兴认识您。'
+    request._tts_provider = provider
+    request._tts_voice = voice
+    request._tts_chars = len(preview_text)
     audio, error, actual_provider, actual_voice = dispatch(provider, preview_text, voice, 0)
     if audio:
         final_provider = actual_provider or provider
         final_voice = actual_voice or voice
+        fallback = final_provider != provider or final_voice != voice
         update_stats(len(preview_text), final_provider, voice=final_voice)
         # Rough duration estimate: MP3 at ~48kbps
         duration_ms = int(len(audio) / 48 * 1000 / 8) if len(audio) > 0 else 0
-        return jsonify({
+        response = jsonify({
             'audio': base64.b64encode(audio).decode(),
             'size': len(audio),
             'voice': final_voice,
             'provider': final_provider,
+            'requested_voice': voice,
+            'requested_provider': provider,
+            'retry_count': getattr(request, '_tts_retry_count', 0),
+            'fallback': fallback,
             'duration_estimate_ms': duration_ms,
         })
-    return _error_response(f'Preview failed: {error}', 500)
+        response.headers.update(_tts_metadata_headers(
+            provider, voice, final_provider, final_voice))
+        return response
+    return _error_response(
+        f'Preview failed: {error}', 500, headers=_tts_retry_headers())
 
 
 @app.route('/api/cache/stats', methods=['GET'])
@@ -3562,8 +4035,11 @@ def openai_speech():
             if not clean_text:
                 return _error_response('Text is empty after cleaning', 400, 'invalid_request_error')
 
+            stream_state = getattr(request, '_tts_stream_state', None)
+
             def _sse_generate():
                 sent = 0
+                completed = False
                 try:
                     # Chunks arrive incrementally from upstream; each is forwarded as
                     # soon as it lands rather than after the whole synthesis completes.
@@ -3572,17 +4048,22 @@ def openai_speech():
                         sent += len(chunk)
                         b64 = base64.b64encode(chunk).decode()
                         yield f'data: {json.dumps({"type": "audio_chunk", "data": b64})}\n\n'
+                    if not sent:
+                        raise RuntimeError('Edge TTS returned empty audio')
                     yield f'data: {json.dumps({"type": "done"})}\n\n'
+                    completed = True
                 except Exception as e:
                     log.error('SSE stream error: %s', e)
+                    _mark_stream_failure(stream_state, e)
                     yield f'data: {json.dumps({"type": "error", "message": str(e)})}\n\n'
                 finally:
-                    if sent:
+                    if completed:
                         update_stats(len(clean_text), provider, voice=voice)
 
             return Response(_sse_generate(), mimetype='text/event-stream',
                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
-                                     'X-TTS-Provider': provider, 'X-TTS-Voice': voice})
+                                     'X-TTS-Provider': provider, 'X-TTS-Voice': voice,
+                                     'X-TTS-Retry-Count': '0'})
 
         audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct, style=style)
 
@@ -3596,17 +4077,18 @@ def openai_speech():
             mime = _FORMAT_MIME.get(actual_format, 'audio/mpeg')
             log.info("OpenAI TTS OK: provider=%s voice=%s chars=%d size=%d fmt=%s",
                      final_provider, final_voice, len(text), len(audio), actual_format)
-            return Response(audio, mimetype=mime, headers={
-                'Content-Length': str(len(audio)),
-                'Content-Type': mime,
-                'X-TTS-Provider': final_provider,
-                'X-TTS-Voice': final_voice,
-                'X-TTS-Format': actual_format,
-            })
-        return _error_response(f'TTS failed: {error}', 500, 'server_error')
+            headers = _tts_headers(
+                audio, provider, voice, final_provider, final_voice, len(text))
+            headers['Content-Type'] = mime
+            headers['X-TTS-Format'] = actual_format
+            return Response(audio, mimetype=mime, headers=headers)
+        return _error_response(
+            f'TTS failed: {error}', 500, 'server_error',
+            headers=_tts_retry_headers())
     except Exception as e:
         log.error("openai_speech error: %s", e, exc_info=True)
-        return _error_response(str(e), 500, 'server_error')
+        return _error_response(
+            str(e), 500, 'server_error', headers=_tts_retry_headers())
 
 
 @app.route('/v1/models', methods=['GET'])
@@ -3744,6 +4226,7 @@ def api_legado_subscribe():
 @gzipped
 def index():
     config = load_config()
+    fallback = _fallback_policy(config)
     def _text_value(key, default=''):
         value = config.get(key, default)
         return value if isinstance(value, str) else default
@@ -3768,6 +4251,10 @@ def index():
         'fishaudioReferenceId': '' if ADMIN_TOKEN else _text_value('fishaudio_reference_id'),
         'providerStatus': {} if ADMIN_TOKEN else _provider_status(config),
         'configuredFields': {} if ADMIN_TOKEN else _configured_fields(config),
+        'fallbackEnabled': fallback['enabled'],
+        'fallbackVoice': fallback['voice'],
+        'fallbackRetryCount': fallback['retry_count'],
+        'fallbackRetryDelayMs': fallback['retry_delay_ms'],
         'adminProtected': bool(ADMIN_TOKEN),
     }
     return render_template(
@@ -3846,6 +4333,9 @@ def batch_speech():
 
         # Check daily quota (estimate total chars)
         total_input_chars = sum(len(str(t or '')) for t in texts)
+        request._tts_provider = provider
+        request._tts_voice = voice
+        request._tts_chars = total_input_chars
         quota_err = _check_daily_quota(client_ip, total_input_chars)
         if quota_err:
             return quota_err
@@ -3858,36 +4348,57 @@ def batch_speech():
         chars_by_target = {}
 
         for text in texts:
+            retry_before = getattr(request, '_tts_retry_count', 0)
             if not isinstance(text, str):
                 results.append({'text': text, 'audio': None,
-                                'error': 'Text is None' if text is None else 'Text must be a string'})
+                                'error': 'Text is None' if text is None else 'Text must be a string',
+                                'retry_count': 0, 'fallback': False})
                 continue
             text = text.strip()
             if not text:
-                results.append({'text': text, 'audio': None, 'error': 'Empty text'})
+                results.append({'text': text, 'audio': None, 'error': 'Empty text',
+                                'retry_count': 0, 'fallback': False})
                 continue
             try:
                 audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct)
+                item_retries = getattr(request, '_tts_retry_count', 0) - retry_before
                 if audio:
                     target = (actual_provider or provider, actual_voice or voice)
+                    item_fallback = target != (provider, voice)
                     chars_by_target[target] = chars_by_target.get(target, 0) + len(text)
                     audio, actual_format = _convert_audio(audio, resp_format)
                     results.append({'text': text, 'audio': base64.b64encode(audio).decode('utf-8'),
                                     'error': None, 'provider': actual_provider or provider,
-                                    'voice': actual_voice or voice, 'format': actual_format})
+                                    'voice': actual_voice or voice, 'format': actual_format,
+                                    'requested_provider': provider, 'requested_voice': voice,
+                                    'retry_count': item_retries, 'fallback': item_fallback})
                 else:
-                    results.append({'text': text, 'audio': None, 'error': error})
+                    results.append({'text': text, 'audio': None, 'error': error,
+                                    'retry_count': item_retries, 'fallback': False})
             except Exception as e:
                 log.error("batch item failed: %s", e, exc_info=True)
-                results.append({'text': text, 'audio': None, 'error': str(e)})
+                results.append({
+                    'text': text, 'audio': None, 'error': str(e),
+                    'retry_count': getattr(request, '_tts_retry_count', 0) - retry_before,
+                    'fallback': False,
+                })
 
         for (stats_provider, stats_voice), nchars in chars_by_target.items():
             update_stats(nchars, stats_provider, voice=stats_voice)
 
-        return jsonify({'results': results})
+        response = jsonify({
+            'results': results,
+            'retry_count': getattr(request, '_tts_retry_count', 0),
+            'fallback_count': sum(bool(item.get('fallback')) for item in results),
+        })
+        response.headers.update(_tts_retry_headers())
+        if any(item.get('fallback') for item in results):
+            response.headers['X-TTS-Fallback'] = 'true'
+        return response
     except Exception as e:
         log.error("batch_speech error: %s", e, exc_info=True)
-        return _error_response(str(e), 500, 'server_error')
+        return _error_response(
+            str(e), 500, 'server_error', headers=_tts_retry_headers())
 
 
 _shutdown_done = False

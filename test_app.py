@@ -259,6 +259,10 @@ class TestLoadConfig:
                 cfg = load_config()
                 assert cfg['provider'] == 'edge'
                 assert cfg['edge_voice'] == 'zh-CN-XiaoxiaoNeural'
+                assert cfg['fallback_enabled'] is True
+                assert cfg['fallback_voice'] == 'zh-CN-XiaoxiaoNeural'
+                assert cfg['fallback_retry_count'] == 1
+                assert cfg['fallback_retry_delay_ms'] == 500
             finally:
                 app_module.CONFIG_FILE = orig
 
@@ -789,6 +793,48 @@ class TestAPIEndpoints:
         assert 'doubao_api_key' in data
         assert 'appid' not in data
         assert 'access_token' not in data
+        assert type(data['fallback_enabled']) is bool
+        assert type(data['fallback_retry_count']) is int
+        assert type(data['fallback_retry_delay_ms']) is int
+        assert data['fallback_voice'] == 'zh-CN-XiaoxiaoNeural'
+
+    def test_config_post_persists_fallback_policy(self):
+        payload = {
+            'fallback_enabled': False,
+            'fallback_voice': 'zh-CN-YunxiNeural',
+            'fallback_retry_count': 3,
+            'fallback_retry_delay_ms': 1200,
+        }
+
+        result = self.client.post('/api/config', json=payload)
+
+        assert result.status_code == 200
+        saved = load_config()
+        for key, value in payload.items():
+            assert saved[key] == value
+        exposed = self.client.get('/api/config').get_json()
+        for key, value in payload.items():
+            assert exposed[key] == value
+
+    def test_index_hydrates_fallback_policy_and_controls(self):
+        result = self.client.post('/api/config', json={
+            'fallback_enabled': False,
+            'fallback_voice': 'zh-CN-YunxiNeural',
+            'fallback_retry_count': 2,
+            'fallback_retry_delay_ms': 900,
+        })
+        assert result.status_code == 200
+
+        html = self.client.get('/').get_data(as_text=True)
+
+        assert 'id="fallback-enabled"' in html
+        assert 'id="fallback-voice"' in html
+        assert 'id="fallback-retry-count"' in html
+        assert 'id="fallback-retry-delay-ms"' in html
+        assert '"fallbackEnabled": false' in html
+        assert '"fallbackVoice": "zh-CN-YunxiNeural"' in html
+        assert '"fallbackRetryCount": 2' in html
+        assert '"fallbackRetryDelayMs": 900' in html
 
     def test_config_post(self):
         r = self.client.post('/api/config', json={'provider': 'edge'})
@@ -909,8 +955,22 @@ class TestAPIEndpoints:
         {'edge_voice': 'not-a-real-voice'},
         {'edge_voice': {'id': 'zh-CN-XiaoxiaoNeural'}},
         {'xiaomi_api_key': 12345},
+        {'fallback_enabled': 'false'},
+        {'fallback_retry_count': True},
+        {'fallback_retry_count': -1},
+        {'fallback_retry_count': 4},
+        {'fallback_retry_count': 1.5},
+        {'fallback_retry_delay_ms': False},
+        {'fallback_retry_delay_ms': -1},
+        {'fallback_retry_delay_ms': 5001},
+        {'fallback_retry_delay_ms': 0.5},
+        {'fallback_voice': 'zh_male_shaonianzixin_uranus_bigtts'},
     ], ids=['provider-list', 'active-voice-mismatch', 'custom-fish-without-reference',
-            'unknown-fish-preset', 'unknown-voice', 'voice-object', 'credential-number'])
+            'unknown-fish-preset', 'unknown-voice', 'voice-object', 'credential-number',
+            'fallback-enabled-string', 'retry-count-bool', 'retry-count-negative',
+            'retry-count-too-large', 'retry-count-float', 'retry-delay-bool',
+            'retry-delay-negative', 'retry-delay-too-large', 'retry-delay-float',
+            'fallback-non-edge-voice'])
     def test_config_post_invalid_values_do_not_write(self, payload):
         import app as app_module
 
@@ -1586,12 +1646,55 @@ class TestSSEndpoints:
             'texts': ['你好', '世界'],
             'response_format': 'mp3'
         })
-        # 可能返回200或500（取决于Edge TTS网络）
-        assert r.status_code in (200, 500)
-        if r.status_code == 200:
-            data = r.get_json()
-            assert 'results' in data
-            assert len(data['results']) == 2
+        assert r.status_code == 200
+        data = r.get_json()
+        assert len(data['results']) == 2
+        assert data['retry_count'] == 0
+        assert data['fallback_count'] == 0
+        assert r.headers['X-TTS-Retry-Count'] == '0'
+        for result in data['results']:
+            assert result['retry_count'] == 0
+            assert result['fallback'] is False
+            assert result['requested_provider'] == 'edge'
+
+    def test_preview_reports_synthesis_metadata(self):
+        r = self.client.post('/api/tts/preview', json={
+            'voice': 'zh-CN-XiaoxiaoNeural',
+            'provider': 'edge',
+        })
+
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data['provider'] == 'edge'
+        assert data['requested_provider'] == 'edge'
+        assert data['retry_count'] == 0
+        assert data['fallback'] is False
+        assert r.headers['X-TTS-Provider'] == 'edge'
+        assert r.headers['X-TTS-Retry-Count'] == '0'
+
+    def test_batch_reports_per_item_fallback_and_retries(self, monkeypatch):
+        import app as app_module
+
+        def fallback_dispatch(*args, **kwargs):
+            app_module.request._tts_retry_count += 1
+            return b'edge-audio', None, 'edge', 'zh-CN-YunxiNeural'
+
+        monkeypatch.setattr(app_module, 'dispatch', fallback_dispatch)
+        r = self.client.post('/api/speech/batch', json={
+            'voice': 'zh_female_cancan_uranus_bigtts',
+            'provider': 'doubao',
+            'texts': ['第一段', '第二段'],
+        })
+
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data['retry_count'] == 2
+        assert data['fallback_count'] == 2
+        assert r.headers['X-TTS-Retry-Count'] == '2'
+        assert r.headers['X-TTS-Fallback'] == 'true'
+        assert [item['retry_count'] for item in data['results']] == [1, 1]
+        assert all(item['fallback'] for item in data['results'])
+        assert all(item['provider'] == 'edge' for item in data['results'])
 
 
 class TestFallback:
@@ -2322,6 +2425,247 @@ class TestDoubaoStreaming:
             {'code': 20000000, 'message': 'ok', 'data': None},
         ])
 
+    def _save_fallback_policy(self, **overrides):
+        config = self.app_module.load_config()
+        config.update({
+            'fallback_retry_count': 1,
+            'fallback_retry_delay_ms': 0,
+            **overrides,
+        })
+        self.app_module.save_config(config)
+
+    def test_transient_http_failure_retries_before_first_audio(self, monkeypatch):
+        failed = _FakeDoubaoResponse([], status_code=503)
+        succeeded = self._success_response()
+        responses = iter((failed, succeeded))
+        request_ids = []
+
+        def fake_post(*args, **kwargs):
+            request_ids.append(kwargs['headers']['X-Api-Request-Id'])
+            return next(responses)
+
+        self._save_fallback_policy(fallback_retry_count=1)
+        monkeypatch.setattr(self.app_module._http_session, 'post', fake_post)
+
+        result = self.client.post(
+            '/speech/stream',
+            json={
+                'text': '重试测试',
+                'voice': 'zh_female_cancan_uranus_bigtts',
+            },
+            buffered=False,
+        )
+
+        assert result.status_code == 200
+        assert result.headers['X-TTS-Provider'] == 'doubao'
+        assert result.headers['X-TTS-Retry-Count'] == '1'
+        assert b''.join(result.response) == b'audio-1audio-2'
+        result.close()
+        assert len(request_ids) == 2
+        assert len(set(request_ids)) == 2
+        assert failed.closed is True
+        assert succeeded.closed is True
+
+    def test_connection_timeout_retries_before_first_audio(self, monkeypatch):
+        succeeded = self._success_response()
+        calls = []
+
+        def fake_post(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise self.app_module.requests.Timeout('upstream timed out')
+            return succeeded
+
+        self._save_fallback_policy(fallback_retry_count=1)
+        monkeypatch.setattr(self.app_module._http_session, 'post', fake_post)
+
+        result = self.client.post(
+            '/speech/stream',
+            json={
+                'text': '超时重试测试',
+                'voice': 'zh_female_cancan_uranus_bigtts',
+            },
+            buffered=False,
+        )
+
+        assert result.status_code == 200
+        assert result.headers['X-TTS-Retry-Count'] == '1'
+        assert b''.join(result.response) == b'audio-1audio-2'
+        result.close()
+        assert len(calls) == 2
+
+    def test_retry_uses_capped_exponential_backoff(self):
+        delay = self.app_module._retry_delay_seconds
+
+        assert delay(500, 1) == 0.5
+        assert delay(500, 2) == 1.0
+        assert delay(500, 3) == 2.0
+        assert delay(5000, 2) == 5.0
+        assert delay(0, 3) == 0.0
+
+    def test_retry_after_extends_local_backoff_and_is_capped(self):
+        response = self._success_response()
+        response.headers['Retry-After'] = '3'
+
+        retry_after = self.app_module._retry_after_seconds(response)
+
+        assert retry_after == 3.0
+        assert self.app_module._retry_wait_seconds(500, 1, retry_after) == 3.0
+        response.headers['Retry-After'] = '120'
+        assert self.app_module._retry_after_seconds(response) == 60.0
+
+    def test_retry_exhaustion_uses_configured_edge_voice(self, monkeypatch):
+        failures = iter((
+            _FakeDoubaoResponse([], status_code=503),
+            _FakeDoubaoResponse([], status_code=503),
+        ))
+        calls = []
+
+        def fake_post(*args, **kwargs):
+            calls.append(1)
+            return next(failures)
+
+        self._save_fallback_policy(
+            fallback_enabled=True,
+            fallback_voice='zh-CN-YunxiNeural',
+            fallback_retry_count=1,
+        )
+        monkeypatch.setattr(self.app_module, 'FALLBACK_TO_EDGE', True)
+        monkeypatch.setattr(self.app_module._http_session, 'post', fake_post)
+        monkeypatch.setattr(
+            self.app_module,
+            'synthesize_edge',
+            lambda *args, **kwargs: (b'configured-edge-fallback', None),
+        )
+
+        result = self.client.post('/speech/stream', json={
+            'text': '回退测试',
+            'voice': 'zh_female_cancan_uranus_bigtts',
+        })
+
+        assert result.status_code == 200
+        assert result.data == b'configured-edge-fallback'
+        assert result.headers['X-TTS-Provider'] == 'edge'
+        assert result.headers['X-TTS-Voice'] == 'zh-CN-YunxiNeural'
+        assert result.headers['X-TTS-Fallback'] == 'true'
+        assert result.headers['X-TTS-Requested-Provider'] == 'doubao'
+        assert result.headers['X-TTS-Retry-Count'] == '1'
+        assert len(calls) == 2
+
+        request_id = result.headers['X-Request-ID']
+        audit = next(
+            record for record in reversed(self.app_module._audit_log)
+            if record['request_id'] == request_id
+        )
+        assert audit['provider'] == 'edge'
+        assert audit['voice'] == 'zh-CN-YunxiNeural'
+        assert audit['retries'] == 1
+        assert audit['fallback'] is True
+
+    def test_retry_exhaustion_without_fallback_reports_count(self, monkeypatch):
+        failures = iter((
+            _FakeDoubaoResponse([], status_code=503),
+            _FakeDoubaoResponse([], status_code=503),
+        ))
+        calls = []
+
+        def fake_post(*args, **kwargs):
+            calls.append(1)
+            return next(failures)
+
+        self._save_fallback_policy(
+            fallback_enabled=False,
+            fallback_retry_count=1,
+        )
+        monkeypatch.setattr(self.app_module._http_session, 'post', fake_post)
+
+        result = self.client.post('/speech/stream', json={
+            'text': '仅重试不回退',
+            'voice': 'zh_female_cancan_uranus_bigtts',
+        })
+
+        assert result.status_code == 500
+        assert result.headers['X-TTS-Retry-Count'] == '1'
+        assert 'X-TTS-Fallback' not in result.headers
+        assert len(calls) == 2
+
+    def test_nonretryable_provider_error_does_not_consume_retry_budget(self, monkeypatch):
+        response = _FakeDoubaoResponse([
+            {'code': 45000000, 'message': 'resource mismatch'},
+        ])
+        calls = []
+
+        def fake_post(*args, **kwargs):
+            calls.append(1)
+            return response
+
+        self._save_fallback_policy(fallback_retry_count=3)
+        monkeypatch.setattr(self.app_module._http_session, 'post', fake_post)
+
+        result = self.client.post('/speech/stream', json={
+            'text': '确定性错误测试',
+            'voice': 'zh_female_cancan_uranus_bigtts',
+        })
+
+        assert result.status_code == 500
+        assert '45000000' in result.get_data(as_text=True)
+        assert len(calls) == 1
+
+    def test_failure_after_first_audio_never_retries_or_falls_back(self, monkeypatch):
+        response = _FakeDoubaoResponse([
+            {'code': 0, 'message': 'OK',
+             'data': base64.b64encode(b'partial-audio').decode()},
+        ])
+        calls = []
+
+        def fake_post(*args, **kwargs):
+            calls.append(1)
+            return response
+
+        self._save_fallback_policy(
+            fallback_enabled=True,
+            fallback_retry_count=3,
+        )
+        monkeypatch.setattr(self.app_module, 'FALLBACK_TO_EDGE', True)
+        monkeypatch.setattr(self.app_module._http_session, 'post', fake_post)
+
+        def unexpected_edge(*args, **kwargs):
+            pytest.fail('a stream that already emitted audio must not fallback')
+
+        monkeypatch.setattr(self.app_module, 'synthesize_edge', unexpected_edge)
+
+        with self.app_module._metrics_lock:
+            success_before = self.app_module._metrics['requests_success']
+            failed_before = self.app_module._metrics['requests_failed']
+
+        result = self.client.post(
+            '/speech/stream',
+            json={
+                'text': '首块后断流测试',
+                'voice': 'zh_female_cancan_uranus_bigtts',
+            },
+            buffered=False,
+        )
+
+        assert result.status_code == 200
+        assert result.headers['X-TTS-Provider'] == 'doubao'
+        with pytest.raises(self.app_module.ProviderStreamError,
+                           match='流式响应未正常结束'):
+            b''.join(result.response)
+        result.close()
+        assert len(calls) == 1
+        with self.app_module._metrics_lock:
+            assert self.app_module._metrics['requests_success'] == success_before
+            assert self.app_module._metrics['requests_failed'] == failed_before + 1
+        request_id = result.headers['X-Request-ID']
+        audit = next(
+            record for record in reversed(self.app_module._audit_log)
+            if record['request_id'] == request_id
+        )
+        assert audit['status'] == 200
+        assert audit['outcome'] == 'stream_failed'
+        assert '流式响应未正常结束' in audit['stream_error']
+
     def test_v3_single_key_protocol_and_audio_chunks(self, monkeypatch):
         captured = {}
         response = self._success_response()
@@ -2532,6 +2876,67 @@ class TestStreaming:
         assert 'Content-Length' not in r.headers
         assert b''.join(r.response) == b'edge-1edge-2'
         r.close()
+
+    def test_chunked_edge_failure_after_audio_is_reclassified(self, monkeypatch):
+        import app as app_module
+
+        def interrupted(*args, **kwargs):
+            yield b'partial-edge'
+            raise RuntimeError('edge stream interrupted')
+
+        monkeypatch.setattr(app_module, '_edge_stream_iter', interrupted)
+        with app_module._metrics_lock:
+            success_before = app_module._metrics['requests_success']
+            failed_before = app_module._metrics['requests_failed']
+
+        result = self.client.post(
+            '/speech/stream/chunked',
+            json={'text': '测试', 'voice': 'zh-CN-XiaoxiaoNeural'},
+            buffered=False,
+        )
+
+        with pytest.raises(RuntimeError, match='edge stream interrupted'):
+            b''.join(result.response)
+        result.close()
+        with app_module._metrics_lock:
+            assert app_module._metrics['requests_success'] == success_before
+            assert app_module._metrics['requests_failed'] == failed_before + 1
+        request_id = result.headers['X-Request-ID']
+        audit = next(record for record in reversed(app_module._audit_log)
+                     if record['request_id'] == request_id)
+        assert audit['outcome'] == 'stream_failed'
+
+    def test_openai_sse_failure_after_audio_is_reclassified(self, monkeypatch):
+        import app as app_module
+
+        def interrupted(*args, **kwargs):
+            yield b'partial-edge'
+            raise RuntimeError('openai sse interrupted')
+
+        monkeypatch.setattr(app_module, '_edge_stream_iter', interrupted)
+        with app_module._metrics_lock:
+            success_before = app_module._metrics['requests_success']
+            failed_before = app_module._metrics['requests_failed']
+
+        result = self.client.post('/v1/audio/speech', json={
+            'model': 'tts-1',
+            'input': '测试',
+            'voice': 'zh-CN-XiaoxiaoNeural',
+            'stream_format': 'sse',
+        }, buffered=False)
+        body = b''.join(result.response)
+        result.close()
+
+        assert result.status_code == 200
+        assert b'audio_chunk' in body
+        assert b'openai sse interrupted' in body
+        with app_module._metrics_lock:
+            assert app_module._metrics['requests_success'] == success_before
+            assert app_module._metrics['requests_failed'] == failed_before + 1
+        request_id = result.headers['X-Request-ID']
+        audit = next(record for record in reversed(app_module._audit_log)
+                     if record['request_id'] == request_id)
+        assert audit['outcome'] == 'stream_failed'
 
     def test_rate_limit_headers_present(self):
         r = self.client.get('/health')

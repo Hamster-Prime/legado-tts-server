@@ -16,6 +16,10 @@ services:
       - CHUNK_SIZE=500
       - AUDIO_CACHE_SIZE=100
       - RATE_LIMIT_RPM=120
+      - FALLBACK_TO_EDGE=1
+      - FALLBACK_VOICE=zh-CN-XiaoxiaoNeural
+      - FALLBACK_RETRY_COUNT=1
+      - FALLBACK_RETRY_DELAY_MS=500
       # - ADMIN_TOKEN=your-secret-token  # uncomment to enable auth
       # - GUNICORN_THREADS=16            # concurrency knob (keep workers at 1)
     restart: unless-stopped

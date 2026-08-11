@@ -5,7 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.9.0-green.svg)
-![Tests](https://img.shields.io/badge/tests-207%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-284%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
 
@@ -34,7 +34,7 @@
 - ADMIN_TOKEN 管理接口认证
 - API_KEYS 多密钥访问控制（API_KEYS_REQUIRED=1 强制认证）
 - IP 滑动窗口限流 + 白名单（RATE_LIMIT_WHITELIST）
-- 自动故障转移：主 Provider 失败时自动 fallback 到 Edge TTS
+- 自动恢复：瞬时故障先重试，重试耗尽后可切换到指定 Edge 音色
 - 可配置超时：REQUEST_TIMEOUT 环境变量
 - Header 注入防护：voice 参数清理 CRLF/null 字节
 - 请求 ID 追踪：X-Request-ID 贯穿响应和审计日志
@@ -54,6 +54,7 @@
 - 音色搜索过滤 + 试听按钮
 - 暗色模式切换
 - 配置导出/导入
+- 重试次数、退避间隔、Edge 备用音色和故障转移开关
 
 ---
 
@@ -187,6 +188,9 @@ pytest -q
 | `API_KEYS_REQUIRED` | `0` | 强制API密钥认证(1=是) |
 | `ALLOW_SSML` | `1` | 允许SSML输入(1=是/0=否) |
 | `FALLBACK_TO_EDGE` | `1` | 启用自动故障转移(1=是/0=否) |
+| `FALLBACK_VOICE` | `zh-CN-XiaoxiaoNeural` | 故障转移时使用的 Edge 音色 |
+| `FALLBACK_RETRY_COUNT` | `1` | 瞬时故障的额外重试次数（0–3） |
+| `FALLBACK_RETRY_DELAY_MS` | `500` | 首次重试等待时间（0–5000 毫秒，后续指数退避，单次最多 5 秒） |
 | `REQUEST_TIMEOUT` | `30` | 单次Provider请求超时(秒) |
 | `TEXT_NORMALIZE` | `1` | 启用文本正规化(1=是/0=否) |
 | `AUDIT_LOG_SIZE` | `200` | 审计日志保留条数 |
@@ -199,7 +203,6 @@ pytest -q
 | `BATCH_MAX_TEXTS` | `20` | `/api/speech/batch` 单次最大文本条数 |
 | `EDGE_VOICES_TTL` | `3600` | Edge 完整语音列表缓存时长(秒) |
 | `FFMPEG_TIMEOUT` | `30` | 单次 ffmpeg 转码超时(秒) |
-| `FALLBACK_VOICE` | `zh-CN-XiaoxiaoNeural` | 故障转移时使用的音色 |
 | `GUNICORN_THREADS` | `min(CPU×4, 32)` | gunicorn 线程数(并发调节首选) |
 | `GUNICORN_WORKERS` | `1` | gunicorn 进程数，>1 会使限流/配额/缓存按进程各自独立 |
 
@@ -297,6 +300,7 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 | `X-TTS-Provider` | 实际合成的 Provider |
 | `X-TTS-Voice` | 实际使用的音色 |
 | `X-TTS-Chars` | 计费字符数 |
+| `X-TTS-Retry-Count` | 本次请求实际执行的上游重试次数 |
 | `X-TTS-Format` | 实际输出格式（转码失败时回退为 `mp3`） |
 | `X-TTS-Fallback` | 发生故障转移时为 `true` |
 | `X-TTS-Requested-Provider` | 故障转移时，原本请求的 Provider |
@@ -307,6 +311,16 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 
 > 故障转移时 `X-TTS-Provider` / `X-TTS-Voice` 报告**实际**合成方，
 > `X-TTS-Requested-*` 保留原始请求值。
+
+重试只针对连接失败、超时、响应解码中断，以及 HTTP `408`、`425`、`429`
+和 `5xx` 等瞬时故障。鉴权、参数和服务商业务错误不会盲目重试。服务端会采用
+有上限的指数退避；上游返回 `Retry-After` 时会取两者较长值（最多等待 60 秒）。对火山引擎流式
+响应，重试和 Edge 故障转移只允许发生在首个音频块发送给客户端之前；一旦开始
+播放，服务端不会在同一响应里混入另一种音色。关闭故障转移开关只禁止切换 Edge，
+原服务重试仍按配置执行。
+
+环境变量为旧配置文件提供初始默认值；在 Web 管理界面保存后，持久化设置立即生效
+并优先用于后续请求。
 
 ---
 

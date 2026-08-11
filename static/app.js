@@ -24,8 +24,67 @@
         fishaudio: ['fishaudio_api_key'],
     };
     const CUSTOM_VOICE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+    const FALLBACK_DEFAULTS = Object.freeze({
+        enabled: true,
+        voice: 'zh-CN-XiaoxiaoNeural',
+        retryCount: 1,
+        retryDelayMs: 500,
+    });
+    const FALLBACK_LIMITS = Object.freeze({
+        retryCount: {min: 0, max: 3},
+        retryDelayMs: {min: 0, max: 5000},
+    });
 
     const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+    function camelConfigKey(key) {
+        return key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+    }
+
+    function initialConfigValue(source, key, fallback) {
+        const camelKey = camelConfigKey(key);
+        const sources = [source, source && source.fallback];
+        for (const candidate of sources) {
+            if (!candidate || typeof candidate !== 'object') continue;
+            if (hasOwn(candidate, key)) return candidate[key];
+            if (hasOwn(candidate, camelKey)) return candidate[camelKey];
+        }
+        return fallback;
+    }
+
+    function hasInitialConfigValue(source, key) {
+        const camelKey = camelConfigKey(key);
+        return [source, source && source.fallback].some(candidate => (
+            candidate && typeof candidate === 'object'
+            && (hasOwn(candidate, key) || hasOwn(candidate, camelKey))
+        ));
+    }
+
+    function hasInitialFallbackSettings() {
+        return [
+            'fallback_enabled',
+            'fallback_voice',
+            'fallback_retry_count',
+            'fallback_retry_delay_ms',
+        ].every(key => hasInitialConfigValue(INITIAL, key));
+    }
+
+    function initialBoolean(value, fallback) {
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'number') return value !== 0;
+        if (typeof value === 'string') {
+            const normalized = value.trim().toLowerCase();
+            if (['0', 'false', 'off', 'no'].includes(normalized)) return false;
+            if (['1', 'true', 'on', 'yes'].includes(normalized)) return true;
+        }
+        return fallback;
+    }
+
+    function initialInteger(value, fallback, limits) {
+        const parsed = Number(value);
+        if (!Number.isInteger(parsed)) return fallback;
+        return Math.min(limits.max, Math.max(limits.min, parsed));
+    }
+
     const invalidInitialProvider = Boolean(INITIAL.provider && !hasOwn(PROVIDERS, INITIAL.provider));
     const initialProvider = invalidInitialProvider ? 'edge' : (INITIAL.provider || 'edge');
     const initialDoubaoCustomVoice = INITIAL.doubaoVoiceIsCustom
@@ -52,6 +111,7 @@
         baselineCore: '',
         dirty: false,
         needsProviderRepair: invalidInitialProvider,
+        fallbackVoiceLoading: false,
         voiceRequestId: 0,
         configRequestId: 0,
         legadoConfigText: '',
@@ -373,7 +433,154 @@
         return (state.voiceCatalogs[state.provider] || []).some(item => item.id === voice);
     }
 
+    function readConfigField(element) {
+        if (!element) return undefined;
+        if (element.type === 'checkbox') return Boolean(element.checked);
+        if (element.type === 'number') {
+            const raw = element.value.trim();
+            return raw ? Number(raw) : '';
+        }
+        return element.value.trim();
+    }
+
+    function collectConfigFields() {
+        const values = {};
+        $$('[data-config-field]').forEach(element => {
+            const key = element.dataset.configField;
+            if (key) values[key] = readConfigField(element);
+        });
+        return values;
+    }
+
+    function hydrateFallbackSettings(source) {
+        const enabled = initialBoolean(
+            initialConfigValue(source, 'fallback_enabled', FALLBACK_DEFAULTS.enabled),
+            FALLBACK_DEFAULTS.enabled,
+        );
+        const voice = String(initialConfigValue(
+            source, 'fallback_voice', FALLBACK_DEFAULTS.voice,
+        ) || FALLBACK_DEFAULTS.voice).trim() || FALLBACK_DEFAULTS.voice;
+        const retryCount = initialInteger(
+            initialConfigValue(source, 'fallback_retry_count', FALLBACK_DEFAULTS.retryCount),
+            FALLBACK_DEFAULTS.retryCount,
+            FALLBACK_LIMITS.retryCount,
+        );
+        const retryDelayMs = initialInteger(
+            initialConfigValue(source, 'fallback_retry_delay_ms', FALLBACK_DEFAULTS.retryDelayMs),
+            FALLBACK_DEFAULTS.retryDelayMs,
+            FALLBACK_LIMITS.retryDelayMs,
+        );
+        const enabledInput = $('fallback-enabled');
+        const voiceInput = $('fallback-voice');
+        const retryInput = $('fallback-retry-count');
+        const delayInput = $('fallback-retry-delay-ms');
+        if (enabledInput) enabledInput.checked = enabled;
+        if (voiceInput) voiceInput.value = voice;
+        if (retryInput) retryInput.value = String(retryCount);
+        if (delayInput) delayInput.value = String(retryDelayMs);
+        renderFallbackVoiceOptions([], voice);
+        updateFallbackControls();
+    }
+
+    function renderFallbackVoiceOptions(voices = [], selectedVoice = '') {
+        const select = $('fallback-voice');
+        if (!select) return;
+        const list = Array.isArray(voices)
+            ? voices.filter(voice => voice && typeof voice.id === 'string' && voice.id)
+            : [];
+        const selected = String(selectedVoice || select.value || '').trim();
+        const hasSelected = list.some(voice => voice.id === selected);
+        const options = hasSelected || !selected
+            ? list
+            : [{id: selected, name: `当前音色 · ${selected}`}, ...list];
+        select.replaceChildren();
+        options.forEach(voice => {
+            const option = document.createElement('option');
+            option.value = voice.id;
+            option.textContent = voice.name || voice.id;
+            option.selected = voice.id === selected;
+            select.appendChild(option);
+        });
+        if (!options.length) {
+            const option = document.createElement('option');
+            option.value = selected;
+            option.textContent = selected || '没有可用的 Edge 音色';
+            option.selected = true;
+            option.disabled = !selected;
+            select.appendChild(option);
+        }
+        if (selected) select.value = selected;
+        select.dataset.catalogReady = String(Boolean(list.length));
+        updateFallbackControls();
+    }
+
+    function updateFallbackControls() {
+        const enabledInput = $('fallback-enabled');
+        const fields = $('fallback-fields');
+        if (!enabledInput || !fields) return;
+        const enabled = Boolean(enabledInput.checked);
+        const voiceInput = $('fallback-voice');
+        if (voiceInput) voiceInput.disabled = state.fallbackVoiceLoading || !enabled;
+    }
+
+    async function loadFallbackVoices() {
+        const select = $('fallback-voice');
+        if (!select) return;
+        const selected = select.value.trim() || FALLBACK_DEFAULTS.voice;
+        state.fallbackVoiceLoading = true;
+        updateFallbackControls();
+        if (state.baselineCore) updateDirtyState();
+        try {
+            let voices = state.voiceCatalogs.edge;
+            if (!Array.isArray(voices)) {
+                const response = await expectOk(await api('/api/voices?provider=edge'));
+                voices = await response.json();
+                if (!Array.isArray(voices)) throw new Error('音色列表格式不正确');
+                state.voiceCatalogs.edge = voices;
+            }
+            renderFallbackVoiceOptions(voices, selected);
+            setFeedback('fallback-feedback');
+        } catch (error) {
+            // Keep the saved ID visible when the catalog endpoint is temporarily unavailable.
+            renderFallbackVoiceOptions([], selected);
+            setFeedback('fallback-feedback', `Edge 备用音色加载失败：${error.message}`, 'warning');
+        } finally {
+            state.fallbackVoiceLoading = false;
+            updateFallbackControls();
+            if (state.baselineCore) updateDirtyState();
+        }
+    }
+
+    function validateFallbackDraft() {
+        if (!$('fallback-enabled')) return '';
+        if ($('fallback-enabled').checked) {
+            const voice = $('fallback-voice').value.trim();
+            const voices = state.voiceCatalogs.edge || [];
+            if (!voice) return '请选择 Edge 备用音色。';
+            if (voices.length && !voices.some(item => item.id === voice)) {
+                return '备用音色必须属于 Edge 音色列表。';
+            }
+            if (!voices.length && voice !== FALLBACK_DEFAULTS.voice) {
+                return '请等待 Edge 备用音色列表加载完成。';
+            }
+        }
+        const fields = [
+            ['fallback-retry-count', '重试次数', FALLBACK_LIMITS.retryCount],
+            ['fallback-retry-delay-ms', '重试间隔', FALLBACK_LIMITS.retryDelayMs],
+        ];
+        for (const [id, label, limits] of fields) {
+            const input = $(id);
+            const value = input && input.value.trim() ? Number(input.value) : NaN;
+            if (!Number.isInteger(value) || value < limits.min || value > limits.max) {
+                return `${label}需为 ${limits.min} 至 ${limits.max} 之间的整数。`;
+            }
+        }
+        return '';
+    }
+
     function validateProviderDraft(provider = state.provider) {
+        const fallbackError = validateFallbackDraft();
+        if (fallbackError) return fallbackError;
         const voices = state.voiceCatalogs[provider];
         if (provider === 'doubao' && isDoubaoCustomMode(provider)) {
             const customVoice = state.selectedVoices.doubao || '';
@@ -402,8 +609,7 @@
         Object.entries(VOICE_FIELDS).forEach(([provider, field]) => {
             data[field] = state.selectedVoices[provider] || '';
         });
-        data.fishaudio_reference_id = $('fishaudio-reference-id') ? $('fishaudio-reference-id').value.trim() : '';
-        return JSON.stringify(data);
+        return JSON.stringify(Object.assign(data, collectConfigFields()));
     }
 
     function normalizeBaselineVoice(provider, voice) {
@@ -416,10 +622,7 @@
     }
 
     function collectDraft() {
-        const payload = {
-            provider: state.provider,
-            fishaudio_reference_id: $('fishaudio-reference-id') ? $('fishaudio-reference-id').value.trim() : '',
-        };
+        const payload = Object.assign({provider: state.provider}, collectConfigFields());
         const voiceProviders = new Set(state.voiceTouched);
         voiceProviders.add(state.provider);
         voiceProviders.forEach(provider => {
@@ -445,7 +648,9 @@
         $('save-state-description').textContent = state.dirty
             ? '可以先测试当前草稿，确认后再保存到服务器。'
             : '切换服务商和音色不会立即影响服务器。';
-        const waitingForVoiceCatalog = state.voiceLoading && !isDoubaoCustomMode();
+        const waitingForPrimaryCatalog = state.voiceLoading && !isDoubaoCustomMode();
+        const waitingForFallbackCatalog = state.fallbackVoiceLoading && Boolean($('fallback-enabled') && $('fallback-enabled').checked);
+        const waitingForVoiceCatalog = waitingForPrimaryCatalog || waitingForFallbackCatalog;
         const saveButton = $('save-button');
         if (!saveButton.hasAttribute('aria-busy')) saveButton.disabled = !state.dirty || waitingForVoiceCatalog;
         const testButton = $('test-config-button');
@@ -1137,7 +1342,10 @@
         const feed = $('activity-feed');
         $('activity-empty').hidden = true;
         const line = document.createElement('div');
-        line.className = `activity-line${data.status >= 200 && data.status < 300 ? '' : ' is-error'}`;
+        const failed = data.outcome === 'failed' || data.outcome === 'stream_failed'
+            || data.status < 200 || data.status >= 300;
+        line.className = `activity-line${failed ? ' is-error' : ''}`;
+        line.dataset.requestId = data.request_id || '';
         const time = document.createElement('span');
         time.textContent = (data.ts || '').split('T')[1]?.split('.')[0] || '刚刚';
         const provider = document.createElement('span');
@@ -1147,8 +1355,10 @@
         const chars = document.createElement('span');
         chars.textContent = `${Number(data.chars || 0)} 字`;
         const status = document.createElement('span');
-        status.className = data.status >= 200 && data.status < 300 ? 'activity-ok' : '';
-        status.textContent = `${data.status || '—'} · ${Math.round(Number(data.ms || 0))}ms`;
+        status.className = failed ? '' : 'activity-ok';
+        status.textContent = data.outcome === 'stream_failed'
+            ? `流中断 · ${Math.round(Number(data.ms || 0))}ms`
+            : `${data.status || '—'} · ${Math.round(Number(data.ms || 0))}ms`;
         line.append(time, provider, voice, chars, status);
         feed.appendChild(line);
         while (feed.querySelectorAll('.activity-line').length > 50) {
@@ -1174,6 +1384,12 @@
                 const data = JSON.parse(event.data);
                 if (data.type === 'connected') setLiveState('live', '实时连接');
                 if (data.type === 'tts_request') appendActivity(data);
+                if (data.type === 'tts_request_update') {
+                    const existing = Array.from($$('#activity-feed .activity-line'))
+                        .find(line => line.dataset.requestId === data.request_id);
+                    if (existing) existing.remove();
+                    appendActivity(data);
+                }
             } catch (_) {}
         };
         source.onerror = () => {
@@ -1471,10 +1687,15 @@
         $('reset-stats-button').addEventListener('click', resetStats);
 
         $$('[data-credential-field], [data-config-field]').forEach(element => {
-            element.addEventListener('input', () => {
+            const handleConfigInput = () => {
+                if (element.id === 'fallback-enabled') updateFallbackControls();
                 setFeedback('settings-feedback');
                 updateDirtyState();
-            });
+            };
+            element.addEventListener('input', handleConfigInput);
+            if (element.type === 'checkbox' || element.tagName === 'SELECT') {
+                element.addEventListener('change', handleConfigInput);
+            }
         });
 
         $('voice-dialog-close').addEventListener('click', closeVoiceDialog);
@@ -1502,29 +1723,34 @@
     async function initialize() {
         updateThemeButton();
         initCollapsibles();
-        let protectedConfig = null;
-        let protectedConfigError = '';
-        if (INITIAL.adminProtected && getToken()) {
+        let loadedConfig = null;
+        let configLoadError = '';
+        const shouldLoadConfig = (INITIAL.adminProtected && getToken())
+            || (!INITIAL.adminProtected && !hasInitialFallbackSettings());
+        if (shouldLoadConfig) {
             try {
-                protectedConfig = await jsonRequest('/api/config');
-                if (protectedConfig.provider_status) state.providerStatus = protectedConfig.provider_status;
-                if (protectedConfig.configured_fields) state.configuredFields = protectedConfig.configured_fields;
+                loadedConfig = await jsonRequest('/api/config');
+                if (loadedConfig.provider_status) state.providerStatus = loadedConfig.provider_status;
+                if (loadedConfig.configured_fields) state.configuredFields = loadedConfig.configured_fields;
             } catch (error) {
-                protectedConfigError = error.message;
+                configLoadError = error.message;
             }
         }
-        bindEvents();
+        const hydratedConfig = Object.assign({}, INITIAL, loadedConfig || {});
+        hydrateFallbackSettings(hydratedConfig);
         if ($('fishaudio-reference-id')) {
-            const referenceId = protectedConfig && typeof protectedConfig.fishaudio_reference_id === 'string'
-                ? protectedConfig.fishaudio_reference_id
+            const referenceId = loadedConfig && typeof loadedConfig.fishaudio_reference_id === 'string'
+                ? loadedConfig.fishaudio_reference_id
                 : INITIAL.fishaudioReferenceId || '';
             $('fishaudio-reference-id').value = referenceId;
         }
+        bindEvents();
         state.baselineCore = coreSnapshot();
         renderProviderStatuses();
         updateCredentialPlaceholders();
         applyProvider(state.provider, false);
         updateDirtyState();
+        loadFallbackVoices();
         loadHealthOnly();
 
         if (invalidInitialProvider) {
@@ -1532,8 +1758,8 @@
             notify('检测到无效的旧服务商配置', 'warning', 6000);
         } else if (INITIAL.adminProtected && !getToken()) {
             setFeedback('settings-feedback', '本服务已启用管理保护；保存、测试和维护操作需要先设置管理令牌。', 'warning');
-        } else if (protectedConfigError) {
-            setFeedback('settings-feedback', `无法读取受保护的设置：${protectedConfigError}`, 'warning');
+        } else if (configLoadError) {
+            setFeedback('settings-feedback', `无法读取服务器设置：${configLoadError}`, 'warning');
         }
         if (isSectionOpen('monitoring')) startMonitoring();
     }

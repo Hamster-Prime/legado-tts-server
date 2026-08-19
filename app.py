@@ -783,12 +783,15 @@ def _can_view_custom_voices():
     return _is_admin() and (bool(ADMIN_TOKEN) or _admin_origin_allowed())
 
 FISH_AUDIO_DEFAULT_VOICE = 'fish-default'
+DOUBAO_DEFAULT_VOICE = 'zh_female_cancan_uranus_bigtts'
 
 
 DEFAULT_CONFIG = {
     'provider': 'edge',
     'doubao_api_key': '',
-    'default_voice': 'zh-CN-XiaoxiaoNeural',
+    # Kept under its historical key for compatibility; this is the Doubao
+    # provider's saved voice, not the cross-provider request default.
+    'default_voice': DOUBAO_DEFAULT_VOICE,
     'tencent_secret_id': '',
     'tencent_secret_key': '',
     'tencent_voice': '501002',
@@ -1293,6 +1296,12 @@ def load_config():
     old_voice = cfg.get('default_voice')
     if old_voice in LEGACY_DOUBAO_VOICE_MAP:
         cfg['default_voice'] = LEGACY_DOUBAO_VOICE_MAP[old_voice]
+        changed = True
+    elif old_voice == 'zh-CN-XiaoxiaoNeural':
+        # Older releases initialized this provider-specific field with the
+        # generic Edge default. It became the Doubao voice field later, so the
+        # old value can never be a usable saved Doubao target.
+        cfg['default_voice'] = DOUBAO_DEFAULT_VOICE
         changed = True
     old_fish_voice = cfg.get('fishaudio_voice')
     if old_fish_voice in LEGACY_FISH_AUDIO_VOICE_MAP:
@@ -3031,26 +3040,17 @@ def speech_stream():
 
         data = request.get_json(silent=True) or {}
         text = str(data.get('text', '')).strip()
-        voice = _sanitize_voice(data.get('voice'))
         style = str(data.get('style', '')).strip() or None
         volume = str(data.get('volume', '+0%')).strip()
         pitch = str(data.get('pitch', '+0Hz')).strip()
         if not text:
             return _error_response('Missing text', 400)
-        if not voice:
-            return _error_response('Missing voice', 400)
         if len(text) > MAX_TEXT_LENGTH:
             return _error_response(f'Text too long (max {MAX_TEXT_LENGTH})', 400)
 
-        # Resolve aliases while preserving an explicitly selected custom voice.
-        voice = _normalize_request_voice(voice, data.get('provider'))
-
-        provider, provider_error = _resolve_request_provider(
-            voice, data.get('provider'))
-        if provider_error:
-            return _error_response(provider_error, 400)
-        if not provider:
-            return _error_response(f'Unknown voice format: {voice}', 400)
+        voice, provider, target_error = _request_target(data)
+        if target_error:
+            return _error_response(target_error, 400)
 
         request._tts_provider = provider
         request._tts_voice = voice
@@ -3106,18 +3106,13 @@ def speech_stream_chunked():
             return key_err
         data = request.get_json(silent=True) or {}
         text = str(data.get('text', '')).strip()
-        voice = _sanitize_voice(data.get('voice'))
-        if not text or not voice:
-            return _error_response('Missing text or voice', 400)
+        if not text:
+            return _error_response('Missing text', 400)
         if len(text) > MAX_TEXT_LENGTH:
             return _error_response(f'Text too long (max {MAX_TEXT_LENGTH})', 400)
-        voice = _normalize_request_voice(voice, data.get('provider'))
-        provider, provider_error = _resolve_request_provider(
-            voice, data.get('provider'))
-        if provider_error:
-            return _error_response(provider_error, 400)
-        if not provider:
-            return _error_response(f'Unknown voice: {voice}', 400)
+        voice, provider, target_error = _request_target(data)
+        if target_error:
+            return _error_response(target_error, 400)
         request._tts_provider = provider
         request._tts_voice = voice
         request._tts_chars = len(text)
@@ -3341,6 +3336,57 @@ def _normalize_request_voice(voice, requested_provider=None):
     return alias
 
 
+def _configured_request_target(config=None, requested_provider=None):
+    """Resolve the saved provider/voice pair used by default requests.
+
+    ``provider`` remains the single persisted default-provider field.  Each
+    provider keeps its existing voice field for backwards compatibility (in
+    particular, ``default_voice`` continues to mean the Doubao voice).
+    """
+    config = load_config() if config is None else config
+    provider = _sanitize_voice(requested_provider).lower()
+    if not provider:
+        provider = _sanitize_voice(config.get('provider')).lower()
+    if provider not in ALL_PROVIDERS:
+        return '', None, f'Unknown provider: {provider or "(empty)"}'
+
+    voice_field = _ACTIVE_VOICE_FIELDS[provider]
+    raw_voice = config.get(voice_field)
+    if not isinstance(raw_voice, str) or not raw_voice.strip():
+        return '', None, f'No configured voice for provider {provider}'
+
+    voice = _normalize_request_voice(raw_voice, provider)
+    if not _is_valid_provider_voice(provider, voice, config):
+        return '', None, f'Configured voice {voice} does not belong to provider {provider}'
+    return voice, provider, None
+
+
+def _request_target(data):
+    """Resolve a synthesis request, falling back to saved defaults.
+
+    Explicit voices keep the historical alias/provider-inference behaviour.
+    When ``voice`` is omitted, an explicit provider uses that provider's saved
+    voice; when both are omitted, the saved active provider and voice are used.
+    An explicitly supplied empty voice is still rejected as invalid input.
+    """
+    requested_provider = data.get('provider')
+    if 'voice' not in data:
+        return _configured_request_target(
+            requested_provider=requested_provider)
+
+    voice = _sanitize_voice(data.get('voice'))
+    if not voice:
+        return '', None, 'Missing voice'
+    voice = _normalize_request_voice(voice, requested_provider)
+    provider, provider_error = _resolve_request_provider(
+        voice, requested_provider)
+    if provider_error:
+        return voice, None, provider_error
+    if not provider:
+        return voice, None, f'Unknown voice: {voice}'
+    return voice, provider, None
+
+
 def _configured_fields(config):
     """Expose credential presence without ever returning credential values."""
     return {key: bool(config.get(key)) for key in _CONFIG_CREDENTIAL_FIELDS}
@@ -3413,6 +3459,9 @@ def _safe_config(config):
         'fallback_retry_count': fallback['retry_count'],
         'fallback_retry_delay_ms': fallback['retry_delay_ms'],
     })
+    active_voice, active_provider, _ = _configured_request_target(config)
+    safe['active_provider'] = active_provider
+    safe['active_voice'] = active_voice
     return safe
 
 
@@ -3544,10 +3593,13 @@ def api_config():
         _cache_clear()
         log.info("Config updated")
         fallback = _fallback_policy(config)
+        active_voice, active_provider, _ = _configured_request_target(config)
         return jsonify({
             'status': 'ok',
             'message': '设置已保存',
             'provider': config.get('provider', 'edge'),
+            'active_provider': active_provider,
+            'active_voice': active_voice,
             'provider_status': _provider_status(config),
             'configured_fields': _configured_fields(config),
             'fallback_enabled': fallback['enabled'],
@@ -3798,15 +3850,18 @@ def api_openapi():
                              'type': 'object',
                              'properties': {
                                  'text': {'type': 'string', 'description': '合成文本'},
-                                 'voice': {'type': 'string', 'description': '音色ID或别名'},
+                                 'voice': {
+                                     'type': 'string',
+                                     'description': '音色 ID 或别名；省略时使用已保存的默认音色',
+                                 },
                                  'provider': {
                                      'type': 'string',
                                      'enum': ALL_PROVIDERS,
-                                     'description': '自定义音色 ID 需显式指定服务商',
+                                     'description': '省略时使用已保存的默认服务商；自定义音色 ID 需显式指定',
                                  },
                                  'rate': {'type': 'string', 'description': '语速百分比', 'default': '0%'},
                              },
-                             'required': ['text', 'voice']
+                             'required': ['text']
                          }}}},
                          'responses': {'200': {'description': '音频流', 'content': {'audio/mpeg': {}}}}}
             },
@@ -3817,18 +3872,21 @@ def api_openapi():
                              'properties': {
                                  'model': {'type': 'string', 'default': 'tts-1'},
                                  'input': {'type': 'string'},
-                                 'voice': {'type': 'string'},
+                                 'voice': {
+                                     'type': 'string',
+                                     'description': '省略时使用已保存的默认音色',
+                                 },
                                  'provider': {
                                      'type': 'string',
                                      'enum': ALL_PROVIDERS,
-                                     'description': '自定义音色 ID 需显式指定服务商',
+                                     'description': '省略时使用已保存的默认服务商；自定义音色 ID 需显式指定',
                                  },
                                  'speed': {'type': 'number', 'default': 1.0},
                                  'response_format': {'type': 'string', 'enum': ['mp3', 'wav', 'ogg', 'aac', 'flac', 'pcm', 'opus']},
                                  'stream_format': {'type': 'string', 'enum': ['audio', 'sse']},
                                  'instructions': {'type': 'string', 'description': 'Style hint (Edge only)'},
                              },
-                             'required': ['input', 'voice']
+                             'required': ['input']
                          }}}},
                          'responses': {'200': {'description': '音频数据'}}}
             },
@@ -4210,6 +4268,7 @@ def api_voices_search():
 def api_tts_preview():
     """Preview a voice with a fixed short text. For quick voice comparison.
     POST {"voice": "zh-CN-XiaoxiaoNeural", "provider": "edge"}
+    Both fields are optional; saved request defaults are used when omitted.
     Returns: {"audio": "base64", "size": 1234, "duration_estimate_ms": 2000}"""
     # This route performs real synthesis, so it is rate limited like the other
     # TTS endpoints rather than being a free, unmetered path.
@@ -4220,17 +4279,9 @@ def api_tts_preview():
     if key_err:
         return key_err
     data = request.get_json(silent=True) or {}
-    voice = _sanitize_voice(data.get('voice'))
-    if not voice:
-        return _error_response('Missing voice', 400)
-    # Resolve aliases while preserving an explicitly selected custom voice.
-    voice = _normalize_request_voice(voice, data.get('provider'))
-    provider, provider_error = _resolve_request_provider(
-        voice, data.get('provider'))
-    if provider_error:
-        return _error_response(provider_error, 400)
-    if not provider:
-        return _error_response(f'Cannot determine provider for voice: {voice}', 400)
+    voice, provider, target_error = _request_target(data)
+    if target_error:
+        return _error_response(target_error, 400)
     preview_text = '你好，我是您的语音助手，很高兴认识您。'
     request._tts_provider = provider
     request._tts_voice = voice
@@ -4288,7 +4339,7 @@ def openai_speech():
     {
         "model": "tts-1",               // ignored, provider auto-detected from voice
         "input": "Hello world.",
-        "voice": "zh-CN-XiaoxiaoNeural",
+        "voice": "zh-CN-XiaoxiaoNeural", // optional; saved default when omitted
         "response_format": "mp3",        // mp3|wav|ogg|aac|flac|pcm|opus (non-mp3 requires ffmpeg)
         "speed": 1.0,                    // 0.25-4.0
         "stream_format": "audio",        // audio (default) | sse (Server-Sent Events streaming)
@@ -4306,7 +4357,6 @@ def openai_speech():
 
         data = request.get_json(silent=True) or {}
         text = str(data.get('input', '')).strip()
-        voice = _sanitize_voice(data.get('voice'))
         resp_format = str(data.get('response_format', 'mp3')).strip().lower()
         if resp_format not in _FORMAT_MIME:
             resp_format = 'mp3'
@@ -4320,22 +4370,14 @@ def openai_speech():
 
         if not text:
             return _error_response('Missing input', 400, 'invalid_request_error')
-        if not voice:
-            return _error_response('Missing voice', 400, 'invalid_request_error')
         if len(text) > MAX_TEXT_LENGTH:
             return _error_response(f'Input too long (max {MAX_TEXT_LENGTH})',
                                    400, 'invalid_request_error')
 
-        # Resolve aliases while preserving an explicitly selected custom voice.
-        voice = _normalize_request_voice(voice, data.get('provider'))
-
-        provider, provider_error = _resolve_request_provider(
-            voice, data.get('provider'))
-        if provider_error:
+        voice, provider, target_error = _request_target(data)
+        if target_error:
             return _error_response(
-                provider_error, 400, 'invalid_request_error')
-        if not provider:
-            return _error_response(f'Unknown voice: {voice}', 400, 'invalid_request_error')
+                target_error, 400, 'invalid_request_error')
 
         request._tts_provider = provider
         request._tts_voice = voice
@@ -4475,17 +4517,17 @@ def _legado_voice_and_provider(config):
         return '', None, f'Unknown provider: {requested_provider}'
 
     raw_voice = request.args.get('voice')
-    if raw_voice is None and requested_provider:
-        voice_field = _ACTIVE_VOICE_FIELDS[requested_provider]
-        raw_voice = config.get(voice_field)
+    if raw_voice is None:
+        voice, provider, provider_error = _configured_request_target(
+            config, requested_provider)
+        if provider_error:
+            return voice, provider, provider_error
         private_voice = (
-            requested_provider in CUSTOM_VOICE_PROVIDERS
-            and raw_voice not in _PROVIDER_VOICE_IDS[requested_provider]
+            provider in CUSTOM_VOICE_PROVIDERS
+            and voice not in _PROVIDER_VOICE_IDS[provider]
             and not _can_view_custom_voices()
         )
-        if (private_voice
-                or not _is_valid_provider_voice(
-                    requested_provider, raw_voice, config)):
+        if private_voice:
             defaults = {
                 'edge': EDGE_VOICES[0]['id'],
                 'doubao': DOUBAO_VOICES[0]['id'],
@@ -4493,13 +4535,8 @@ def _legado_voice_and_provider(config):
                 'xiaomi': XIAOMI_VOICES[0]['id'],
                 'fishaudio': FISH_AUDIO_VOICES[0]['id'],
             }
-            raw_voice = defaults[requested_provider]
-    elif raw_voice is None:
-        raw_voice = config.get('default_voice', 'zh-CN-XiaoxiaoNeural')
-        if (raw_voice not in _PROVIDER_VOICE_IDS['doubao']
-                and _is_valid_provider_voice('doubao', raw_voice, config)
-                and not _can_view_custom_voices()):
-            raw_voice = DOUBAO_VOICES[0]['id']
+            voice = defaults[provider]
+        return voice, provider, None
 
     voice = _normalize_request_voice(raw_voice, requested_provider)
     provider, provider_error = _resolve_request_provider(
@@ -4632,7 +4669,7 @@ def batch_speech():
 
     POST /api/speech/batch
     {
-        "voice": "zh-CN-XiaoxiaoNeural",  // required
+        "voice": "zh-CN-XiaoxiaoNeural",  // optional; saved default when omitted
         "rate": "0%",                     // optional: +/- percentage
         "texts": ["text1", "text2", ...],   // required: array of texts
         "response_format": "mp3"           // optional: mp3/wav/ogg
@@ -4667,24 +4704,15 @@ def batch_speech():
                 return _error_response(f'Text too long: "{str(t)[:50]}..."',
                                        400, 'invalid_request_error')
 
-        voice = _sanitize_voice(data.get('voice'))
-        if not voice:
-            return _error_response('Missing voice', 400, 'invalid_request_error')
         rate = str(data.get('rate', '0%')).strip()
         resp_format = str(data.get('response_format', 'mp3')).strip().lower()
         if resp_format not in _FORMAT_MIME:
             resp_format = 'mp3'
 
-        # Resolve aliases while preserving an explicitly selected custom voice.
-        voice = _normalize_request_voice(voice, data.get('provider'))
-
-        provider, provider_error = _resolve_request_provider(
-            voice, data.get('provider'))
-        if provider_error:
+        voice, provider, target_error = _request_target(data)
+        if target_error:
             return _error_response(
-                provider_error, 400, 'invalid_request_error')
-        if not provider:
-            return _error_response(f'Unknown voice: {voice}', 400, 'invalid_request_error')
+                target_error, 400, 'invalid_request_error')
 
         # Check daily quota (estimate total chars)
         total_input_chars = sum(len(str(t or '')) for t in texts)

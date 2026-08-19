@@ -258,6 +258,7 @@ class TestLoadConfig:
             try:
                 cfg = load_config()
                 assert cfg['provider'] == 'edge'
+                assert cfg['default_voice'] == 'zh_female_cancan_uranus_bigtts'
                 assert cfg['edge_voice'] == 'zh-CN-XiaoxiaoNeural'
                 assert cfg['fallback_enabled'] is True
                 assert cfg['fallback_voice'] == 'zh-CN-XiaoxiaoNeural'
@@ -284,6 +285,27 @@ class TestLoadConfig:
             finally:
                 app_module.CONFIG_FILE = orig
         finally:
+            os.unlink(path)
+
+    def test_legacy_generic_default_voice_is_migrated_for_doubao(self):
+        import app as app_module
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump({
+                'provider': 'edge',
+                'default_voice': 'zh-CN-XiaoxiaoNeural',
+            }, f)
+            path = f.name
+        original = app_module.CONFIG_FILE
+        app_module.CONFIG_FILE = path
+        try:
+            config = load_config()
+            assert config['provider'] == 'edge'
+            assert config['edge_voice'] == 'zh-CN-XiaoxiaoNeural'
+            assert config['default_voice'] == 'zh_female_cancan_uranus_bigtts'
+            assert _read_json(path, {})['default_voice'] == config['default_voice']
+        finally:
+            app_module.CONFIG_FILE = original
             os.unlink(path)
 
     def test_legacy_doubao_auth_is_purged_without_migration(self):
@@ -742,9 +764,68 @@ class TestAPIEndpoints:
         r = self.client.post('/speech/stream', json={'voice': 'zh-CN-XiaoxiaoNeural'})
         assert r.status_code == 400
 
-    def test_speech_stream_missing_voice(self):
-        r = self.client.post('/speech/stream', json={'text': 'hello'})
+    def test_speech_stream_empty_voice(self):
+        r = self.client.post('/speech/stream', json={'text': 'hello', 'voice': ''})
         assert r.status_code == 400
+
+    def test_speech_stream_null_voice_is_not_treated_as_omitted(self):
+        r = self.client.post('/speech/stream', json={'text': 'hello', 'voice': None})
+        assert r.status_code == 400
+
+    @pytest.mark.parametrize(('endpoint', 'payload'), [
+        ('/speech/stream', {'text': '默认目标'}),
+        ('/speech/stream/chunked', {'text': '默认目标'}),
+        ('/v1/audio/speech', {'model': 'tts-1', 'input': '默认目标'}),
+        ('/api/tts/preview', {}),
+        ('/api/speech/batch', {'texts': ['默认目标']}),
+    ])
+    def test_synthesis_routes_use_saved_provider_and_voice_by_default(
+            self, monkeypatch, endpoint, payload):
+        import app as app_module
+
+        config = app_module.DEFAULT_CONFIG.copy()
+        config.update({
+            'provider': 'tencent',
+            'tencent_voice': '501003',
+        })
+        app_module.save_config(config)
+        captured = []
+
+        def fake_dispatch(provider, text, voice, pct, **kwargs):
+            captured.append((provider, voice))
+            return b'default-target-audio', None, provider, voice
+
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+
+        response = self.client.post(endpoint, json=payload)
+
+        assert response.status_code == 200, response.get_data(as_text=True)
+        assert captured == [('tencent', '501003')]
+
+    def test_explicit_provider_without_voice_uses_its_saved_voice(self, monkeypatch):
+        import app as app_module
+
+        config = app_module.DEFAULT_CONFIG.copy()
+        config.update({
+            'provider': 'edge',
+            'edge_voice': 'zh-CN-YunxiNeural',
+            'tencent_voice': '501001',
+        })
+        app_module.save_config(config)
+        captured = {}
+
+        def fake_dispatch(provider, text, voice, pct, **kwargs):
+            captured.update(provider=provider, voice=voice)
+            return b'provider-default-audio', None, provider, voice
+
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+        response = self.client.post('/speech/stream', json={
+            'text': '指定服务商默认音色',
+            'provider': 'tencent',
+        })
+
+        assert response.status_code == 200
+        assert captured == {'provider': 'tencent', 'voice': '501001'}
 
     def test_speech_stream_unknown_voice(self):
         r = self.client.post('/speech/stream', json={'text': 'hello', 'voice': 'invalid'})
@@ -954,6 +1035,8 @@ class TestAPIEndpoints:
         assert type(data['fallback_retry_count']) is int
         assert type(data['fallback_retry_delay_ms']) is int
         assert data['fallback_voice'] == 'zh-CN-XiaoxiaoNeural'
+        assert data['active_provider'] == 'edge'
+        assert data['active_voice'] == 'zh-CN-XiaoxiaoNeural'
 
     def test_config_post_persists_fallback_policy(self):
         payload = {
@@ -997,6 +1080,8 @@ class TestAPIEndpoints:
         r = self.client.post('/api/config', json={'provider': 'edge'})
         assert r.status_code == 200
         assert r.get_json()['status'] == 'ok'
+        assert r.get_json()['active_provider'] == 'edge'
+        assert r.get_json()['active_voice'] == 'zh-CN-XiaoxiaoNeural'
 
     def test_config_post_accepts_custom_doubao_voice(self):
         r = self.client.post('/api/config', json={
@@ -1256,6 +1341,52 @@ class TestAPIEndpoints:
         assert self.client.get('/static/app.css').status_code == 200
         assert self.client.get('/static/app.js').status_code == 200
 
+    def test_provider_draft_is_unsaved_until_switching_back(self):
+        """A provider tab is a draft choice; browsing it must not move the saved baseline."""
+        try:
+            from playwright.sync_api import (
+                Error as PlaywrightError,
+                expect,
+                sync_playwright,
+            )
+        except ImportError:
+            pytest.skip('Playwright is not installed')
+
+        import shutil
+        chrome = shutil.which('google-chrome') or shutil.which('chromium')
+        if not chrome:
+            pytest.skip('No Chromium browser is installed')
+
+        html = self.client.get('/').get_data(as_text=True)
+        html = html.replace(
+            '<script defer src="/static/app.js"></script>', '')
+        javascript = self.client.get('/static/app.js').get_data(as_text=True)
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(
+                    executable_path=chrome, headless=True,
+                    args=['--no-sandbox'])
+            except PlaywrightError as error:
+                pytest.skip(f'Chromium cannot start in this environment: {error}')
+            try:
+                page = browser.new_page()
+                page.set_content(html)
+                page.add_script_tag(content=javascript)
+
+                expect(page.locator('#save-chip-text')).to_have_text('已保存')
+                page.locator('[data-provider="doubao"]').click()
+                expect(page.locator('#save-chip-text')).to_have_text('有未保存更改')
+                assert page.locator('#save-chip').evaluate(
+                    "element => element.classList.contains('is-dirty')")
+
+                page.locator('[data-provider="edge"]').click()
+                expect(page.locator('#save-chip-text')).to_have_text('已保存')
+                assert page.locator('#save-chip').evaluate(
+                    "element => element.classList.contains('is-saved')")
+            finally:
+                browser.close()
+
     def test_config_test_endpoint(self):
         r = self.client.post('/api/config/test')
         assert r.status_code == 200
@@ -1286,7 +1417,6 @@ class TestAPIEndpoints:
 
     @pytest.mark.parametrize('payload', [
         {'provider': ['edge']},
-        {'provider': 'doubao'},
         {'provider': 'fishaudio', 'fishaudio_voice': 'custom'},
         {'provider': 'fishaudio', 'fishaudio_voice': 'fish-not-a-preset'},
         {'edge_voice': 'not-a-real-voice'},
@@ -1302,7 +1432,7 @@ class TestAPIEndpoints:
         {'fallback_retry_delay_ms': 5001},
         {'fallback_retry_delay_ms': 0.5},
         {'fallback_voice': 'zh_male_shaonianzixin_uranus_bigtts'},
-    ], ids=['provider-list', 'active-voice-mismatch', 'custom-fish-without-reference',
+    ], ids=['provider-list', 'custom-fish-without-reference',
             'unknown-fish-preset', 'unknown-voice', 'voice-object', 'credential-number',
             'fallback-enabled-string', 'retry-count-bool', 'retry-count-negative',
             'retry-count-too-large', 'retry-count-float', 'retry-delay-bool',
@@ -1435,10 +1565,11 @@ class TestAPIEndpoints:
         data = r.get_json()
         assert 'error' in data
 
-    def test_openai_speech_missing_voice(self):
+    def test_openai_speech_empty_voice(self):
         r = self.client.post('/v1/audio/speech', json={
             'model': 'tts-1',
             'input': 'hello',
+            'voice': '',
         })
         assert r.status_code == 400
 
@@ -1781,17 +1912,18 @@ class TestAdminAuth:
         })
         app_module.save_config(config)
 
-        anonymous = self.client.get(
-            '/api/legado/config?provider=fishaudio').get_json()
-        authenticated = self.client.get(
-            '/api/legado/config?provider=fishaudio',
-            headers=headers,
-        ).get_json()
+        for suffix in ('', '?provider=fishaudio'):
+            anonymous = self.client.get(
+                '/api/legado/config' + suffix).get_json()
+            authenticated = self.client.get(
+                '/api/legado/config' + suffix,
+                headers=headers,
+            ).get_json()
 
-        assert reference_id not in anonymous['url']
-        assert anonymous['name'] == 'Fish Audio - 默认音色'
-        assert reference_id in authenticated['url']
-        assert authenticated['name'] == 'Fish Audio - 私有订阅音色'
+            assert reference_id not in anonymous['url']
+            assert anonymous['name'] == 'Fish Audio - 默认音色'
+            assert reference_id in authenticated['url']
+            assert authenticated['name'] == 'Fish Audio - 私有订阅音色'
 
     def test_anonymous_stats_hide_custom_voice_ids_but_keep_totals(self):
         import app as app_module
@@ -1922,6 +2054,26 @@ class TestLegadoEndpoints:
         assert 'url' in data
         assert 'speech/stream' in data['url']
         assert 'audio/mpeg' in data['contentType']
+
+    def test_legado_config_default_tracks_active_provider_voice(self):
+        import app as app_module
+
+        config = app_module.DEFAULT_CONFIG.copy()
+        config.update({
+            'provider': 'xiaomi',
+            'default_voice': 'zh_female_cancan_uranus_bigtts',
+            'xiaomi_voice': 'default_zh',
+        })
+        app_module.save_config(config)
+
+        response = self.client.get('/api/legado/config')
+
+        assert response.status_code == 200
+        exported = response.get_json()
+        request_config = json.loads(exported['url'].split(',', 1)[1])
+        assert exported['name'] == '小米 MiMo - 中文女声'
+        assert request_config['body']['provider'] == 'xiaomi'
+        assert request_config['body']['voice'] == 'default_zh'
 
     def test_legado_config_custom_voice(self):
         r = self.client.get('/api/legado/config?voice=zh-CN-YunxiNeural')
@@ -2748,9 +2900,9 @@ class TestEdgeCases:
         })
         assert r.status_code == 400
 
-    def test_missing_voice_returns_400(self):
+    def test_empty_voice_returns_400(self):
         r = self.client.post('/speech/stream', json={
-            'text': '测试'
+            'text': '测试', 'voice': ''
         })
         assert r.status_code == 400
 
@@ -2819,6 +2971,7 @@ class TestEdgeCases:
             assert schema['properties']['provider']['type'] == 'string'
             assert set(schema['properties']['provider']['enum']) == set(ALL_PROVIDERS)
             assert 'provider' not in schema['required']
+            assert 'voice' not in schema['required']
 
 
 class TestAPIKeys:
@@ -3357,8 +3510,10 @@ class TestStreaming:
         r = self.client.post('/speech/stream/chunked', json={'voice': 'zh-CN-XiaoxiaoNeural'})
         assert r.status_code == 400
 
-    def test_chunked_missing_voice(self):
-        r = self.client.post('/speech/stream/chunked', json={'text': 'test'})
+    def test_chunked_empty_voice(self):
+        r = self.client.post('/speech/stream/chunked', json={
+            'text': 'test', 'voice': '',
+        })
         assert r.status_code == 400
 
     def test_chunked_unknown_voice(self):

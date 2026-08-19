@@ -391,13 +391,57 @@
         const preferences = readSectionPreferences();
         $$('.collapsible').forEach(panel => {
             const name = panel.dataset.section;
-            const defaultOpen = name === 'setup';
+            const defaultOpen = name === 'setup' || name === 'voice-tools';
             const open = hasOwn(preferences, name) ? Boolean(preferences[name]) : defaultOpen;
             setSectionOpen(panel, open, false, false);
             panel.querySelector('.panel-toggle').addEventListener('click', () => {
                 setSectionOpen(panel, !panel.classList.contains('is-open'));
             });
         });
+    }
+
+    function setConsolePage(name) {
+        const pageName = name === 'maintenance' ? 'maintenance' : 'main';
+        $$('[data-console-page]').forEach(page => {
+            const active = page.dataset.consolePage === pageName;
+            page.hidden = !active;
+            page.classList.toggle('is-active', active);
+        });
+        $$('[data-console-tab]').forEach(tab => {
+            const active = tab.dataset.consoleTab === pageName;
+            tab.classList.toggle('is-active', active);
+            tab.setAttribute('aria-selected', String(active));
+            tab.tabIndex = active ? 0 : -1;
+        });
+        $$('[data-console-main-only]').forEach(element => {
+            element.hidden = pageName !== 'main';
+        });
+
+        const maintenancePanel = document.querySelector('[data-section="maintenance"]');
+        if (pageName === 'maintenance' && maintenancePanel && !maintenancePanel.classList.contains('is-open')) {
+            setSectionOpen(maintenancePanel, true, false);
+        }
+        if (pageName !== 'main') stopMonitoring();
+        else if (isSectionOpen('monitoring')) startMonitoring();
+    }
+
+    function initConsoleNavigation() {
+        const tabs = $$('[data-console-tab]');
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => setConsolePage(tab.dataset.consoleTab));
+            tab.addEventListener('keydown', event => {
+                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                event.preventDefault();
+                const current = tabs.indexOf(event.currentTarget);
+                let next = event.key === 'ArrowLeft' ? current - 1 : current + 1;
+                if (event.key === 'Home') next = 0;
+                if (event.key === 'End') next = tabs.length - 1;
+                const target = tabs[(next + tabs.length) % tabs.length];
+                setConsolePage(target.dataset.consoleTab);
+                target.focus();
+            });
+        });
+        setConsolePage('main');
     }
 
     function credentialValue(field) {
@@ -630,8 +674,12 @@
     }
 
     function updateDirtyState() {
+        const providerChanged = state.provider !== state.savedProvider;
         const credentialChanged = $$('[data-credential-field]').some(element => Boolean(element.value.trim()));
-        state.dirty = state.needsProviderRepair || credentialChanged || coreSnapshot() !== state.baselineCore;
+        state.dirty = state.needsProviderRepair
+            || providerChanged
+            || credentialChanged
+            || coreSnapshot() !== state.baselineCore;
         const chip = $('save-chip');
         chip.classList.toggle('is-saved', !state.dirty);
         chip.classList.toggle('is-dirty', state.dirty);
@@ -704,7 +752,7 @@
     function updateSetupSummary() {
         const voice = voiceName(currentVoiceId());
         $('setup-summary').textContent = `${providerMeta().short} · ${voice || '未选择音色'}`;
-        $('active-provider-name').textContent = providerMeta().name;
+        $('active-provider-name').textContent = `${providerMeta().name} · ${voice || '未选择音色'}`;
         $('stats-provider-title').textContent = `${providerMeta().name} 使用量`;
     }
 
@@ -1425,11 +1473,15 @@
 
     async function loadHealthOnly() {
         try {
-            const health = await jsonRequest('/health');
-            renderHealth(health);
+            await loadSystemStatus();
         } catch (error) {
-            setServiceStatus('error', '服务状态异常');
-            if (isSectionOpen('monitoring')) setFeedback('monitor-feedback', `健康状态加载失败：${error.message}`, 'error');
+            try {
+                const health = await jsonRequest('/health');
+                renderHealth(health);
+            } catch (_) {
+                setServiceStatus('error', '服务状态异常');
+                if (isSectionOpen('monitoring')) setFeedback('monitor-feedback', `健康状态加载失败：${error.message}`, 'error');
+            }
         }
     }
 
@@ -1819,6 +1871,7 @@
     async function initialize() {
         updateThemeButton();
         initCollapsibles();
+        initConsoleNavigation();
         let loadedConfig = null;
         let configLoadError = '';
         const shouldLoadConfig = (INITIAL.adminProtected && getToken())

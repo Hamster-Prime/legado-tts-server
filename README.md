@@ -5,7 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.9.0-green.svg)
-![Tests](https://img.shields.io/badge/tests-322%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-330%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
 
@@ -17,7 +17,7 @@
 
 **核心能力**
 - 多源聚合：Edge TTS (免费)、火山引擎、腾讯云、小米MiMo、Fish Audio
-- 智能路由：单一接口，根据音色参数自动分发到对应 provider
+- 智能路由：单一接口，根据音色参数或 Web UI 保存的默认目标分发到对应 provider
 - 听书低延迟：火山引擎 v3 HTTP Chunked 单向流，上游音频分片生成后立即向 Legado 透传
 - OpenAI 兼容：`/v1/audio/speech` + `/v1/models`，支持 MP3/WAV/OGG 输出
 - 长文本分块：自动按句子边界拆分；流式 Provider 逐段连续输出
@@ -260,6 +260,21 @@ Fish Audio 的 API Key 只放在凭证区。声音模型在“选择音色”的
 ## API 端点
 
 ### TTS 合成
+
+以下合成端点的 `provider` 与 `voice` 都可省略。两者都省略时使用 Web 管理页已保存的
+当前服务商及其音色；只传 `provider` 时使用该服务商已保存的音色。显式传入 `voice`
+仍按下方路由规则处理，可覆盖服务器默认值。`GET /api/config` 通过
+`active_provider` 与 `active_voice` 返回当前默认请求目标。
+
+例如，以下请求会直接使用 Web UI 中保存的服务商与音色：
+
+```bash
+curl -X POST http://localhost:8080/speech/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"这段文本使用服务器默认声音朗读。"}' \
+  --output speech.mp3
+```
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/speech/stream` | Legado TTS；火山引擎端到端流式输出 |
@@ -328,6 +343,8 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 ### 音频路由规则
 | voice 格式 | Provider |
 |------------|----------|
+| 省略 `voice` 与 `provider` | Web UI 已保存的当前服务商与音色 |
+| 仅传 `provider` | 该 Provider 已保存的音色 |
 | 包含 `Neural` 且有 `-` | Edge TTS |
 | 纯数字 1-999999 | 腾讯云 |
 | 以 `zh_` / `en_` / `multi_` / `ICL_` / `saturn_` 开头 | 火山引擎 |

@@ -22,51 +22,80 @@
 
 <div class="app-shell">
     <header class="topbar">
-        <a class="brand" href="/" aria-label="Legado TTS 首页">
-            <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span>
-                <strong>Legado TTS</strong>
-                <small>语音服务控制台 · v{{ version }}</small>
-            </span>
-        </a>
-        <div class="topbar-actions">
+        <div class="brand-section">
+            <a class="brand" href="/" aria-label="Legado TTS 首页">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span class="brand-title">Legado TTS <span class="version-tag">v{{ version }}</span></span>
+            </a>
             <span class="service-pill is-loading" id="service-status" role="status">
                 <span class="status-dot" aria-hidden="true"></span>
                 <span id="service-status-text">正在连接</span>
             </span>
+        </div>
+
+        <nav class="nav-tabs" role="tablist" aria-label="控制台页面">
+            <button class="nav-tab is-active" id="console-main-tab" type="button" role="tab" data-console-tab="main" aria-controls="console-main-page" aria-selected="true">服务与语音实验室</button>
+            <button class="nav-tab" id="console-maintenance-tab" type="button" role="tab" data-console-tab="maintenance" aria-controls="console-maintenance-page" aria-selected="false">数据维护与备份</button>
+        </nav>
+
+        <div class="topbar-actions">
+            <button class="button secondary topbar-command" id="test-config-button" type="button">测试连接</button>
+            <button class="button primary topbar-command" id="save-button" type="button" disabled>保存生效</button>
             {% if admin_protected %}
-            <button class="icon-button" id="token-button" type="button" title="设置管理令牌">
-                <span aria-hidden="true">🔑</span><span class="button-label">令牌</span>
+            <button class="icon-button" id="token-button" type="button" title="设置管理令牌" aria-label="设置管理令牌">
+                <span aria-hidden="true">&#128273;</span><span class="button-label">令牌</span>
             </button>
             {% endif %}
             <button class="icon-button" id="theme-button" type="button" aria-label="切换颜色主题">
-                <span id="theme-icon" aria-hidden="true">◐</span><span class="button-label" id="theme-label">主题</span>
+                <span id="theme-icon" aria-hidden="true">&#9680;</span><span class="button-label" id="theme-label">主题</span>
             </button>
         </div>
     </header>
 
     <main class="workspace" id="main-content">
-        <section class="overview" aria-labelledby="page-title">
+        <section class="stats-strip" aria-label="服务运行摘要">
+            <div class="stat-item">
+                <div class="stat-info"><span class="stat-label">累计合成字符</span><strong class="stat-value" id="total-chars-all">—</strong></div>
+                <span class="stat-badge">本次运行</span>
+            </div>
+            <div class="stat-item">
+                <div class="stat-info"><span class="stat-label">累计请求次数</span><strong class="stat-value" id="total-requests-all">—</strong></div>
+                <span class="stat-badge">启动后</span>
+            </div>
+            <div class="stat-item">
+                <div class="stat-info"><span class="stat-label">缓存命中率</span><strong class="stat-value" id="cache-hit-rate">—</strong></div>
+                <span class="stat-badge is-accent">缓存</span>
+            </div>
+            <div class="stat-item">
+                <div class="stat-info"><span class="stat-label">P95 响应延迟</span><strong class="stat-value" id="response-time-p95">—</strong></div>
+                <span class="stat-badge">延迟</span>
+            </div>
+        </section>
+
+        <section class="default-request-banner" data-console-main-only aria-labelledby="page-title">
             <div>
-                <p class="eyebrow">简单配置，立即使用</p>
-                <h1 id="page-title">语音服务设置</h1>
-                <p class="overview-copy">选择服务商和音色，保存后即可复制到开源阅读。低频工具已收纳到下方分组。</p>
+                <p class="eyebrow">无参数请求默认设置</p>
+                <h1 id="page-title">默认请求声音</h1>
+                <p class="overview-copy">这里保存的服务商和音色会直接用于外部 UI 与未显式指定参数的 TTS 请求。</p>
             </div>
             <div class="overview-state">
-                <span class="overview-label">当前选择</span>
+                <span class="overview-label">当前草稿</span>
                 <strong id="active-provider-name">Edge TTS</strong>
-                <span class="save-chip is-saved" id="save-chip">
+                <span class="save-chip is-saved" id="save-chip" role="status" aria-live="polite" aria-atomic="true">
                     <span class="status-dot" aria-hidden="true"></span>
                     <span id="save-chip-text">已保存</span>
                 </span>
             </div>
         </section>
 
+        <div class="console-page is-active" id="console-main-page" role="tabpanel" data-console-page="main" aria-labelledby="console-main-tab">
+        <div class="console-workspace">
+
         <section class="panel collapsible is-open" data-section="setup">
             <button class="panel-toggle" type="button" aria-expanded="true" aria-controls="setup-content">
                 <span class="panel-heading">
                     <span class="panel-index">01</span>
-                    <span><strong>快速配置</strong><small>服务商、凭证、音色和阅读接入</small></span>
+                    <span><strong>默认请求配置</strong><small>保存后供外部 UI 与无参数请求直接使用</small></span>
                 </span>
                 <span class="panel-summary" id="setup-summary">Edge · 晓晓</span>
                 <span class="chevron" aria-hidden="true"></span>
@@ -79,7 +108,7 @@
                             <article class="surface">
                                 <div class="surface-heading">
                                     <div><span class="step-label">步骤 1</span><h2>选择服务商</h2></div>
-                                    <span class="surface-note">点击只会修改草稿，保存后生效</span>
+                                    <span class="surface-note">选择会更新草稿，保存后成为默认服务商</span>
                                 </div>
                                 <div class="provider-grid" role="radiogroup" aria-label="语音服务商">
                                     <button class="provider-option" type="button" data-provider="edge" role="radio" aria-checked="false">
@@ -167,7 +196,7 @@
                         <div class="setup-stack">
                             <article class="surface voice-surface">
                                 <div class="surface-heading">
-                                    <div><span class="step-label">步骤 3</span><h2>选择音色</h2></div>
+                                    <div><span class="step-label">步骤 3</span><h2>选择默认音色</h2></div>
                                     <span class="surface-note" id="voice-count">正在加载</span>
                                 </div>
                                 <div class="voice-picker">
@@ -269,11 +298,7 @@
                     <div class="save-bar">
                         <div class="save-message">
                             <strong id="save-state-title">所有更改均已保存</strong>
-                            <span id="save-state-description">切换服务商和音色不会立即影响服务器。</span>
-                        </div>
-                        <div class="button-row save-actions">
-                            <button class="button secondary" id="test-config-button" type="button">测试当前配置</button>
-                            <button class="button primary" id="save-button" type="button" disabled>保存更改</button>
+                            <span id="save-state-description">已保存的服务商和音色将用于外部 UI 与无参数请求。</span>
                         </div>
                     </div>
                     <div class="inline-feedback" id="settings-feedback" role="status" aria-live="polite" hidden></div>
@@ -282,11 +307,12 @@
             </div>
         </section>
 
+        <div class="console-side-stack">
         <section class="panel collapsible" data-section="voice-tools">
             <button class="panel-toggle" type="button" aria-expanded="false" aria-controls="voice-tools-content">
                 <span class="panel-heading">
                     <span class="panel-index">02</span>
-                    <span><strong>试听与音色工具</strong><small>长文本测试与双音色对比</small></span>
+                    <span><strong>语音实验室</strong><small>合成试听与双音色对比</small></span>
                 </span>
                 <span class="panel-summary">按需展开</span>
                 <span class="chevron" aria-hidden="true"></span>
@@ -354,10 +380,6 @@
                     <div class="monitor-divider"></div>
                     <div class="monitor-heading"><div><span class="step-label">本次运行</span><h2>系统状态</h2></div><span class="surface-note" id="monitor-updated-at">等待刷新</span></div>
                     <div class="metric-grid system-metrics">
-                        <div class="metric"><span>合成字符</span><strong id="total-chars-all">—</strong></div>
-                        <div class="metric"><span>请求数</span><strong id="total-requests-all">—</strong></div>
-                        <div class="metric"><span>缓存命中率</span><strong id="cache-hit-rate">—</strong></div>
-                        <div class="metric"><span>P95 响应</span><strong id="response-time-p95">—</strong></div>
                         <div class="metric"><span>缓存条目</span><strong id="cache-count">—</strong></div>
                         <div class="metric"><span>缓存内存</span><strong id="cache-memory">—</strong></div>
                         <div class="metric"><span>FFmpeg</span><strong id="ffmpeg-status">—</strong></div>
@@ -376,7 +398,11 @@
                 </div>
             </div>
         </section>
+        </div>
+        </div>
+        </div>
 
+        <div class="console-page" id="console-maintenance-page" role="tabpanel" data-console-page="maintenance" aria-labelledby="console-maintenance-tab" hidden>
         <section class="panel collapsible" data-section="maintenance">
             <button class="panel-toggle" type="button" aria-expanded="false" aria-controls="maintenance-content">
                 <span class="panel-heading">
@@ -412,6 +438,7 @@
                 </div>
             </div>
         </section>
+        </div>
     </main>
 
     <footer class="footer">

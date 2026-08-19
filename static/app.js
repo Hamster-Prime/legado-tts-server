@@ -25,6 +25,7 @@
     };
     const CUSTOM_VOICE_PROVIDERS = new Set(['doubao', 'fishaudio']);
     const CUSTOM_VOICE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+    const PROVIDER_BUTTON_SELECTOR = '.provider-option, .provider-item';
     const FALLBACK_DEFAULTS = Object.freeze({
         enabled: true,
         voice: 'zh-CN-XiaoxiaoNeural',
@@ -124,6 +125,7 @@
         previewRequestId: 0,
         testRequestId: 0,
         compareRequestId: 0,
+        initialized: false,
     };
 
     const $ = id => document.getElementById(id);
@@ -426,7 +428,9 @@
             setSectionOpen(maintenancePanel, true, false);
         }
         if (pageName !== 'main') stopMonitoring();
-        else if (isSectionOpen('monitoring')) startMonitoring();
+        else if (state.initialized && ($('sub-panel-logs') || isSectionOpen('monitoring'))) {
+            startMonitoring();
+        }
     }
 
     function initConsoleNavigation() {
@@ -831,11 +835,15 @@
         const fish = state.provider === 'fishaudio';
         const voices = customVoiceItems();
         $('custom-voice-provider').textContent = providerMeta().name;
-        $('custom-voice-id-label').textContent = fish ? 'Reference ID' : '音色 ID';
+        const idLabel = $('custom-voice-id-label');
+        if (idLabel) idLabel.textContent = fish ? 'Reference ID' : '音色 ID';
         $('custom-voice-id').placeholder = fish ? '输入 Fish Audio Reference ID' : '输入 voice_type';
-        $('custom-voice-hint').textContent = fish
-            ? '填写 Fish Audio 声音模型的 Reference ID；保存后可从上方列表一键选择。'
-            : '填写火山引擎的 voice_type；保存后可从上方列表一键选择。';
+        const hint = $('custom-voice-hint');
+        if (hint) {
+            hint.textContent = fish
+                ? '填写 Fish Audio 声音模型的 Reference ID；保存后可从上方列表一键选择。'
+                : '填写火山引擎的 voice_type；保存后可从上方列表一键选择。';
+        }
         $('custom-voice-summary').textContent = `${voices.length} 个已保存音色`;
         $('custom-voice-empty').hidden = Boolean(voices.length);
         $('custom-voice-cancel').hidden = !$('custom-voice-save').dataset.editingId;
@@ -1035,7 +1043,7 @@
         }
         state.provider = provider;
         if (changed) restoreCustomVoiceForm(provider);
-        $$('.provider-option, .provider-item').forEach(button => {
+        $$(PROVIDER_BUTTON_SELECTOR).forEach(button => {
             const active = button.dataset.provider === provider;
             button.classList.toggle('is-active', active);
             button.classList.toggle('active', active);
@@ -1043,7 +1051,11 @@
             button.tabIndex = active ? 0 : -1;
         });
         $$('[data-settings-provider]').forEach(panel => {
-            panel.classList.toggle('is-active', panel.dataset.settingsProvider === provider);
+            const active = panel.dataset.settingsProvider === provider;
+            panel.classList.toggle('is-active', active);
+            panel.style.display = active ? '' : 'none';
+            panel.setAttribute('aria-hidden', String(!active));
+            panel.inert = !active;
         });
         renderCurrentCredentialState();
         renderCustomVoiceManager();
@@ -1549,7 +1561,8 @@
 
     function appendActivity(data) {
         const feed = $('activity-feed');
-        $('activity-empty').hidden = true;
+        const empty = $('activity-empty');
+        if (empty) empty.hidden = true;
         const line = document.createElement('div');
         const failed = data.outcome === 'failed' || data.outcome === 'stream_failed'
             || data.status < 200 || data.status >= 300;
@@ -1809,8 +1822,9 @@
         const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
         if (!keys.includes(event.key)) return;
         event.preventDefault();
-        const buttons = $$('.provider-option');
+        const buttons = $$(PROVIDER_BUTTON_SELECTOR);
         const current = buttons.indexOf(event.currentTarget);
+        if (!buttons.length || current < 0) return;
         let next = current;
         if (event.key === 'Home') next = 0;
         else if (event.key === 'End') next = buttons.length - 1;
@@ -1825,7 +1839,7 @@
         $('theme-button').addEventListener('click', toggleTheme);
         if ($('token-button')) $('token-button').addEventListener('click', setAdminToken);
         if ($('maintenance-token-button')) $('maintenance-token-button').addEventListener('click', setAdminToken);
-        $$('.provider-option, .provider-item').forEach(button => {
+        $$(PROVIDER_BUTTON_SELECTOR).forEach(button => {
             button.addEventListener('click', () => applyProvider(button.dataset.provider));
             button.addEventListener('keydown', handleProviderKeydown);
         });
@@ -1848,6 +1862,7 @@
                 if (feed) {
                     feed.replaceChildren();
                     const p = document.createElement('p');
+                    p.id = 'activity-empty';
                     p.className = 'empty-state';
                     p.textContent = '日志已清空，等待新的合成请求…';
                     feed.appendChild(p);
@@ -1972,7 +1987,8 @@
         } else if (configLoadError) {
             setFeedback('settings-feedback', `无法读取服务器设置：${configLoadError}`, 'warning');
         }
-        startMonitoring();
+        state.initialized = true;
+        if ($('sub-panel-logs') || isSectionOpen('monitoring')) startMonitoring();
     }
 
     initialize().catch(error => {

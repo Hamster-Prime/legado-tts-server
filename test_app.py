@@ -1342,7 +1342,7 @@ class TestAPIEndpoints:
         assert self.client.get('/static/app.js').status_code == 200
 
     def test_provider_draft_is_unsaved_until_switching_back(self):
-        """A provider tab is a draft choice; browsing it must not move the saved baseline."""
+        """The redesigned console keeps provider, log, and navigation controls working."""
         try:
             from playwright.sync_api import (
                 Error as PlaywrightError,
@@ -1371,19 +1371,93 @@ class TestAPIEndpoints:
                 pytest.skip(f'Chromium cannot start in this environment: {error}')
             try:
                 page = browser.new_page()
+                page_errors = []
+                page.on('pageerror', lambda error: page_errors.append(str(error)))
                 page.set_content(html)
+                page.evaluate("""
+                    () => {
+                        window.__testEventSources = [];
+                        window.EventSource = class {
+                            constructor(url) {
+                                this.url = url;
+                                this.closed = false;
+                                window.__testEventSources.push(this);
+                                queueMicrotask(() => this.onopen?.());
+                            }
+
+                            close() {
+                                this.closed = true;
+                            }
+                        };
+                    }
+                """)
                 page.add_script_tag(content=javascript)
 
+                page.wait_for_function(
+                    '() => window.__testEventSources.length === 1')
                 expect(page.locator('#save-chip-text')).to_have_text('已保存')
                 page.locator('[data-provider="doubao"]').click()
                 expect(page.locator('#save-chip-text')).to_have_text('有未保存更改')
                 assert page.locator('#save-chip').evaluate(
                     "element => element.classList.contains('is-dirty')")
+                expect(page.locator(
+                    '[data-settings-provider="doubao"]')).to_be_visible()
+                expect(page.locator(
+                    '[data-settings-provider="edge"]')).to_be_hidden()
+                expect(page.locator('#custom-voice-manager')).to_be_visible()
 
                 page.locator('[data-provider="edge"]').click()
                 expect(page.locator('#save-chip-text')).to_have_text('已保存')
                 assert page.locator('#save-chip').evaluate(
                     "element => element.classList.contains('is-saved')")
+                expect(page.locator(
+                    '[data-settings-provider="edge"]')).to_be_visible()
+                expect(page.locator(
+                    '[data-settings-provider="doubao"]')).to_be_hidden()
+
+                edge_button = page.locator('[data-provider="edge"]')
+                edge_button.focus()
+                edge_button.press('ArrowRight')
+                expect(page.locator(
+                    '[data-provider="doubao"]')).to_have_attribute(
+                        'aria-checked', 'true')
+                expect(page.locator('#save-chip-text')).to_have_text('有未保存更改')
+                page.locator('[data-provider="doubao"]').press('Home')
+                expect(edge_button).to_have_attribute('aria-checked', 'true')
+                expect(page.locator('#save-chip-text')).to_have_text('已保存')
+
+                page.locator('#btn-sub-logs').click()
+                page.locator('#clear-logs-btn').click()
+                expect(page.locator('#activity-empty')).to_have_text(
+                    '日志已清空，等待新的合成请求…')
+                page.evaluate("""
+                    eventData => window.__testEventSources.at(-1).onmessage({
+                        data: JSON.stringify(eventData),
+                    })
+                """, {
+                    'type': 'tts_request',
+                    'request_id': 'browser-regression-1',
+                    'ts': '2026-08-19T12:00:00',
+                    'provider': 'edge',
+                    'voice': 'zh-CN-XiaoxiaoNeural',
+                    'chars': 4,
+                    'status': 200,
+                    'outcome': 'success',
+                    'ms': 12,
+                })
+                expect(page.locator('#activity-feed .activity-line')).to_have_count(1)
+                expect(page.locator('#activity-feed .activity-line')).to_contain_text(
+                    'edge')
+
+                page.locator('#console-maintenance-tab').click()
+                assert page.evaluate(
+                    '() => window.__testEventSources[0].closed') is True
+                page.locator('#console-main-tab').click()
+                page.wait_for_function(
+                    '() => window.__testEventSources.length === 2')
+                assert page.evaluate(
+                    '() => window.__testEventSources[1].closed') is False
+                assert page_errors == []
             finally:
                 browser.close()
 

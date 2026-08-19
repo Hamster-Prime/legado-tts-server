@@ -342,6 +342,76 @@ class TestLoadConfig:
         assert persisted['fishaudio_voice'] == 'fish-default'
         assert persisted['voice_favorites'] == ['fish-default']
 
+    def test_legacy_custom_fish_reference_is_migrated_to_named_library(
+            self, monkeypatch, tmp_path):
+        import app as app_module
+
+        path = tmp_path / 'config.json'
+        reference_id = '9a9cf47702da476aa4629e2506d4a857'
+        _write_json(str(path), {
+            'provider': 'fishaudio',
+            'fishaudio_voice': 'custom',
+            'fishaudio_reference_id': f'  {reference_id}  ',
+        })
+        monkeypatch.setattr(app_module, 'CONFIG_FILE', str(path))
+
+        cfg = load_config()
+
+        assert cfg['fishaudio_voice'] == reference_id
+        assert cfg['custom_voices']['fishaudio'] == [{
+            'id': reference_id,
+            'name': '未命名自定义音色',
+        }]
+        persisted = _read_json(str(path), {})
+        assert persisted['fishaudio_voice'] == reference_id
+        assert persisted['custom_voices'] == cfg['custom_voices']
+
+    def test_legacy_custom_ids_are_preserved_when_not_selected(
+            self, monkeypatch, tmp_path):
+        import app as app_module
+
+        path = tmp_path / 'config.json'
+        _write_json(str(path), {
+            'provider': 'edge',
+            'default_voice': 'S_cloned_narrator_01',
+            'fishaudio_voice': 'fish-default',
+            'fishaudio_reference_id': 'fish_reference_01',
+        })
+        monkeypatch.setattr(app_module, 'CONFIG_FILE', str(path))
+
+        cfg = load_config()
+
+        assert cfg['custom_voices']['doubao'] == [{
+            'id': 'S_cloned_narrator_01',
+            'name': '未命名自定义音色',
+        }]
+        assert cfg['custom_voices']['fishaudio'] == [{
+            'id': 'fish_reference_01',
+            'name': '未命名自定义音色',
+        }]
+
+    def test_load_config_returns_deep_copy_of_custom_voice_library(
+            self, monkeypatch, tmp_path):
+        import app as app_module
+
+        path = tmp_path / 'config.json'
+        monkeypatch.setattr(app_module, 'CONFIG_FILE', str(path))
+        cfg = app_module.DEFAULT_CONFIG.copy()
+        cfg['custom_voices'] = {
+            'doubao': [{'id': 'S_voice_01', 'name': '原名称'}],
+            'fishaudio': [],
+        }
+        save_config(cfg)
+
+        first = load_config()
+        first['custom_voices']['doubao'][0]['name'] = '被修改'
+        first['custom_voices']['doubao'].append({'id': 'S_voice_02', 'name': '新增'})
+
+        second = load_config()
+        assert second['custom_voices']['doubao'] == [
+            {'id': 'S_voice_01', 'name': '原名称'},
+        ]
+
 
 class TestAllVoicesUnique:
     """Ensure no voice ID conflicts between providers."""
@@ -939,6 +1009,186 @@ class TestAPIEndpoints:
         assert config['provider'] == 'doubao'
         assert config['default_voice'] == 'S_custom_voice_123'
 
+    def test_custom_voice_crud_persists_names_and_merges_catalogs(self):
+        doubao = {'provider': 'doubao', 'id': 'S_narrator_01', 'name': '温柔旁白'}
+        fish = {
+            'provider': 'fishaudio',
+            'id': '9a9cf47702da476aa4629e2506d4a857',
+            'name': '我的克隆声',
+        }
+
+        assert self.client.post('/api/custom-voices', json=doubao).status_code == 200
+        assert self.client.post('/api/custom-voices', json=fish).status_code == 200
+
+        library = self.client.get('/api/custom-voices').get_json()
+        assert library == {
+            'doubao': [{'id': doubao['id'], 'name': doubao['name']}],
+            'fishaudio': [{'id': fish['id'], 'name': fish['name']}],
+        }
+        for provider, expected in [('doubao', doubao), ('fishaudio', fish)]:
+            catalog = self.client.get(
+                f'/api/voices?provider={provider}').get_json()
+            item = next(voice for voice in catalog if voice['id'] == expected['id'])
+            assert item == {
+                'id': expected['id'],
+                'name': expected['name'],
+                'custom': True,
+            }
+        search = self.client.get('/api/voices/search?q=克隆声').get_json()
+        assert search['count'] == 1
+        assert search['results'][0] == {
+            'id': fish['id'],
+            'name': fish['name'],
+            'provider': 'fishaudio',
+            'custom': True,
+        }
+
+        renamed = {**fish, 'name': '重命名后的克隆声'}
+        assert self.client.post('/api/custom-voices', json=renamed).status_code == 200
+        assert self.client.get('/api/custom-voices').get_json()['fishaudio'] == [{
+            'id': fish['id'], 'name': renamed['name'],
+        }]
+
+        deleted = self.client.delete('/api/custom-voices', json={
+            'provider': 'doubao', 'id': doubao['id'],
+        })
+        assert deleted.status_code == 200
+        assert deleted.get_json()['custom_voices']['doubao'] == []
+
+    @pytest.mark.parametrize('payload', [
+        None,
+        {'provider': 'edge', 'id': 'voice', 'name': '名称'},
+        {'provider': 'doubao', 'id': '', 'name': '名称'},
+        {'provider': 'doubao', 'id': 'bad voice', 'name': '名称'},
+        {'provider': 'doubao', 'id': 'S_voice', 'name': ''},
+        {'provider': 'doubao', 'id': 'S_voice', 'name': 'n' * 81},
+        {'provider': 'doubao', 'id': 'zh-CN-XiaoxiaoNeural', 'name': '跨服务商'},
+        {'provider': 'fishaudio', 'id': 'fish-default', 'name': '内置音色'},
+        {'provider': 'fishaudio', 'id': 'reference', 'name': '名称', 'extra': True},
+    ])
+    def test_custom_voice_post_rejects_invalid_entries(self, payload):
+        response = self.client.post('/api/custom-voices', json=payload)
+        assert response.status_code == 400
+        assert self.client.get('/api/custom-voices').get_json() == {
+            'doubao': [], 'fishaudio': [],
+        }
+
+    def test_custom_voice_delete_rejects_saved_active_voice(self):
+        entry = {'provider': 'doubao', 'id': 'S_active_voice', 'name': '当前音色'}
+        assert self.client.post('/api/custom-voices', json=entry).status_code == 200
+        saved = self.client.post('/api/config', json={
+            'provider': 'doubao',
+            'default_voice': entry['id'],
+        })
+        assert saved.status_code == 200
+
+        deleted = self.client.delete('/api/custom-voices', json={
+            'provider': 'doubao', 'id': entry['id'],
+        })
+
+        assert deleted.status_code == 409
+        assert self.client.get('/api/custom-voices').get_json()['doubao'] == [{
+            'id': entry['id'], 'name': entry['name'],
+        }]
+
+    def test_delete_migrated_fish_voice_does_not_resurrect(self):
+        import app as app_module
+        reference_id = 'legacy_reference_delete_01'
+        config = app_module.DEFAULT_CONFIG.copy()
+        config.update({
+            'fishaudio_voice': 'fish-default',
+            'fishaudio_reference_id': reference_id,
+        })
+        app_module.save_config(config)
+        assert app_module.load_config()['custom_voices']['fishaudio'] == [{
+            'id': reference_id, 'name': '未命名自定义音色',
+        }]
+
+        deleted = self.client.delete('/api/custom-voices', json={
+            'provider': 'fishaudio', 'id': reference_id,
+        })
+
+        assert deleted.status_code == 200
+        assert deleted.get_json()['custom_voices']['fishaudio'] == []
+        reloaded = app_module.load_config()
+        assert reloaded['custom_voices']['fishaudio'] == []
+        assert reloaded['fishaudio_reference_id'] == ''
+
+    def test_cross_site_catalog_does_not_expose_custom_voices_without_token(self):
+        voice = {
+            'provider': 'fishaudio',
+            'id': 'private_cross_site_reference',
+            'name': '仅管理页可见',
+        }
+        assert self.client.post('/api/custom-voices', json=voice).status_code == 200
+
+        direct = self.client.get('/api/voices?provider=fishaudio').get_json()
+        cross_site = self.client.get('/api/voices?provider=fishaudio', headers={
+            'Origin': 'https://example.invalid',
+            'Sec-Fetch-Site': 'cross-site',
+        }).get_json()
+
+        assert voice['id'] in {item['id'] for item in direct}
+        assert voice['id'] not in {item['id'] for item in cross_site}
+
+    def test_saved_fish_custom_voice_sends_its_own_reference_id(self, monkeypatch):
+        import app as app_module
+        captured = {}
+        reference_id = '9a9cf47702da476aa4629e2506d4a857'
+
+        class Response:
+            status_code = 200
+            content = b'custom-fish-audio'
+            text = ''
+
+        def fake_post(url, **kwargs):
+            captured.update(kwargs)
+            return Response()
+
+        monkeypatch.setattr(app_module._http_session, 'post', fake_post)
+        assert self.client.post('/api/custom-voices', json={
+            'provider': 'fishaudio', 'id': reference_id, 'name': 'Fish 旁白',
+        }).status_code == 200
+        assert self.client.post('/api/config', json={
+            'provider': 'fishaudio',
+            'fishaudio_api_key': 'fish-secret',
+            'fishaudio_voice': reference_id,
+        }).status_code == 200
+
+        result = self.client.post('/speech/stream', json={
+            'text': '实际 Reference ID 测试',
+            'voice': reference_id,
+            'provider': 'fishaudio',
+        })
+
+        assert result.status_code == 200
+        assert result.data == b'custom-fish-audio'
+        assert result.headers['X-TTS-Voice'] == reference_id
+        assert captured['json']['reference_id'] == reference_id
+
+    def test_config_get_masks_key_but_returns_custom_voice_metadata(self):
+        voice = {'provider': 'fishaudio', 'id': 'reference_01', 'name': '书架旁白'}
+        assert self.client.post('/api/custom-voices', json=voice).status_code == 200
+        assert self.client.post('/api/config', json={
+            'fishaudio_api_key': 'private-key',
+        }).status_code == 200
+
+        data = self.client.get('/api/config').get_json()
+
+        assert data['fishaudio_api_key'] == '***'
+        assert data['configured_fields']['fishaudio_api_key'] is True
+        assert data['custom_voices']['fishaudio'] == [{
+            'id': voice['id'], 'name': voice['name'],
+        }]
+
+    def test_index_places_custom_voice_fields_in_voice_picker(self):
+        html = self.client.get('/').get_data(as_text=True)
+
+        assert 'id="custom-voice-name"' in html
+        assert 'id="custom-voice-id"' in html
+        assert 'id="custom-voice-save"' in html
+        assert 'id="fishaudio-reference-id"' not in html
+
     def test_config_post_rejects_edge_voice_for_doubao(self):
         r = self.client.post('/api/config', json={
             'provider': 'doubao',
@@ -1307,7 +1557,8 @@ class TestAPIEndpoints:
         r = self.client.get('/api/voices?provider=fishaudio')
         assert r.status_code == 200
         data = r.get_json()
-        assert len(data) == len(FISH_AUDIO_VOICES)
+        assert [voice['id'] for voice in data] == ['fish-default']
+        assert all(voice['id'] != 'custom' for voice in data)
 
     def test_config_get_has_fishaudio_status(self):
         r = self.client.get('/api/config')
@@ -1476,6 +1727,89 @@ class TestAdminAuth:
         with self.app.test_request_context('/api/events?token=test-secret-token'):
             assert app_module._extract_bearer_token() == 'test-secret-token'
 
+    def test_custom_voice_api_and_catalog_require_admin_for_private_entries(self):
+        import app as app_module
+        headers = self._auth_headers()
+        reference_id = 'private-reference-01'
+
+        assert self.client.post('/api/custom-voices', json={
+            'provider': 'fishaudio', 'id': reference_id, 'name': '私有音色',
+        }).status_code == 401
+        created = self.client.post('/api/custom-voices', headers=headers, json={
+            'provider': 'fishaudio', 'id': reference_id, 'name': '私有音色',
+        })
+        assert created.status_code == 200
+
+        anonymous_ids = {
+            voice['id'] for voice in
+            self.client.get('/api/voices?provider=fishaudio').get_json()
+        }
+        authenticated_ids = {
+            voice['id'] for voice in self.client.get(
+                '/api/voices?provider=fishaudio', headers=headers).get_json()
+        }
+        assert reference_id not in anonymous_ids
+        assert reference_id in authenticated_ids
+        assert self.client.get('/api/custom-voices').status_code == 401
+        assert self.client.get(
+            '/api/custom-voices', headers=headers).get_json()['fishaudio'] == [{
+                'id': reference_id, 'name': '私有音色',
+            }]
+
+        config = app_module.load_config()
+        config.update({
+            'provider': 'fishaudio',
+            'fishaudio_voice': reference_id,
+            'fishaudio_api_key': 'private-key',
+        })
+        app_module.save_config(config)
+        page = self.client.get('/').get_data(as_text=True)
+        assert reference_id not in page
+        assert 'private-key' not in page
+
+    def test_anonymous_legado_default_hides_active_custom_voice(self):
+        import app as app_module
+        headers = self._auth_headers()
+        reference_id = 'private-legado-reference'
+        assert self.client.post('/api/custom-voices', headers=headers, json={
+            'provider': 'fishaudio', 'id': reference_id, 'name': '私有订阅音色',
+        }).status_code == 200
+        config = app_module.load_config()
+        config.update({
+            'provider': 'fishaudio',
+            'fishaudio_voice': reference_id,
+        })
+        app_module.save_config(config)
+
+        anonymous = self.client.get(
+            '/api/legado/config?provider=fishaudio').get_json()
+        authenticated = self.client.get(
+            '/api/legado/config?provider=fishaudio',
+            headers=headers,
+        ).get_json()
+
+        assert reference_id not in anonymous['url']
+        assert anonymous['name'] == 'Fish Audio - 默认音色'
+        assert reference_id in authenticated['url']
+        assert authenticated['name'] == 'Fish Audio - 私有订阅音色'
+
+    def test_anonymous_stats_hide_custom_voice_ids_but_keep_totals(self):
+        import app as app_module
+        headers = self._auth_headers()
+        reference_id = 'private-stats-reference'
+        assert self.client.post('/api/custom-voices', headers=headers, json={
+            'provider': 'fishaudio', 'id': reference_id, 'name': '私有统计音色',
+        }).status_code == 200
+        app_module.update_stats(12, 'fishaudio', voice=reference_id)
+
+        anonymous = self.client.get('/api/stats').get_json()['fishaudio']
+        authenticated = self.client.get(
+            '/api/stats', headers=headers).get_json()['fishaudio']
+
+        assert anonymous['total_chars'] == 12
+        assert reference_id not in anonymous.get('voice_stats', {})
+        assert authenticated['voice_stats'][reference_id]['chars'] == 12
+
     def test_protected_home_does_not_embed_fish_reference(self):
         import app as app_module
         config = app_module.DEFAULT_CONFIG.copy()
@@ -1622,6 +1956,30 @@ class TestLegadoEndpoints:
 
         assert r.status_code == 200
         assert r.get_json()['name'] == f'火山引擎 - {custom_voice}'
+
+    @pytest.mark.parametrize(('provider', 'voice_id', 'voice_name'), [
+        ('doubao', 'S_saved_narrator', '收藏的火山旁白'),
+        ('fishaudio', 'fish_reference_saved_01', '收藏的 Fish 旁白'),
+    ])
+    def test_legado_config_uses_saved_custom_voice_name(
+            self, provider, voice_id, voice_name):
+        created = self.client.post('/api/custom-voices', json={
+            'provider': provider, 'id': voice_id, 'name': voice_name,
+        })
+        assert created.status_code == 200
+
+        response = self.client.get(
+            f'/api/legado/config?provider={provider}&voice={voice_id}')
+
+        assert response.status_code == 200
+        config = response.get_json()
+        assert config['name'] == (
+            ('火山引擎' if provider == 'doubao' else 'Fish Audio')
+            + f' - {voice_name}'
+        )
+        request_config = json.loads(config['url'].split(',', 1)[1])
+        assert request_config['body']['voice'] == voice_id
+        assert request_config['body']['provider'] == provider
 
     def test_legado_config_is_pretty_utf8_json(self):
         r = self.client.get(
@@ -1970,6 +2328,51 @@ class TestConfigExportImport:
         config = load_config()
         assert config['provider'] == 'tencent'
         assert config['tencent_voice'] == '501003'
+
+    def test_custom_voice_library_roundtrips_through_export_import(self):
+        import app as app_module
+        expected = {
+            'doubao': [
+                {'id': 'S_export_01', 'name': '导出火山一'},
+                {'id': 'S_export_02', 'name': '导出火山二'},
+            ],
+            'fishaudio': [
+                {'id': 'reference_export_01', 'name': '导出 Fish'},
+            ],
+        }
+        for provider, voices in expected.items():
+            for voice in voices:
+                result = self.client.post('/api/custom-voices', json={
+                    'provider': provider, **voice,
+                })
+                assert result.status_code == 200
+        self.client.post('/api/config', json={'doubao_api_key': 'secret-key'})
+
+        exported = self.client.get('/api/config/export').get_json()
+        assert exported['custom_voices'] == expected
+        assert exported['doubao_api_key'] == 'secret-key'
+
+        app_module.save_config(app_module.DEFAULT_CONFIG)
+        imported = self.client.post('/api/config/import', json=exported)
+
+        assert imported.status_code == 200
+        restored = load_config()
+        assert restored['custom_voices'] == expected
+        assert restored['doubao_api_key'] == 'secret-key'
+
+    @pytest.mark.parametrize('custom_voices', [
+        [],
+        {'doubao': 'not-a-list', 'fishaudio': []},
+        {'doubao': [{'id': 'S_one', 'name': '一'}, {'id': 'S_one', 'name': '二'}],
+         'fishaudio': []},
+        {'doubao': [{'id': 'S_one', 'name': ''}], 'fishaudio': []},
+        {'doubao': [], 'fishaudio': [], 'edge': []},
+    ])
+    def test_import_rejects_invalid_custom_voice_library(self, custom_voices):
+        response = self.client.post('/api/config/import', json={
+            'provider': 'edge', 'custom_voices': custom_voices,
+        })
+        assert response.status_code == 400
 
 
 class TestPronunciationDict:

@@ -23,6 +23,7 @@
         xiaomi: ['xiaomi_api_key'],
         fishaudio: ['fishaudio_api_key'],
     };
+    const CUSTOM_VOICE_PROVIDERS = new Set(['doubao', 'fishaudio']);
     const CUSTOM_VOICE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
     const FALLBACK_DEFAULTS = Object.freeze({
         enabled: true,
@@ -87,8 +88,6 @@
 
     const invalidInitialProvider = Boolean(INITIAL.provider && !hasOwn(PROVIDERS, INITIAL.provider));
     const initialProvider = invalidInitialProvider ? 'edge' : (INITIAL.provider || 'edge');
-    const initialDoubaoCustomVoice = INITIAL.doubaoVoiceIsCustom
-        ? String((INITIAL.voices && INITIAL.voices.doubao) || '') : '';
     const state = {
         provider: initialProvider,
         savedProvider: initialProvider,
@@ -103,16 +102,15 @@
         configuredFields: INITIAL.configuredFields || {},
         voiceCatalogs: {},
         voiceTouched: new Set(),
+        customVoiceDrafts: {},
         voiceLoading: false,
-        doubaoVoiceMode: initialDoubaoCustomVoice ? 'custom' : 'preset',
-        doubaoCustomVoice: initialDoubaoCustomVoice,
-        doubaoPresetVoice: 'zh_female_cancan_uranus_bigtts',
+        customVoiceBusy: false,
         stats: {},
         baselineCore: '',
         dirty: false,
         needsProviderRepair: invalidInitialProvider,
         fallbackVoiceLoading: false,
-        voiceRequestId: 0,
+        voiceRequestIds: {},
         configRequestId: 0,
         legadoConfigText: '',
         authPrompted: false,
@@ -126,7 +124,6 @@
         previewRequestId: 0,
         testRequestId: 0,
         compareRequestId: 0,
-        legadoUpdateTimer: null,
     };
 
     const $ = id => document.getElementById(id);
@@ -412,9 +409,13 @@
         return Boolean(credentialValue(field) || state.configuredFields[field]);
     }
 
-    function isPotentialDoubaoVoiceId(value) {
+    function isPotentialCustomVoiceId(provider, value) {
         const voice = String(value || '').trim();
         if (!CUSTOM_VOICE_ID_PATTERN.test(voice)) return false;
+        if (provider === 'fishaudio') {
+            return voice !== 'custom' && voice !== 'fish-default';
+        }
+        if (provider !== 'doubao') return false;
         if (voice.includes('Neural') && voice.includes('-')) return false;
         if (/^\d+$/.test(voice)) return false;
         if (voice === 'default_zh' || voice === 'default_eh' || voice.startsWith('mimo_')) return false;
@@ -422,14 +423,17 @@
         return true;
     }
 
-    function isDoubaoCustomMode(provider = state.provider) {
-        return provider === 'doubao' && state.doubaoVoiceMode === 'custom';
+    function supportsCustomVoices(provider = state.provider) {
+        return CUSTOM_VOICE_PROVIDERS.has(provider);
+    }
+
+    function customVoiceItems(provider = state.provider) {
+        return (state.voiceCatalogs[provider] || []).filter(voice => voice.custom === true);
     }
 
     function hasUsableCurrentVoice() {
         const voice = currentVoiceId();
         if (!voice) return false;
-        if (isDoubaoCustomMode()) return isPotentialDoubaoVoiceId(voice);
         return (state.voiceCatalogs[state.provider] || []).some(item => item.id === voice);
     }
 
@@ -582,21 +586,9 @@
         const fallbackError = validateFallbackDraft();
         if (fallbackError) return fallbackError;
         const voices = state.voiceCatalogs[provider];
-        if (provider === 'doubao' && isDoubaoCustomMode(provider)) {
-            const customVoice = state.selectedVoices.doubao || '';
-            if (!customVoice) return '请输入自定义音色 ID。';
-            if (!isPotentialDoubaoVoiceId(customVoice)) {
-                return '自定义音色 ID 仅支持字母、数字、点、下划线、连字符和冒号，最长 128 个字符。';
-            }
-        } else {
-            if (state.voiceLoading || !voices) return '请等待当前服务商的音色列表加载完成。';
-            if (!voices.some(voice => voice.id === state.selectedVoices[provider])) {
-                return '当前音色无效，请重新选择。';
-            }
-        }
-        if (provider === 'fishaudio' && state.selectedVoices.fishaudio === 'custom'
-            && !$('fishaudio-reference-id').value.trim()) {
-            return '自定义 Fish Audio 音色需要填写 Reference ID。';
+        if (state.voiceLoading || !voices) return '请等待当前服务商的音色列表加载完成。';
+        if (!voices.some(voice => voice.id === state.selectedVoices[provider])) {
+            return '当前音色无效，请重新选择。';
         }
         const missing = (PROVIDER_CREDENTIALS[provider] || []).filter(field => !hasCredential(field));
         if (!missing.length) return '';
@@ -648,7 +640,7 @@
         $('save-state-description').textContent = state.dirty
             ? '可以先测试当前草稿，确认后再保存到服务器。'
             : '切换服务商和音色不会立即影响服务器。';
-        const waitingForPrimaryCatalog = state.voiceLoading && !isDoubaoCustomMode();
+        const waitingForPrimaryCatalog = state.voiceLoading;
         const waitingForFallbackCatalog = state.fallbackVoiceLoading && Boolean($('fallback-enabled') && $('fallback-enabled').checked);
         const waitingForVoiceCatalog = waitingForPrimaryCatalog || waitingForFallbackCatalog;
         const saveButton = $('save-button');
@@ -706,9 +698,6 @@
     function voiceName(voiceId, provider = state.provider) {
         const list = state.voiceCatalogs[provider] || [];
         const voice = list.find(item => item.id === voiceId);
-        if (!voice && provider === 'doubao' && voiceId === state.doubaoCustomVoice) {
-            return `自定义 · ${voiceId}`;
-        }
         return voice ? voice.name : voiceId || '未选择';
     }
 
@@ -719,61 +708,127 @@
         $('stats-provider-title').textContent = `${providerMeta().name} 使用量`;
     }
 
-    function updateFishReferenceState() {
-        const input = $('fishaudio-reference-id');
-        if (!input) return;
-        const customSelected = state.selectedVoices.fishaudio === 'custom';
-        input.disabled = !customSelected;
-        input.title = customSelected ? '' : '选择 Fish 自定义音色后可编辑';
+    function stashCustomVoiceForm(provider = state.provider) {
+        if (!supportsCustomVoices(provider)) return;
+        const draft = {
+            name: $('custom-voice-name').value,
+            id: $('custom-voice-id').value,
+            editingId: $('custom-voice-save').dataset.editingId || '',
+        };
+        if (draft.name || draft.id || draft.editingId) state.customVoiceDrafts[provider] = draft;
+        else delete state.customVoiceDrafts[provider];
     }
 
-    function updateDoubaoVoiceModeUI() {
-        const isDoubao = state.provider === 'doubao';
-        const customMode = isDoubaoCustomMode();
-        $('doubao-voice-mode').hidden = !isDoubao;
-        $('voice-preset-fields').hidden = customMode;
-        $('doubao-custom-voice-field').hidden = !customMode;
-        $$('[data-voice-mode]').forEach(button => {
-            const active = button.dataset.voiceMode === state.doubaoVoiceMode;
-            button.classList.toggle('is-active', active);
-            button.setAttribute('aria-checked', String(active));
-            button.tabIndex = active ? 0 : -1;
+    function restoreCustomVoiceForm(provider = state.provider) {
+        const draft = state.customVoiceDrafts[provider] || {};
+        $('custom-voice-name').value = draft.name || '';
+        $('custom-voice-id').value = draft.id || '';
+        if (draft.editingId) $('custom-voice-save').dataset.editingId = draft.editingId;
+        else delete $('custom-voice-save').dataset.editingId;
+        $('custom-voice-save').textContent = draft.editingId ? '保存音色' : '添加音色';
+        setFeedback('custom-voice-feedback');
+    }
+
+    function resetCustomVoiceForm(provider = state.provider) {
+        delete state.customVoiceDrafts[provider];
+        if (provider !== state.provider) return;
+        $('custom-voice-name').value = '';
+        $('custom-voice-id').value = '';
+        $('custom-voice-id').disabled = false;
+        delete $('custom-voice-save').dataset.editingId;
+        $('custom-voice-save').textContent = '添加音色';
+        setFeedback('custom-voice-feedback');
+    }
+
+    function editCustomVoice(voice) {
+        $('custom-voice-name').value = voice.name;
+        $('custom-voice-id').value = voice.id;
+        $('custom-voice-id').disabled = true;
+        $('custom-voice-save').dataset.editingId = voice.id;
+        $('custom-voice-save').textContent = '保存音色';
+        setFeedback('custom-voice-feedback', `正在编辑“${voice.name}”。`, 'info');
+        renderCustomVoiceManager();
+        $('custom-voice-name').focus();
+    }
+
+    function renderCustomVoiceManager() {
+        const manager = $('custom-voice-manager');
+        const supported = supportsCustomVoices();
+        manager.hidden = !supported;
+        if (!supported) return;
+
+        const fish = state.provider === 'fishaudio';
+        const voices = customVoiceItems();
+        $('custom-voice-provider').textContent = providerMeta().name;
+        $('custom-voice-id-label').textContent = fish ? 'Reference ID' : '音色 ID';
+        $('custom-voice-id').placeholder = fish ? '输入 Fish Audio Reference ID' : '输入 voice_type';
+        $('custom-voice-hint').textContent = fish
+            ? '填写 Fish Audio 声音模型的 Reference ID；保存后可从上方列表一键选择。'
+            : '填写火山引擎的 voice_type；保存后可从上方列表一键选择。';
+        $('custom-voice-summary').textContent = `${voices.length} 个已保存音色`;
+        $('custom-voice-empty').hidden = Boolean(voices.length);
+        $('custom-voice-cancel').hidden = !$('custom-voice-save').dataset.editingId;
+        $('custom-voice-name').disabled = state.customVoiceBusy;
+        $('custom-voice-id').disabled = state.customVoiceBusy
+            || Boolean($('custom-voice-save').dataset.editingId);
+
+        const list = $('custom-voice-list');
+        list.replaceChildren();
+        voices.forEach(voice => {
+            const row = document.createElement('div');
+            row.className = `custom-voice-item${voice.id === currentVoiceId() ? ' is-current' : ''}`;
+
+            const copy = document.createElement('span');
+            copy.className = 'custom-voice-copy';
+            const name = document.createElement('strong');
+            name.textContent = voice.name;
+            const id = document.createElement('small');
+            id.textContent = voice.id;
+            copy.append(name, id);
+
+            const actions = document.createElement('span');
+            actions.className = 'custom-voice-actions';
+            const use = document.createElement('button');
+            use.className = 'button ghost custom-voice-use';
+            use.type = 'button';
+            use.textContent = voice.id === currentVoiceId() ? '已选择' : '选择';
+            use.disabled = state.customVoiceBusy || voice.id === currentVoiceId();
+            use.addEventListener('click', () => selectVoice(voice.id));
+
+            const edit = document.createElement('button');
+            edit.className = 'custom-voice-icon';
+            edit.type = 'button';
+            edit.textContent = '✎';
+            edit.title = `编辑 ${voice.name}`;
+            edit.setAttribute('aria-label', `编辑音色 ${voice.name}`);
+            edit.disabled = state.customVoiceBusy;
+            edit.addEventListener('click', () => editCustomVoice(voice));
+
+            const remove = document.createElement('button');
+            remove.className = 'custom-voice-icon is-danger';
+            remove.type = 'button';
+            remove.textContent = '×';
+            remove.title = `删除 ${voice.name}`;
+            remove.setAttribute('aria-label', `删除音色 ${voice.name}`);
+            remove.disabled = state.customVoiceBusy;
+            remove.addEventListener('click', () => deleteCustomVoice(voice));
+
+            actions.append(use, edit, remove);
+            row.append(copy, actions);
+            list.appendChild(row);
         });
-        const input = $('doubao-custom-voice');
-        if (document.activeElement !== input && input.value !== state.doubaoCustomVoice) {
-            input.value = state.doubaoCustomVoice;
-        }
     }
 
-    function setDoubaoVoiceMode(mode, focusInput = true) {
-        if (state.provider !== 'doubao' || !['preset', 'custom'].includes(mode)
-            || state.doubaoVoiceMode === mode) return;
+    function selectVoice(voiceId) {
+        const list = state.voiceCatalogs[state.provider] || [];
+        if (!list.some(voice => voice.id === voiceId)) return;
         clearSynthesisOutputs();
-        if (state.legadoUpdateTimer) window.clearTimeout(state.legadoUpdateTimer);
-        state.legadoUpdateTimer = null;
-        const voices = state.voiceCatalogs.doubao || [];
-        if (mode === 'custom') {
-            const current = state.selectedVoices.doubao;
-            if (voices.some(voice => voice.id === current)) state.doubaoPresetVoice = current;
-            state.doubaoVoiceMode = 'custom';
-            state.selectedVoices.doubao = state.doubaoCustomVoice.trim();
-        } else {
-            state.doubaoCustomVoice = $('doubao-custom-voice').value.trim();
-            state.doubaoVoiceMode = 'preset';
-            const fallback = voices.some(voice => voice.id === state.doubaoPresetVoice)
-                ? state.doubaoPresetVoice : ((voices[0] && voices[0].id) || '');
-            state.selectedVoices.doubao = fallback;
-        }
-        state.voiceTouched.add('doubao');
+        state.selectedVoices[state.provider] = voiceId;
+        state.voiceTouched.add(state.provider);
         $('voice-search').value = '';
         renderVoiceSelect();
         updateDirtyState();
         updateLegadoConfig();
-        if (mode === 'custom' && focusInput) {
-            window.setTimeout(() => {
-                if (isDoubaoCustomMode()) $('doubao-custom-voice').focus();
-            }, 0);
-        }
     }
 
     function invalidateLegadoConfig(message = '正在生成配置…') {
@@ -785,31 +840,129 @@
         setFeedback('integration-feedback');
     }
 
-    function updateDoubaoCustomVoice() {
-        if (!isDoubaoCustomMode()) return;
-        clearSynthesisOutputs();
-        state.doubaoCustomVoice = $('doubao-custom-voice').value.trim();
-        state.selectedVoices.doubao = state.doubaoCustomVoice;
-        state.voiceTouched.add('doubao');
-        renderVoiceSelect();
-        updateDirtyState();
-        if (state.legadoUpdateTimer) window.clearTimeout(state.legadoUpdateTimer);
-        state.legadoUpdateTimer = null;
-        const valid = isPotentialDoubaoVoiceId(state.doubaoCustomVoice);
-        invalidateLegadoConfig(valid ? '正在生成配置…' : '请先填写有效的音色 ID。');
-        if (valid) {
-            state.legadoUpdateTimer = window.setTimeout(() => {
-                state.legadoUpdateTimer = null;
+    function acceptVoiceCatalog(provider, voices) {
+        if (!Array.isArray(voices)) throw new Error('音色列表格式不正确');
+        const requestId = (state.voiceRequestIds[provider] || 0) + 1;
+        state.voiceRequestIds[provider] = requestId;
+        state.voiceCatalogs[provider] = voices;
+        if (provider === state.provider) {
+            state.voiceLoading = false;
+            renderVoiceSelect();
+        }
+    }
+
+    async function saveCustomVoice() {
+        if (state.customVoiceBusy) return;
+        const provider = state.provider;
+        const name = $('custom-voice-name').value.trim();
+        const voiceId = $('custom-voice-id').value.trim();
+        const editingId = $('custom-voice-save').dataset.editingId || '';
+        if (!supportsCustomVoices(provider)) return;
+        if (!name) {
+            setFeedback('custom-voice-feedback', '请填写音色名称。', 'warning');
+            return;
+        }
+        if (name.length > 80) {
+            setFeedback('custom-voice-feedback', '音色名称不能超过 80 个字符。', 'warning');
+            return;
+        }
+        if (!isPotentialCustomVoiceId(provider, voiceId)) {
+            setFeedback('custom-voice-feedback', '音色 ID 仅支持字母、数字、点、下划线、连字符和冒号，最长 128 个字符。', 'warning');
+            return;
+        }
+        const catalogMatch = (state.voiceCatalogs[provider] || []).find(voice => voice.id === voiceId);
+        if (catalogMatch && catalogMatch.custom !== true) {
+            setFeedback('custom-voice-feedback', '该 ID 已存在于内置音色中，请直接选择。', 'warning');
+            return;
+        }
+
+        const button = $('custom-voice-save');
+        state.customVoiceBusy = true;
+        setButtonBusy(button, true, '保存中');
+        renderCustomVoiceManager();
+        setFeedback('custom-voice-feedback', '正在保存到服务器…', 'info');
+        try {
+            const data = await jsonRequest('/api/custom-voices', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({provider, id: voiceId, name}),
+            });
+            if (!editingId) {
+                state.selectedVoices[provider] = voiceId;
+                state.voiceTouched.add(provider);
+            }
+            acceptVoiceCatalog(provider, data.voices);
+            resetCustomVoiceForm(provider);
+            updateDirtyState();
+            if (provider === state.provider) {
+                updateSetupSummary();
                 updateLegadoConfig();
-            }, 250);
+                setFeedback(
+                    'custom-voice-feedback',
+                    editingId
+                        ? '音色名称已保存到服务器。'
+                        : '音色已保存到服务器并选中；点击“保存更改”后应用当前选择。',
+                    'success',
+                );
+            }
+            notify('自定义音色已保存', 'success');
+        } catch (error) {
+            if (provider === state.provider) {
+                setFeedback('custom-voice-feedback', `音色保存失败：${error.message}`, 'error');
+            }
+            notify(`${providerMeta(provider).name}音色保存失败`, 'error');
+        } finally {
+            state.customVoiceBusy = false;
+            setButtonBusy(button, false);
+            delete button.dataset.idleText;
+            button.textContent = button.dataset.editingId ? '保存音色' : '添加音色';
+            renderCustomVoiceManager();
+        }
+    }
+
+    async function deleteCustomVoice(voice) {
+        if (state.customVoiceBusy) return;
+        const provider = state.provider;
+        if (voice.id === currentVoiceId()) {
+            setFeedback('custom-voice-feedback', '请先选择并保存另一个音色，再删除当前音色。', 'warning');
+            return;
+        }
+        if (!window.confirm(`确定删除自定义音色“${voice.name}”吗？`)) return;
+        state.customVoiceBusy = true;
+        renderCustomVoiceManager();
+        setFeedback('custom-voice-feedback', '正在从服务器删除音色…', 'info');
+        try {
+            const data = await jsonRequest('/api/custom-voices', {
+                method: 'DELETE',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({provider, id: voice.id}),
+            });
+            acceptVoiceCatalog(provider, data.voices);
+            if (provider === state.provider) {
+                setFeedback('custom-voice-feedback', '自定义音色已删除。', 'success');
+            }
+            notify('自定义音色已删除', 'success');
+        } catch (error) {
+            if (provider === state.provider) {
+                setFeedback('custom-voice-feedback', `删除失败：${error.message}`, 'error');
+            }
+            notify(`${providerMeta(provider).name}音色删除失败`, 'error');
+        } finally {
+            state.customVoiceBusy = false;
+            renderCustomVoiceManager();
         }
     }
 
     function applyProvider(provider, markDirty = true) {
         if (!hasOwn(PROVIDERS, provider)) return;
+        const previousProvider = state.provider;
         const changed = state.provider !== provider;
+        if (changed) {
+            stashCustomVoiceForm(previousProvider);
+            clearSynthesisOutputs();
+        }
         state.provider = provider;
-        if (changed) clearSynthesisOutputs();
+        if (changed) restoreCustomVoiceForm(provider);
         $$('.provider-option').forEach(button => {
             const active = button.dataset.provider === provider;
             button.classList.toggle('is-active', active);
@@ -820,8 +973,7 @@
             panel.classList.toggle('is-active', panel.dataset.settingsProvider === provider);
         });
         renderCurrentCredentialState();
-        updateFishReferenceState();
-        updateDoubaoVoiceModeUI();
+        renderCustomVoiceManager();
         updateSetupSummary();
         renderStats();
         loadVoices(provider);
@@ -835,7 +987,6 @@
         const list = state.voiceCatalogs[state.provider] || [];
         const query = $('voice-search').value.trim().toLowerCase();
         const selectedId = currentVoiceId();
-        const customMode = isDoubaoCustomMode();
         const matches = list.filter(voice => !query || voice.name.toLowerCase().includes(query) || voice.id.toLowerCase().includes(query));
         const selectedVoice = list.find(voice => voice.id === selectedId);
         const options = selectedVoice && !matches.some(voice => voice.id === selectedId)
@@ -859,23 +1010,14 @@
             option.selected = true;
             select.appendChild(option);
         }
-        select.disabled = customMode || !list.length;
+        select.disabled = !list.length;
         const usableVoice = hasUsableCurrentVoice();
         if (!$('preview-button').hasAttribute('aria-busy')) $('preview-button').disabled = !usableVoice;
         $('all-voices-button').disabled = !list.length;
-        $('voice-count').textContent = customMode
-            ? (usableVoice ? '自定义音色' : '等待输入音色 ID')
-            : (query ? `${matches.length} / ${list.length} 个音色` : `${list.length} 个音色`);
-        fillCompareSelects(comparisonVoiceList(list));
-        updateFishReferenceState();
-        updateDoubaoVoiceModeUI();
+        $('voice-count').textContent = query ? `${matches.length} / ${list.length} 个音色` : `${list.length} 个音色`;
+        fillCompareSelects(list);
+        renderCustomVoiceManager();
         updateSetupSummary();
-    }
-
-    function comparisonVoiceList(list) {
-        if (!isDoubaoCustomMode() || !isPotentialDoubaoVoiceId(state.doubaoCustomVoice)
-            || list.some(voice => voice.id === state.doubaoCustomVoice)) return list;
-        return [{id: state.doubaoCustomVoice, name: '自定义音色'}, ...list];
     }
 
     function fillCompareSelects(list) {
@@ -902,7 +1044,8 @@
     }
 
     async function loadVoices(provider) {
-        const requestId = ++state.voiceRequestId;
+        const requestId = (state.voiceRequestIds[provider] || 0) + 1;
+        state.voiceRequestIds[provider] = requestId;
         const cached = state.voiceCatalogs[provider];
         if (cached) {
             if (provider === state.provider) {
@@ -936,26 +1079,13 @@
             const response = await expectOk(await api(`/api/voices?provider=${encodeURIComponent(provider)}`));
             const voices = await response.json();
             if (!Array.isArray(voices)) throw new Error('音色列表格式不正确');
-            if (requestId !== state.voiceRequestId || provider !== state.provider) return;
+            if (requestId !== state.voiceRequestIds[provider] || provider !== state.provider) return;
             state.voiceLoading = false;
             state.voiceCatalogs[provider] = voices;
             const selectedVoice = state.selectedVoices[provider];
             const selectedPreset = voices.find(voice => voice.id === selectedVoice);
-            if (provider === 'doubao' && state.doubaoVoiceMode === 'custom') {
-                state.doubaoCustomVoice = $('doubao-custom-voice').value.trim();
-                state.selectedVoices.doubao = state.doubaoCustomVoice;
-            } else if (provider === 'doubao' && selectedPreset) {
-                state.doubaoVoiceMode = 'preset';
-                state.doubaoPresetVoice = selectedPreset.id;
-            } else if (provider === 'doubao' && isPotentialDoubaoVoiceId(selectedVoice)) {
-                state.doubaoVoiceMode = 'custom';
-                state.doubaoCustomVoice = selectedVoice;
-            } else if (!selectedPreset && voices.length) {
+            if (!selectedPreset && voices.length) {
                 state.selectedVoices[provider] = voices[0].id;
-                if (provider === 'doubao') {
-                    state.doubaoVoiceMode = 'preset';
-                    state.doubaoPresetVoice = voices[0].id;
-                }
                 if (provider === state.savedProvider) state.voiceTouched.add(provider);
                 else normalizeBaselineVoice(provider, voices[0].id);
             }
@@ -963,23 +1093,18 @@
             updateDirtyState();
             updateLegadoConfig();
         } catch (error) {
-            if (requestId !== state.voiceRequestId || provider !== state.provider) return;
+            if (requestId !== state.voiceRequestIds[provider] || provider !== state.provider) return;
             state.voiceLoading = false;
-            if (isDoubaoCustomMode()) {
-                renderVoiceSelect();
-                updateLegadoConfig();
-            } else {
-                $('voice-select').replaceChildren(new Option('音色加载失败'));
-                $('voice-select').disabled = true;
-                $('voice-count').textContent = '加载失败';
-                $('preview-button').disabled = true;
-                $('all-voices-button').disabled = true;
-                $('compare-a').replaceChildren();
-                $('compare-b').replaceChildren();
-                $('compare-a').disabled = true;
-                $('compare-b').disabled = true;
-                $('compare-button').disabled = true;
-            }
+            $('voice-select').replaceChildren(new Option('音色加载失败'));
+            $('voice-select').disabled = true;
+            $('voice-count').textContent = '加载失败';
+            $('preview-button').disabled = true;
+            $('all-voices-button').disabled = true;
+            $('compare-a').replaceChildren();
+            $('compare-b').replaceChildren();
+            $('compare-a').disabled = true;
+            $('compare-b').disabled = true;
+            $('compare-button').disabled = true;
             setFeedback('voice-feedback', `音色加载失败：${error.message}`, 'error');
             updateDirtyState();
         }
@@ -987,8 +1112,8 @@
 
     async function updateLegadoConfig() {
         const voice = currentVoiceId();
-        if (!voice || (isDoubaoCustomMode() && !isPotentialDoubaoVoiceId(voice))) {
-            invalidateLegadoConfig(voice ? '请先填写有效的音色 ID。' : '请先选择或填写音色。');
+        if (!voice || !hasUsableCurrentVoice()) {
+            invalidateLegadoConfig(voice ? '当前音色不可用，请重新选择。' : '请先选择音色。');
             return;
         }
         const requestId = ++state.configRequestId;
@@ -1513,17 +1638,7 @@
     }
 
     function chooseVoiceFromLibrary(voiceId) {
-        clearSynthesisOutputs();
-        if (state.provider === 'doubao') {
-            state.doubaoVoiceMode = 'preset';
-            state.doubaoPresetVoice = voiceId;
-        }
-        state.selectedVoices[state.provider] = voiceId;
-        state.voiceTouched.add(state.provider);
-        $('voice-search').value = '';
-        renderVoiceSelect();
-        updateDirtyState();
-        updateLegadoConfig();
+        selectVoice(voiceId);
         closeVoiceDialog();
         notify(`已选择音色：${voiceName(voiceId)}`, 'success');
     }
@@ -1558,11 +1673,17 @@
         library.replaceChildren();
         filtered.forEach(voice => {
             const card = document.createElement('article');
-            card.className = `voice-card${voice.id === currentVoiceId() ? ' is-current' : ''}`;
+            card.className = `voice-card${voice.id === currentVoiceId() ? ' is-current' : ''}${voice.custom === true ? ' is-custom' : ''}`;
             const copy = document.createElement('span');
             copy.className = 'voice-card-copy';
             const name = document.createElement('strong');
             name.textContent = voice.name;
+            if (voice.custom === true) {
+                const badge = document.createElement('span');
+                badge.className = 'voice-card-badge';
+                badge.textContent = '自定义';
+                name.appendChild(badge);
+            }
             const id = document.createElement('small');
             id.textContent = voice.id;
             copy.append(name, id);
@@ -1616,22 +1737,6 @@
         target.focus();
     }
 
-    function handleVoiceModeKeydown(event) {
-        const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
-        if (!keys.includes(event.key)) return;
-        event.preventDefault();
-        const buttons = $$('[data-voice-mode]');
-        const current = buttons.indexOf(event.currentTarget);
-        let next = current;
-        if (event.key === 'Home') next = 0;
-        else if (event.key === 'End') next = buttons.length - 1;
-        else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (current - 1 + buttons.length) % buttons.length;
-        else next = (current + 1) % buttons.length;
-        const target = buttons[next];
-        setDoubaoVoiceMode(target.dataset.voiceMode, false);
-        target.focus();
-    }
-
     function bindEvents() {
         $('theme-button').addEventListener('click', toggleTheme);
         if ($('token-button')) $('token-button').addEventListener('click', setAdminToken);
@@ -1648,29 +1753,20 @@
         $('voice-search').addEventListener('input', renderVoiceSelect);
         $('voice-select').addEventListener('change', event => {
             if (!event.currentTarget.value) return;
-            clearSynthesisOutputs();
-            if (state.provider === 'doubao') {
-                state.doubaoVoiceMode = 'preset';
-                state.doubaoPresetVoice = event.currentTarget.value;
-            }
-            state.selectedVoices[state.provider] = event.currentTarget.value;
-            state.voiceTouched.add(state.provider);
-            updateFishReferenceState();
-            updateDirtyState();
-            updateSetupSummary();
-            updateLegadoConfig();
+            selectVoice(event.currentTarget.value);
         });
-        $$('[data-voice-mode]').forEach(button => {
-            button.addEventListener('click', () => setDoubaoVoiceMode(button.dataset.voiceMode));
-            button.addEventListener('keydown', handleVoiceModeKeydown);
+        $('custom-voice-save').addEventListener('click', saveCustomVoice);
+        $('custom-voice-cancel').addEventListener('click', () => {
+            resetCustomVoiceForm();
+            renderCustomVoiceManager();
+            $('custom-voice-name').focus();
         });
-        $('doubao-custom-voice').addEventListener('input', updateDoubaoCustomVoice);
-        $('doubao-custom-voice').addEventListener('change', () => {
-            if (!state.legadoUpdateTimer) return;
-            window.clearTimeout(state.legadoUpdateTimer);
-            state.legadoUpdateTimer = null;
-            if (hasUsableCurrentVoice()) updateLegadoConfig();
-            else invalidateLegadoConfig('请先填写有效的音色 ID。');
+        ['custom-voice-name', 'custom-voice-id'].forEach(id => {
+            $(id).addEventListener('keydown', event => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                saveCustomVoice();
+            });
         });
         $('preview-button').addEventListener('click', previewVoice);
         $('all-voices-button').addEventListener('click', openVoiceDialog);
@@ -1738,11 +1834,16 @@
         }
         const hydratedConfig = Object.assign({}, INITIAL, loadedConfig || {});
         hydrateFallbackSettings(hydratedConfig);
-        if ($('fishaudio-reference-id')) {
-            const referenceId = loadedConfig && typeof loadedConfig.fishaudio_reference_id === 'string'
-                ? loadedConfig.fishaudio_reference_id
-                : INITIAL.fishaudioReferenceId || '';
-            $('fishaudio-reference-id').value = referenceId;
+        if (loadedConfig) {
+            if (hasOwn(PROVIDERS, loadedConfig.provider)) {
+                state.provider = loadedConfig.provider;
+                state.savedProvider = loadedConfig.provider;
+            }
+            Object.entries(VOICE_FIELDS).forEach(([provider, field]) => {
+                if (typeof loadedConfig[field] === 'string' && loadedConfig[field]) {
+                    state.selectedVoices[provider] = loadedConfig[field];
+                }
+            });
         }
         bindEvents();
         state.baselineCore = coreSnapshot();

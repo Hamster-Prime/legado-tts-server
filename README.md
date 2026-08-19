@@ -5,7 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.9.0-green.svg)
-![Tests](https://img.shields.io/badge/tests-284%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-322%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
 
@@ -52,6 +52,7 @@
 - 配置管理、TTS 测试、统计面板
 - 实时活动面板（SSE 推送）
 - 音色搜索过滤 + 试听按钮
+- 火山引擎与 Fish Audio 自定义音色库（名称 + ID，服务端持久化）
 - 暗色模式切换
 - 配置导出/导入
 - 重试次数、退避间隔、Edge 备用音色和故障转移开关
@@ -63,10 +64,10 @@
 | 服务商 | 音色数 | 说明 |
 |--------|--------|------|
 | Edge TTS | 36 (精选) / 322 (完整) | 免费，中/英/日/韩/粤语/台湾腔，支持情感风格、音量、音调。`/api/voices` 返回精选列表，`/api/voices/edge/live` 返回微软完整列表 |
-| 火山引擎 | 11 个预设 + 自定义 | 官方 2.0 音色名称，并支持手动填写 `voice_type` |
+| 火山引擎 | 11 个预设 + 自定义音色库 | 官方 2.0 音色名称，可保存多条命名 `voice_type` |
 | 腾讯云 | 7 | 智菊、智斌、智兰等 |
 | 小米 MiMo | 3 | 风格控制、方言、歌声合成 |
-| Fish Audio | 2 种模式 | 默认音色 + 自定义声音模型 Reference ID |
+| Fish Audio | 默认 + 自定义音色库 | 可保存多条带名称的声音模型 Reference ID |
 
 **音色别名**：支持 OpenAI 音色名（alloy/echo/nova）、中文名（晓晓/云希）、倍速（1.5x/2x）等
 
@@ -138,7 +139,7 @@ pytest -q
 1. 在火山引擎控制台的“API Key 管理”创建 Key。
 2. 打开本服务 Web 管理页，选择“火山引擎”。
 3. 填写 API Key。服务固定使用公共 2.0 音色资源 `seed-tts-2.0`。
-4. 在音色来源中选择预设，或切换到“自定义 ID”填写火山引擎的 `voice_type`。
+4. 在“选择音色”的“我的音色”中填写名称和 `voice_type`，保存后即可一键选择。
 
 服务访问火山引擎时仅发送以下鉴权与模型选择请求头：
 
@@ -151,12 +152,20 @@ pytest -q
 ```json
 {
   "doubao_api_key": "your-api-key",
-  "default_voice": "zh_female_cancan_uranus_bigtts"
+  "default_voice": "S_custom_voice_123",
+  "custom_voices": {
+    "doubao": [
+      {"id": "S_custom_voice_123", "name": "温柔旁白"}
+    ],
+    "fishaudio": []
+  }
 }
 ```
 
-自定义音色 ID 会直接保存在 `default_voice`，支持字母、数字、点、下划线、
-连字符和冒号，最长 128 个字符。服务会把该值原样传给上游的 `speaker` 字段。
+自定义音色 ID 和名称会保存在服务端配置的 `custom_voices.doubao` 中，当前选中
+ID 保存在 `default_voice`。ID 支持字母、数字、点、下划线、连字符和冒号，
+最长 128 个字符；服务会把该值原样传给上游的 `speaker` 字段。旧配置中仅有
+`default_voice` 的自定义 ID 会自动加入音色库，并使用“未命名自定义音色”作为名称。
 
 旧的 `appid`、`access_token`、`cluster` 鉴权已完全移除，也不再发送旧的 `Authorization: Bearer; ...` 请求头。服务读取旧配置时会删除这些字段，不会把旧 Token 当作新 API Key。升级后需要重新填写 API Key。旧版 `mars/moon` 音色 ID 会自动映射到对应的 `uranus` 2.0 音色。
 
@@ -172,10 +181,28 @@ pytest -q
 
 ## Fish Audio 配置
 
-在 Web 管理页填写 Fish Audio API Key 后，可选择两种模式：
+Fish Audio 的 API Key 只放在凭证区。声音模型在“选择音色”的“我的音色”中管理：
 
 - **默认音色**：请求只发送 `text` 和 `format`，不发送 `reference_id`。
-- **自定义声音模型**：从 Fish Audio 声音模型页面复制 Reference ID，服务会将其作为 `reference_id` 发送。
+- **自定义声音模型**：填写音色名称和 Reference ID 并保存。每条模型会独立出现在
+  音色列表中，选中后服务把该条目的 ID 作为 `reference_id` 发送。
+
+自定义 Fish 音色与火山音色一起保存在 `custom_voices`，例如：
+
+```json
+{
+  "fishaudio_voice": "9a9cf47702da476aa4629e2506d4a857",
+  "custom_voices": {
+    "doubao": [],
+    "fishaudio": [
+      {"id": "9a9cf47702da476aa4629e2506d4a857", "name": "我的克隆声"}
+    ]
+  }
+}
+```
+
+旧配置中的 `fishaudio_voice=custom` 与 `fishaudio_reference_id` 会自动迁移为一条
+实际 ID 音色，已有配置无需手动重建。
 
 旧版本中的 `fish-animated`、`fish-speech-zh`、`fish-audio-male` 和
 `fish-narrator` 使用了无效的占位 Reference ID；升级后会自动迁移到默认音色。
@@ -248,6 +275,7 @@ pytest -q
 | GET | `/api/voices/all` | 所有音色 |
 | GET | `/api/voices/edge/live` | Edge TTS 微软完整语音列表(322，缓存 `EDGE_VOICES_TTL` 秒) |
 | GET | `/api/voices/search` | 按名称/语言/性别搜索音色 |
+| GET/POST/DELETE | `/api/custom-voices` | 火山/Fish 自定义音色库 CRUD 🔒 |
 | GET/POST/DELETE | `/api/favorites` | 音色收藏夹 🔒 |
 
 > 🔒 = 设置 `ADMIN_TOKEN` 后，该行所列方法需要管理令牌
@@ -303,9 +331,10 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 | 包含 `Neural` 且有 `-` | Edge TTS |
 | 纯数字 1-999999 | 腾讯云 |
 | 以 `zh_` / `en_` / `multi_` / `ICL_` / `saturn_` 开头 | 火山引擎 |
-| 请求中显式传入 `provider` | 按指定 Provider 路由自定义音色 ID |
+| 请求中显式传入 `provider` | 按指定 Provider 路由已保存的自定义音色 ID |
 | `mimo_*` / `default_zh` | 小米 MiMo |
-| `fish-default` 或 `custom` | Fish Audio |
+| `fish-default` | Fish Audio 默认音色 |
+| 已保存的 Reference ID + `provider=fishaudio` | Fish Audio 自定义音色 |
 | 别名/中文名 | 自动解析 |
 
 ### 响应头

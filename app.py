@@ -7,6 +7,7 @@
 
 import os
 import json
+import copy
 import base64
 import uuid
 import hmac
@@ -776,6 +777,11 @@ def _check_admin():
         return None
     return _error_response('Unauthorized', 401, 'authentication_error')
 
+
+def _can_view_custom_voices():
+    """Allow private catalog metadata to authenticated or same-origin clients."""
+    return _is_admin() and (bool(ADMIN_TOKEN) or _admin_origin_allowed())
+
 FISH_AUDIO_DEFAULT_VOICE = 'fish-default'
 
 
@@ -793,6 +799,10 @@ DEFAULT_CONFIG = {
     'fishaudio_api_key': '',
     'fishaudio_voice': FISH_AUDIO_DEFAULT_VOICE,
     'fishaudio_reference_id': '',
+    'custom_voices': {
+        'doubao': [],
+        'fishaudio': [],
+    },
     # These values are persisted by the admin UI. The legacy environment
     # variables above are used only as defaults for older config files.
     'fallback_enabled': FALLBACK_TO_EDGE,
@@ -921,6 +931,9 @@ FISH_AUDIO_VOICES = [
 ]
 
 ALL_PROVIDERS = ['doubao', 'tencent', 'edge', 'xiaomi', 'fishaudio']
+CUSTOM_VOICE_PROVIDERS = ('doubao', 'fishaudio')
+MAX_CUSTOM_VOICES_PER_PROVIDER = 100
+MAX_CUSTOM_VOICE_NAME_LENGTH = 80
 _PROVIDER_DISPLAY_NAMES = {
     'doubao': '火山引擎',
     'tencent': '腾讯云 TTS',
@@ -994,6 +1007,140 @@ def _sanitize_voice(value):
     if value is None:
         return ''
     return str(value).strip().replace('\r', '').replace('\n', '').replace('\x00', '')
+
+
+def _normalize_custom_voice_entry(provider, item, *, reject_builtin=True):
+    """Return a canonical custom voice entry and a validation error, if any."""
+    if provider not in CUSTOM_VOICE_PROVIDERS:
+        return None, f'服务商 {provider or "(空)"} 不支持自定义音色'
+    if not isinstance(item, dict):
+        return None, '自定义音色条目必须是 JSON 对象'
+    unknown_fields = set(item) - {'id', 'name'}
+    if unknown_fields:
+        return None, f'自定义音色包含未知字段: {sorted(unknown_fields)[0]}'
+    voice_id = item.get('id')
+    name = item.get('name')
+    if not isinstance(voice_id, str):
+        return None, '音色 ID 必须是字符串'
+    if not isinstance(name, str):
+        return None, '音色名称必须是字符串'
+    voice_id = voice_id.strip()
+    name = name.strip()
+    if not voice_id or not _CUSTOM_VOICE_ID_RE.fullmatch(voice_id):
+        return None, '音色 ID 格式无效（最多 128 个字母、数字或 ._:-）'
+    if not name:
+        return None, '音色名称不能为空'
+    if len(name) > MAX_CUSTOM_VOICE_NAME_LENGTH:
+        return None, f'音色名称不能超过 {MAX_CUSTOM_VOICE_NAME_LENGTH} 个字符'
+    if any(ord(char) < 32 for char in name):
+        return None, '音色名称不能包含控制字符'
+    if reject_builtin:
+        builtins = {
+            voice['id']
+            for voices in _PROVIDER_VOICE_CATALOGS.values()
+            for voice in voices
+        }
+        if voice_id in builtins:
+            return None, '内置音色无需添加到自定义音色库'
+        inferred = resolve_provider(voice_id)
+        if provider == 'doubao' and inferred not in (None, 'doubao'):
+            return None, f'音色 {voice_id} 不属于服务商 doubao'
+        if provider == 'fishaudio' and inferred is not None:
+            return None, f'音色 {voice_id} 不能作为 Fish Audio Reference ID'
+    return {'id': voice_id, 'name': name}, None
+
+
+def _normalize_custom_voice_library(value, *, strict=False):
+    """Normalize the persisted provider -> [{id, name}] custom voice mapping."""
+    result = {provider: [] for provider in CUSTOM_VOICE_PROVIDERS}
+    if not isinstance(value, dict):
+        return (None, 'custom_voices 必须是 JSON 对象') if strict else (result, None)
+    unknown = set(value) - set(CUSTOM_VOICE_PROVIDERS)
+    if strict and unknown:
+        return None, f'不支持自定义音色的服务商: {sorted(unknown)[0]}'
+    for provider in CUSTOM_VOICE_PROVIDERS:
+        entries = value.get(provider, [])
+        if not isinstance(entries, list):
+            if strict:
+                return None, f'custom_voices.{provider} 必须是数组'
+            continue
+        if strict and len(entries) > MAX_CUSTOM_VOICES_PER_PROVIDER:
+            return None, (
+                f'{provider} 自定义音色最多 {MAX_CUSTOM_VOICES_PER_PROVIDER} 条'
+            )
+        seen = set()
+        for raw_entry in entries:
+            entry, error = _normalize_custom_voice_entry(provider, raw_entry)
+            if error:
+                if strict:
+                    return None, f'custom_voices.{provider}: {error}'
+                continue
+            if entry['id'] in seen:
+                if strict:
+                    return None, f'{provider} 自定义音色 ID 重复: {entry["id"]}'
+                continue
+            if len(result[provider]) >= MAX_CUSTOM_VOICES_PER_PROVIDER:
+                break
+            seen.add(entry['id'])
+            result[provider].append(entry)
+    return result, None
+
+
+def _custom_voice_library(config=None):
+    config = load_config() if config is None else config
+    library, _ = _normalize_custom_voice_library(
+        config.get('custom_voices', {}), strict=False)
+    return library
+
+
+def _add_migrated_custom_voice(library, provider, voice_id, name):
+    entry, error = _normalize_custom_voice_entry(
+        provider, {'id': voice_id, 'name': name})
+    if error:
+        return False
+    entries = library[provider]
+    if any(item['id'] == entry['id'] for item in entries):
+        return True
+    if len(entries) >= MAX_CUSTOM_VOICES_PER_PROVIDER:
+        return False
+    entries.append(entry)
+    return True
+
+
+def _migrate_custom_voice_config(config):
+    """Normalize the library and preserve legacy single custom voice settings."""
+    original_library = config.get('custom_voices')
+    library, _ = _normalize_custom_voice_library(original_library, strict=False)
+    changed = original_library != library
+
+    fish_reference = config.get('fishaudio_reference_id', '')
+    if isinstance(fish_reference, str):
+        fish_reference = fish_reference.strip()
+        if config.get('fishaudio_reference_id') != fish_reference:
+            config['fishaudio_reference_id'] = fish_reference
+            changed = True
+        if fish_reference and _add_migrated_custom_voice(
+                library, 'fishaudio', fish_reference, '未命名自定义音色'):
+            if config.get('fishaudio_voice') == 'custom':
+                config['fishaudio_voice'] = fish_reference
+                changed = True
+
+    doubao_voice = config.get('default_voice')
+    all_builtin_ids = {
+        voice['id']
+        for voices in _PROVIDER_VOICE_CATALOGS.values()
+        for voice in voices
+    }
+    if (isinstance(doubao_voice, str)
+            and _CUSTOM_VOICE_ID_RE.fullmatch(doubao_voice)
+            and doubao_voice not in all_builtin_ids):
+        _add_migrated_custom_voice(
+            library, 'doubao', doubao_voice, '未命名自定义音色')
+
+    if config.get('custom_voices') != library:
+        config['custom_voices'] = library
+        changed = True
+    return changed
 
 
 def _resolve_voice_alias(voice):
@@ -1119,17 +1266,8 @@ def _config_transaction():
 
 
 def _copy_config(cfg):
-    """Copy a config dict one level deep so callers cannot mutate the cached
-    nested containers (e.g. pronunciation_dict, favorites) in place."""
-    out = {}
-    for k, v in cfg.items():
-        if isinstance(v, dict):
-            out[k] = dict(v)
-        elif isinstance(v, list):
-            out[k] = list(v)
-        else:
-            out[k] = v
-    return out
+    """Deep-copy config so nested voice entries cannot mutate cached state."""
+    return copy.deepcopy(cfg)
 
 
 def load_config():
@@ -1170,7 +1308,9 @@ def load_config():
         cfg = {}
     for k, v in DEFAULT_CONFIG.items():
         if k not in cfg:
-            cfg[k] = v.copy() if isinstance(v, (dict, list)) else v
+            cfg[k] = copy.deepcopy(v)
+    if _migrate_custom_voice_config(cfg):
+        changed = True
     if changed and os.path.exists(CONFIG_FILE):
         try:
             _write_json(CONFIG_FILE, cfg)
@@ -1199,6 +1339,7 @@ def save_config(config):
         clean['voice_favorites'] = [
             _migrate_legacy_voice_id(voice) for voice in favorites
         ]
+    _migrate_custom_voice_config(clean)
     _write_json(CONFIG_FILE, clean)
     # Invalidate cache
     with _config_cache_lock:
@@ -1770,7 +1911,9 @@ def synthesize_fishaudio(text, voice, config=None):
         if not ref_id:
             return None, "自定义 Fish Audio 音色需要 Reference ID"
     elif voice != FISH_AUDIO_DEFAULT_VOICE:
-        return None, f"不支持的 Fish Audio 音色: {voice}"
+        if not _is_valid_provider_voice('fishaudio', voice, config):
+            return None, f"不支持的 Fish Audio 音色: {voice}"
+        ref_id = voice
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -3079,7 +3222,7 @@ _PROVIDER_VOICE_IDS = {
 }
 
 
-def _is_valid_provider_voice(provider, voice):
+def _is_valid_provider_voice(provider, voice, config=None):
     """Validate configured voices while preserving documented dynamic IDs."""
     if not isinstance(voice, str) or not voice or not _CUSTOM_VOICE_ID_RE.fullmatch(voice):
         return False
@@ -3087,7 +3230,10 @@ def _is_valid_provider_voice(provider, voice):
         inferred = resolve_provider(voice)
         return inferred in (None, 'doubao')
     if provider == 'fishaudio':
-        return voice in _PROVIDER_VOICE_IDS['fishaudio']
+        if voice in _PROVIDER_VOICE_IDS['fishaudio']:
+            return True
+        library = _custom_voice_library(config)
+        return any(item['id'] == voice for item in library['fishaudio'])
     return resolve_provider(voice) == provider
 
 
@@ -3151,7 +3297,7 @@ def _resolve_request_provider(voice, requested_provider=None):
     configured_provider = config.get('provider')
     voice_field = _ACTIVE_VOICE_FIELDS.get(configured_provider)
     if (voice_field and config.get(voice_field) == voice
-            and _is_valid_provider_voice(configured_provider, voice)):
+            and _is_valid_provider_voice(configured_provider, voice, config)):
         return configured_provider, None
     return None, None
 
@@ -3166,6 +3312,13 @@ def _normalize_request_voice(voice, requested_provider=None):
     """
     voice = _sanitize_voice(voice)
     explicit = _sanitize_voice(requested_provider).lower()
+    if voice == 'custom' and explicit in ('', 'fishaudio'):
+        config = load_config()
+        selected = config.get('fishaudio_voice')
+        if ((explicit == 'fishaudio' or config.get('provider') == 'fishaudio')
+                and selected not in (FISH_AUDIO_DEFAULT_VOICE, 'custom')
+                and _is_valid_provider_voice('fishaudio', selected, config)):
+            voice = selected
     alias = _resolve_voice_alias(voice)
     if explicit in ALL_PROVIDERS:
         # Prefer aliases that stay within the selected provider (including the
@@ -3196,7 +3349,7 @@ def _configured_fields(config):
 def _provider_status(config):
     configured = _configured_fields(config)
     fish_voice = config.get('fishaudio_voice')
-    fish_voice_valid = fish_voice in _PROVIDER_VOICE_IDS['fishaudio']
+    fish_voice_valid = _is_valid_provider_voice('fishaudio', fish_voice, config)
     fish_reference = config.get('fishaudio_reference_id', '')
     fish_custom_ready = (
         fish_voice != 'custom'
@@ -3228,6 +3381,23 @@ def _provider_status(config):
     }
 
 
+def _voice_catalog(provider, config=None, *, include_custom=False):
+    """Return a detached provider catalog, optionally including saved voices."""
+    voices = [
+        dict(item)
+        for item in _PROVIDER_VOICE_CATALOGS.get(provider, ())
+        if not (provider == 'fishaudio' and item['id'] == 'custom')
+    ]
+    if not include_custom or provider not in CUSTOM_VOICE_PROVIDERS:
+        return voices
+    library = _custom_voice_library(config)
+    known_ids = {item['id'] for item in voices}
+    voices.extend({**item, 'custom': True}
+                  for item in library[provider]
+                  if item['id'] not in known_ids)
+    return voices
+
+
 def _safe_config(config):
     """Return the public/admin-UI view of config with every credential masked."""
     safe = _copy_config(config)
@@ -3246,7 +3416,7 @@ def _safe_config(config):
     return safe
 
 
-def _validate_config_payload(data):
+def _validate_config_payload(data, config=None):
     if not isinstance(data, dict):
         return '请求体必须是 JSON 对象'
     provider = data.get('provider')
@@ -3273,7 +3443,7 @@ def _validate_config_payload(data):
         voice = data[voice_key].strip()
         if not voice:
             return f'{voice_key} 不能为空'
-        if not _is_valid_provider_voice(expected_provider, voice):
+        if not _is_valid_provider_voice(expected_provider, voice, config):
             return f'音色 {voice} 不属于服务商 {expected_provider}'
     if 'default_voice' in data:
         voice = data['default_voice'].strip()
@@ -3318,10 +3488,11 @@ def _apply_config_payload(config, data):
         voice = data.get(voice_key)
         if not voice:
             continue
-        if not _is_valid_provider_voice(expected_provider, voice):
+        if not _is_valid_provider_voice(expected_provider, voice, config):
             message = f'{voice_key}={voice} 无法识别为 {expected_provider} 音色'
             warnings.append(message)
             log.warning(message)
+    _migrate_custom_voice_config(config)
     return warnings
 
 
@@ -3332,7 +3503,7 @@ def _validate_config_state(config):
         return f'不支持的服务商: {provider}'
     voice_key = _ACTIVE_VOICE_FIELDS[provider]
     voice = config.get(voice_key)
-    if not isinstance(voice, str) or not _is_valid_provider_voice(provider, voice):
+    if not isinstance(voice, str) or not _is_valid_provider_voice(provider, voice, config):
         return f'音色 {voice or "(空)"} 不属于服务商 {provider}'
     if provider == 'fishaudio' and voice == 'custom':
         reference_id = config.get('fishaudio_reference_id', '')
@@ -3420,7 +3591,7 @@ def api_config_test():
                      'tencent': TENCENT_VOICES[0]['id'], 'xiaomi': XIAOMI_VOICES[0]['id'],
                      'fishaudio': FISH_AUDIO_VOICES[0]['id']}
         voice = voice_map.get(provider, EDGE_VOICES[0]['id'])
-    if not _is_valid_provider_voice(provider, voice):
+    if not _is_valid_provider_voice(provider, voice, config):
         return _error_response(
             f'音色 {voice} 不属于服务商 {provider}', 400, 'invalid_request_error')
     # Test the provider directly, bypassing fallback and the audio cache. This
@@ -3490,7 +3661,7 @@ def api_config_import():
         return _error_response(
             '导入文件包含掩码凭证，请使用“导出配置”生成的完整备份文件',
             400, 'invalid_request_error')
-    config = DEFAULT_CONFIG.copy()
+    config = copy.deepcopy(DEFAULT_CONFIG)
     unknown = []
     for k, v in data.items():
         if k in config:
@@ -3505,9 +3676,16 @@ def api_config_import():
             if expected_type in (str, dict, list) and not isinstance(v, expected_type):
                 return _error_response(
                     f'{k} 类型无效', 400, 'invalid_request_error')
-            config[k] = v
+            config[k] = copy.deepcopy(v)
         else:
             unknown.append(k)
+    custom_voices, custom_voice_error = _normalize_custom_voice_library(
+        config.get('custom_voices'), strict=True)
+    if custom_voice_error:
+        return _error_response(
+            custom_voice_error, 400, 'invalid_request_error')
+    config['custom_voices'] = custom_voices
+    _migrate_custom_voice_config(config)
     editable = {
         key: config[key]
         for key in (
@@ -3516,7 +3694,7 @@ def api_config_import():
         )
         if key in data
     }
-    validation_error = _validate_config_payload(editable)
+    validation_error = _validate_config_payload(editable, config=config)
     if validation_error:
         return _error_response(validation_error, 400, 'invalid_request_error')
     state_error = _validate_config_state(config)
@@ -3815,6 +3993,109 @@ def api_favorites():
     return jsonify({'status': 'ok', 'favorites': favs, 'count': len(favs)})
 
 
+@app.route('/api/custom-voices', methods=['GET', 'POST', 'DELETE'])
+def api_custom_voices():
+    """Manage persistent custom voice IDs and their display names."""
+    err = _check_admin()
+    if err:
+        return err
+    if request.method == 'GET':
+        return jsonify(_custom_voice_library())
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _error_response(
+            '请求体必须是 JSON 对象', 400, 'invalid_request_error')
+    raw_provider = data.get('provider')
+    if not isinstance(raw_provider, str):
+        return _error_response(
+            'provider 必须是字符串', 400, 'invalid_request_error')
+    provider = raw_provider.strip().lower()
+    if provider not in CUSTOM_VOICE_PROVIDERS:
+        return _error_response(
+            f'服务商 {provider or "(空)"} 不支持自定义音色',
+            400, 'invalid_request_error')
+
+    if request.method == 'POST':
+        unknown_fields = set(data) - {'provider', 'id', 'name'}
+        if unknown_fields:
+            return _error_response(
+                f'请求包含未知字段: {sorted(unknown_fields)[0]}',
+                400, 'invalid_request_error')
+        entry, validation_error = _normalize_custom_voice_entry(provider, {
+            'id': data.get('id'),
+            'name': data.get('name'),
+        })
+        if validation_error:
+            return _error_response(
+                validation_error, 400, 'invalid_request_error')
+        with _config_transaction():
+            config = load_config()
+            library = _custom_voice_library(config)
+            entries = library[provider]
+            existing = next(
+                (index for index, item in enumerate(entries)
+                 if item['id'] == entry['id']), None)
+            if existing is None:
+                if len(entries) >= MAX_CUSTOM_VOICES_PER_PROVIDER:
+                    return _error_response(
+                        f'{provider} 自定义音色最多 '
+                        f'{MAX_CUSTOM_VOICES_PER_PROVIDER} 条',
+                        400, 'invalid_request_error')
+                entries.append(entry)
+            else:
+                entries[existing] = entry
+            config['custom_voices'] = library
+            save_config(config)
+        return jsonify({
+            'status': 'ok',
+            'voice': {**entry, 'provider': provider, 'custom': True},
+            'custom_voices': library,
+            'voices': _voice_catalog(
+                provider, config, include_custom=True),
+        })
+
+    unknown_fields = set(data) - {'provider', 'id'}
+    if unknown_fields:
+        return _error_response(
+            f'请求包含未知字段: {sorted(unknown_fields)[0]}',
+            400, 'invalid_request_error')
+    raw_voice_id = data.get('id')
+    if not isinstance(raw_voice_id, str):
+        return _error_response(
+            '音色 ID 必须是字符串', 400, 'invalid_request_error')
+    voice_id = raw_voice_id.strip()
+    if not voice_id or not _CUSTOM_VOICE_ID_RE.fullmatch(voice_id):
+        return _error_response(
+            '音色 ID 格式无效', 400, 'invalid_request_error')
+    with _config_transaction():
+        config = load_config()
+        voice_field = _ACTIVE_VOICE_FIELDS[provider]
+        if config.get(voice_field) == voice_id:
+            return _error_response(
+                '不能删除当前已保存并正在使用的音色',
+                409, 'conflict_error')
+        library = _custom_voice_library(config)
+        entries = library[provider]
+        updated = [item for item in entries if item['id'] != voice_id]
+        if len(updated) == len(entries):
+            return _error_response(
+                '未找到自定义音色', 404, 'not_found')
+        library[provider] = updated
+        if (provider == 'fishaudio'
+                and config.get('fishaudio_reference_id') == voice_id):
+            # Prevent the legacy migration shim from resurrecting this entry
+            # the next time the config is loaded or saved.
+            config['fishaudio_reference_id'] = ''
+        config['custom_voices'] = library
+        save_config(config)
+    return jsonify({
+        'status': 'ok',
+        'custom_voices': library,
+        'voices': _voice_catalog(provider, config, include_custom=True),
+    })
+
+
 @app.route('/api/stats', methods=['GET', 'DELETE'])
 def api_stats():
     if request.method == 'DELETE':
@@ -3824,13 +4105,31 @@ def api_stats():
         _write_json(STATS_FILE, {p: _new_provider_stats() for p in ALL_PROVIDERS})
         log.info("Stats reset")
         return jsonify({'status': 'ok', 'message': '统计已重置'})
-    return jsonify(load_stats())
+    return jsonify(_stats_for_request(load_stats()))
+
+
+def _stats_for_request(stats):
+    """Hide private custom voice IDs while preserving public aggregate usage."""
+    if _can_view_custom_voices():
+        return stats
+    safe = copy.deepcopy(stats)
+    library = _custom_voice_library()
+    for provider in CUSTOM_VOICE_PROVIDERS:
+        provider_stats = safe.get(provider)
+        if not isinstance(provider_stats, dict):
+            continue
+        voice_stats = provider_stats.get('voice_stats')
+        if not isinstance(voice_stats, dict):
+            continue
+        for voice in library[provider]:
+            voice_stats.pop(voice['id'], None)
+    return safe
 
 
 @app.route('/api/stats/summary', methods=['GET'])
 def api_stats_summary():
     """High-level stats summary with top voices per provider."""
-    stats = load_stats()
+    stats = _stats_for_request(load_stats())
     summary = []
     for prov in ALL_PROVIDERS:
         ps = stats.get(prov, {})
@@ -3851,22 +4150,18 @@ def api_stats_summary():
 @app.route('/api/voices', methods=['GET'])
 def api_voices():
     p = request.args.get('provider', 'edge')
-    return jsonify({
-        'tencent': TENCENT_VOICES, 'doubao': DOUBAO_VOICES,
-        'xiaomi': XIAOMI_VOICES, 'edge': EDGE_VOICES,
-        'fishaudio': FISH_AUDIO_VOICES,
-    }.get(p, EDGE_VOICES))
+    if p not in _PROVIDER_VOICE_CATALOGS:
+        p = 'edge'
+    return jsonify(_voice_catalog(p, include_custom=_can_view_custom_voices()))
 
 
 @app.route('/api/voices/all', methods=['GET'])
 def api_voices_all():
     """Return all voices grouped by provider."""
+    include_custom = _can_view_custom_voices()
     return jsonify({
-        'edge': EDGE_VOICES,
-        'doubao': DOUBAO_VOICES,
-        'tencent': TENCENT_VOICES,
-        'xiaomi': XIAOMI_VOICES,
-        'fishaudio': FISH_AUDIO_VOICES,
+        provider: _voice_catalog(provider, include_custom=include_custom)
+        for provider in ('edge', 'doubao', 'tencent', 'xiaomi', 'fishaudio')
     })
 
 
@@ -3901,12 +4196,11 @@ def api_voices_search():
     if not q:
         return _error_response('Missing search query (q parameter)', 400)
     all_voices = []
-    catalogs = {'edge': EDGE_VOICES, 'doubao': DOUBAO_VOICES, 'tencent': TENCENT_VOICES,
-                'xiaomi': XIAOMI_VOICES, 'fishaudio': FISH_AUDIO_VOICES}
-    for prov, voices in catalogs.items():
+    include_custom = _can_view_custom_voices()
+    for prov in ('edge', 'doubao', 'tencent', 'xiaomi', 'fishaudio'):
         if provider and prov != provider:
             continue
-        for v in voices:
+        for v in _voice_catalog(prov, include_custom=include_custom):
             if q in v['id'].lower() or q in v['name'].lower():
                 all_voices.append({**v, 'provider': prov})
     return jsonify({'results': all_voices, 'count': len(all_voices)})
@@ -4138,7 +4432,7 @@ def _legado_engine_name(provider, voice):
     """Return a readable, stable provider/voice label for exported engines."""
     provider_name = _PROVIDER_DISPLAY_NAMES.get(provider, 'TTS')
     voice_name = next(
-        (item['name'] for item in _PROVIDER_VOICE_CATALOGS.get(provider, ())
+        (item['name'] for item in _voice_catalog(provider, include_custom=True)
          if item['id'] == voice),
         voice,
     )
@@ -4184,7 +4478,14 @@ def _legado_voice_and_provider(config):
     if raw_voice is None and requested_provider:
         voice_field = _ACTIVE_VOICE_FIELDS[requested_provider]
         raw_voice = config.get(voice_field)
-        if not _is_valid_provider_voice(requested_provider, raw_voice):
+        private_voice = (
+            requested_provider in CUSTOM_VOICE_PROVIDERS
+            and raw_voice not in _PROVIDER_VOICE_IDS[requested_provider]
+            and not _can_view_custom_voices()
+        )
+        if (private_voice
+                or not _is_valid_provider_voice(
+                    requested_provider, raw_voice, config)):
             defaults = {
                 'edge': EDGE_VOICES[0]['id'],
                 'doubao': DOUBAO_VOICES[0]['id'],
@@ -4195,6 +4496,10 @@ def _legado_voice_and_provider(config):
             raw_voice = defaults[requested_provider]
     elif raw_voice is None:
         raw_voice = config.get('default_voice', 'zh-CN-XiaoxiaoNeural')
+        if (raw_voice not in _PROVIDER_VOICE_IDS['doubao']
+                and _is_valid_provider_voice('doubao', raw_voice, config)
+                and not _can_view_custom_voices()):
+            raw_voice = DOUBAO_VOICES[0]['id']
 
     voice = _normalize_request_voice(raw_voice, requested_provider)
     provider, provider_error = _resolve_request_provider(
@@ -4263,23 +4568,42 @@ def index():
         return value if isinstance(value, str) else default
 
     doubao_voice = _text_value('default_voice', DEFAULT_CONFIG['default_voice'])
+    fishaudio_voice = _text_value(
+        'fishaudio_voice', DEFAULT_CONFIG['fishaudio_voice'])
+    doubao_voice_is_custom = (
+        _is_valid_provider_voice('doubao', doubao_voice)
+        and doubao_voice not in _PROVIDER_VOICE_IDS['doubao']
+    )
+    fishaudio_voice_is_custom = (
+        _is_valid_provider_voice('fishaudio', fishaudio_voice, config)
+        and fishaudio_voice not in _PROVIDER_VOICE_IDS['fishaudio']
+    )
+    initial_doubao_voice = (
+        DOUBAO_VOICES[0]['id']
+        if ADMIN_TOKEN and doubao_voice_is_custom else doubao_voice
+    )
+    initial_fishaudio_voice = (
+        FISH_AUDIO_DEFAULT_VOICE
+        if ADMIN_TOKEN and fishaudio_voice_is_custom else fishaudio_voice
+    )
     initial_state = {
         'version': __version__,
         'provider': _text_value('provider', 'edge'),
         'voices': {
-            'doubao': doubao_voice,
+            'doubao': initial_doubao_voice,
             'tencent': _text_value('tencent_voice', DEFAULT_CONFIG['tencent_voice']),
             'edge': _text_value('edge_voice', DEFAULT_CONFIG['edge_voice']),
             'xiaomi': _text_value('xiaomi_voice', DEFAULT_CONFIG['xiaomi_voice']),
-            'fishaudio': _text_value('fishaudio_voice', DEFAULT_CONFIG['fishaudio_voice']),
+            'fishaudio': initial_fishaudio_voice,
         },
-        'doubaoVoiceIsCustom': (
-            _is_valid_provider_voice('doubao', doubao_voice)
-            and doubao_voice not in _PROVIDER_VOICE_IDS['doubao']
-        ),
+        'doubaoVoiceIsCustom': doubao_voice_is_custom and not ADMIN_TOKEN,
         # Credential/reference details are hydrated through the authenticated
         # config endpoint when protection is enabled, never embedded anonymously.
         'fishaudioReferenceId': '' if ADMIN_TOKEN else _text_value('fishaudio_reference_id'),
+        'customVoices': (
+            {provider: [] for provider in CUSTOM_VOICE_PROVIDERS}
+            if ADMIN_TOKEN else _custom_voice_library(config)
+        ),
         'providerStatus': {} if ADMIN_TOKEN else _provider_status(config),
         'configuredFields': {} if ADMIN_TOKEN else _configured_fields(config),
         'fallbackEnabled': fallback['enabled'],

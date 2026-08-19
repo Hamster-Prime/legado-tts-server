@@ -155,18 +155,11 @@
                                 </div>
 
                                 <div class="provider-settings" data-settings-provider="fishaudio">
-                                    <div class="field-grid">
-                                        <label class="field">
-                                            <span>API Key</span>
-                                            <input id="fishaudio-api-key" data-credential-field="fishaudio_api_key" type="password" autocomplete="new-password" placeholder="输入 Fish Audio API Key">
-                                            <small>留空会保留已保存的 Key。</small>
-                                        </label>
-                                        <label class="field">
-                                            <span>声音模型 Reference ID</span>
-                                            <input id="fishaudio-reference-id" data-config-field="fishaudio_reference_id" type="text" autocomplete="off" placeholder="从 Fish Audio 声音模型页面复制">
-                                            <small>仅选择自定义声音模型时填写；默认音色无需此项。</small>
-                                        </label>
-                                    </div>
+                                    <label class="field">
+                                        <span>API Key</span>
+                                        <input id="fishaudio-api-key" data-credential-field="fishaudio_api_key" type="password" autocomplete="new-password" placeholder="输入 Fish Audio API Key">
+                                        <small>留空会保留已保存的 Key；声音模型在下一步的音色库中管理。</small>
+                                    </label>
                                 </div>
                             </article>
                         </div>
@@ -178,13 +171,6 @@
                                     <span class="surface-note" id="voice-count">正在加载</span>
                                 </div>
                                 <div class="voice-picker">
-                                    <div class="voice-mode-switch" id="doubao-voice-mode" hidden>
-                                        <span class="field-label">音色来源</span>
-                                        <div class="segmented-control" role="radiogroup" aria-label="火山引擎音色来源">
-                                            <button class="segment is-active" type="button" role="radio" aria-checked="true" tabindex="0" data-voice-mode="preset">预设音色</button>
-                                            <button class="segment" type="button" role="radio" aria-checked="false" tabindex="-1" data-voice-mode="custom">自定义 ID</button>
-                                        </div>
-                                    </div>
                                     <div class="voice-preset-fields" id="voice-preset-fields">
                                         <label class="search-field" for="voice-search">
                                             <span aria-hidden="true">⌕</span>
@@ -193,11 +179,30 @@
                                         <label class="sr-only" for="voice-select">音色</label>
                                         <select id="voice-select" disabled><option>正在加载音色…</option></select>
                                     </div>
-                                    <label class="field custom-voice-field" id="doubao-custom-voice-field" hidden>
-                                        <span>自定义音色 ID</span>
-                                        <input id="doubao-custom-voice" type="text" autocomplete="off" maxlength="128" spellcheck="false" placeholder="输入 voice_type">
-                                        <small>填写火山引擎控制台或官方音色列表中的 voice_type。</small>
-                                    </label>
+                                    <section class="custom-voice-manager" id="custom-voice-manager" aria-labelledby="custom-voice-title" hidden>
+                                        <div class="custom-voice-heading">
+                                            <div><strong id="custom-voice-title">我的音色</strong><small id="custom-voice-summary">0 个已保存音色</small></div>
+                                            <span class="custom-voice-provider" id="custom-voice-provider">火山引擎</span>
+                                        </div>
+                                        <div class="custom-voice-form">
+                                            <label class="field">
+                                                <span>音色名称</span>
+                                                <input id="custom-voice-name" type="text" autocomplete="off" maxlength="80" placeholder="例如：温柔旁白">
+                                            </label>
+                                            <label class="field">
+                                                <span id="custom-voice-id-label">音色 ID</span>
+                                                <input id="custom-voice-id" type="text" autocomplete="off" maxlength="128" spellcheck="false" placeholder="输入 voice_type">
+                                            </label>
+                                            <div class="custom-voice-form-actions">
+                                                <button class="button secondary custom-voice-save" id="custom-voice-save" type="button">添加音色</button>
+                                                <button class="button ghost custom-voice-cancel" id="custom-voice-cancel" type="button" hidden>取消</button>
+                                            </div>
+                                        </div>
+                                        <p class="custom-voice-hint" id="custom-voice-hint">填写火山引擎的 voice_type；保存后可从上方列表一键选择。</p>
+                                        <div class="custom-voice-list" id="custom-voice-list"></div>
+                                        <p class="custom-voice-empty" id="custom-voice-empty">还没有保存自定义音色。</p>
+                                        <div class="inline-feedback" id="custom-voice-feedback" role="status" aria-live="polite" hidden></div>
+                                    </section>
                                     <div class="button-row compact-row">
                                         <button class="button secondary" id="preview-button" type="button" disabled>
                                             <span aria-hidden="true">▶</span> 试听当前音色

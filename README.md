@@ -66,7 +66,7 @@
 | 火山引擎 | 11 个预设 + 自定义 | 官方 2.0 音色名称，并支持手动填写 `voice_type` |
 | 腾讯云 | 7 | 智菊、智斌、智兰等 |
 | 小米 MiMo | 3 | 风格控制、方言、歌声合成 |
-| Fish Audio | 5 | 高质量多语言 + 声音克隆 |
+| Fish Audio | 2 种模式 | 默认音色 + 自定义声音模型 Reference ID |
 
 **音色别名**：支持 OpenAI 音色名（alloy/echo/nova）、中文名（晓晓/云希）、倍速（1.5x/2x）等
 
@@ -167,6 +167,23 @@ pytest -q
 - [单向流式语音合成 HTTP（单 API Key）](https://docs.volcengine.com/docs/6561/2528925?lang=zh)
 - [HTTP Chunked 响应格式与结束帧](https://www.volcengine.com/docs/6561/1598757?lang=zh)
 - [豆包语音合成模型 2.0 音色列表](https://www.volcengine.com/docs/6561/1257544?lang=zh)
+
+---
+
+## Fish Audio 配置
+
+在 Web 管理页填写 Fish Audio API Key 后，可选择两种模式：
+
+- **默认音色**：请求只发送 `text` 和 `format`，不发送 `reference_id`。
+- **自定义声音模型**：从 Fish Audio 声音模型页面复制 Reference ID，服务会将其作为 `reference_id` 发送。
+
+旧版本中的 `fish-animated`、`fish-speech-zh`、`fish-audio-male` 和
+`fish-narrator` 使用了无效的占位 Reference ID；升级后会自动迁移到默认音色。
+
+官方参考：
+
+- [Fish Audio Text to Speech](https://docs.fish.audio/features/text-to-speech)
+- [POST /v1/tts API](https://docs.fish.audio/api-reference/endpoint/openapi-v1/text-to-speech)
 
 ---
 
@@ -288,7 +305,7 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 | 以 `zh_` / `en_` / `multi_` / `ICL_` / `saturn_` 开头 | 火山引擎 |
 | 请求中显式传入 `provider` | 按指定 Provider 路由自定义音色 ID |
 | `mimo_*` / `default_zh` | 小米 MiMo |
-| 以 `fish-` 开头或 `custom` | Fish Audio |
+| `fish-default` 或 `custom` | Fish Audio |
 | 别名/中文名 | 自动解析 |
 
 ### 响应头

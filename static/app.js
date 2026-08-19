@@ -97,7 +97,7 @@
             doubao: 'zh_female_cancan_uranus_bigtts',
             tencent: '501002',
             xiaomi: 'mimo_default',
-            fishaudio: 'fish-animated',
+            fishaudio: 'fish-default',
         }, INITIAL.voices || {}),
         providerStatus: INITIAL.providerStatus || {},
         configuredFields: INITIAL.configuredFields || {},

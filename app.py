@@ -776,6 +776,9 @@ def _check_admin():
         return None
     return _error_response('Unauthorized', 401, 'authentication_error')
 
+FISH_AUDIO_DEFAULT_VOICE = 'fish-default'
+
+
 DEFAULT_CONFIG = {
     'provider': 'edge',
     'doubao_api_key': '',
@@ -788,7 +791,7 @@ DEFAULT_CONFIG = {
     'xiaomi_api_key': '',
     'xiaomi_voice': 'mimo_default',
     'fishaudio_api_key': '',
-    'fishaudio_voice': 'fish-animated',
+    'fishaudio_voice': FISH_AUDIO_DEFAULT_VOICE,
     'fishaudio_reference_id': '',
     # These values are persisted by the admin UI. The legacy environment
     # variables above are used only as defaults for older config files.
@@ -835,6 +838,21 @@ LEGACY_DOUBAO_VOICE_MAP = {
     'zh_male_wennuanahu_moon_bigtts': 'zh_male_wennuanahu_uranus_bigtts',
     'zh_male_jieshuonansheng_mars_bigtts': 'zh_male_cixingjieshuonan_uranus_bigtts',
 }
+
+# These names were previously backed by invalid placeholder reference IDs.
+# Keep old configs and copied request URLs working by mapping them to Fish
+# Audio's reference-free default voice.
+LEGACY_FISH_AUDIO_VOICE_MAP = {
+    'fish-animated': FISH_AUDIO_DEFAULT_VOICE,
+    'fish-speech-zh': FISH_AUDIO_DEFAULT_VOICE,
+    'fish-audio-male': FISH_AUDIO_DEFAULT_VOICE,
+    'fish-narrator': FISH_AUDIO_DEFAULT_VOICE,
+}
+
+
+def _migrate_legacy_voice_id(voice):
+    voice = LEGACY_DOUBAO_VOICE_MAP.get(voice, voice)
+    return LEGACY_FISH_AUDIO_VOICE_MAP.get(voice, voice)
 
 TENCENT_VOICES = [
     {"id": "501002", "name": "智菊 - 阅读女声"},
@@ -898,11 +916,8 @@ XIAOMI_VOICES = [
 ]
 
 FISH_AUDIO_VOICES = [
-    {"id": "fish-animated", "name": "Fish Animated - 活泼女声"},
-    {"id": "fish-speech-zh", "name": "Fish Speech - 自然女声"},
-    {"id": "fish-audio-male", "name": "Fish Audio - 沉稳男声"},
-    {"id": "fish-narrator", "name": "Fish Narrator - 讲述者"},
-    {"id": "custom", "name": "Fish 自定义 (在配置中设置reference_id)"},
+    {"id": FISH_AUDIO_DEFAULT_VOICE, "name": "默认音色"},
+    {"id": "custom", "name": "自定义声音模型 (Reference ID)"},
 ]
 
 ALL_PROVIDERS = ['doubao', 'tencent', 'edge', 'xiaomi', 'fishaudio']
@@ -967,6 +982,7 @@ _VOICE_ALIASES = {
     '甸甘': 'zh_female_cancan_uranus_bigtts',
 }
 _VOICE_ALIASES.update(LEGACY_DOUBAO_VOICE_MAP)
+_VOICE_ALIASES.update(LEGACY_FISH_AUDIO_VOICE_MAP)
 # Aliases must resolve to a real voice ID, otherwise resolve_provider() sends the
 # request to a provider that will reject it.
 _VOICE_ALIASES = {k: v for k, v in _VOICE_ALIASES.items() if v in _ALL_VOICE_IDS}
@@ -1117,7 +1133,7 @@ def _copy_config(cfg):
 
 
 def load_config():
-    """Load config with mtime caching and purge removed Doubao credentials."""
+    """Load config with mtime caching and migrate retired provider settings."""
     try:
         st = os.stat(CONFIG_FILE)
         # Include size and inode: mtime alone has coarse granularity on some
@@ -1140,9 +1156,13 @@ def load_config():
     if old_voice in LEGACY_DOUBAO_VOICE_MAP:
         cfg['default_voice'] = LEGACY_DOUBAO_VOICE_MAP[old_voice]
         changed = True
+    old_fish_voice = cfg.get('fishaudio_voice')
+    if old_fish_voice in LEGACY_FISH_AUDIO_VOICE_MAP:
+        cfg['fishaudio_voice'] = LEGACY_FISH_AUDIO_VOICE_MAP[old_fish_voice]
+        changed = True
     favorites = cfg.get('voice_favorites')
     if isinstance(favorites, list):
-        migrated = [LEGACY_DOUBAO_VOICE_MAP.get(voice, voice) for voice in favorites]
+        migrated = [_migrate_legacy_voice_id(voice) for voice in favorites]
         if migrated != favorites:
             cfg['voice_favorites'] = migrated
             changed = True
@@ -1157,7 +1177,7 @@ def load_config():
             st = os.stat(CONFIG_FILE)
             stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
         except OSError as e:
-            log.warning("Failed to purge legacy Doubao config: %s", e)
+            log.warning("Failed to persist migrated config: %s", e)
     with _config_cache_lock:
         _config_cache['data'] = cfg
         _config_cache['mtime'] = stamp
@@ -1171,10 +1191,13 @@ def save_config(config):
     old_voice = clean.get('default_voice')
     if old_voice in LEGACY_DOUBAO_VOICE_MAP:
         clean['default_voice'] = LEGACY_DOUBAO_VOICE_MAP[old_voice]
+    old_fish_voice = clean.get('fishaudio_voice')
+    if old_fish_voice in LEGACY_FISH_AUDIO_VOICE_MAP:
+        clean['fishaudio_voice'] = LEGACY_FISH_AUDIO_VOICE_MAP[old_fish_voice]
     favorites = clean.get('voice_favorites')
     if isinstance(favorites, list):
         clean['voice_favorites'] = [
-            LEGACY_DOUBAO_VOICE_MAP.get(voice, voice) for voice in favorites
+            _migrate_legacy_voice_id(voice) for voice in favorites
         ]
     _write_json(CONFIG_FILE, clean)
     # Invalidate cache
@@ -1739,32 +1762,26 @@ def synthesize_fishaudio(text, voice, config=None):
     api_key = config.get('fishaudio_api_key', '')
     if not api_key:
         return None, "未配置Fish Audio API Key"
-    # Map voice to Fish Audio reference_id
-    voice_map = {
-        'fish-animated': 'b7f4b37e-6e92-4f72-a650-d2c8a1dc50e3',
-        'fish-speech-zh': '7f92f8a6-4cf1-4590-88c2-4e0f84eb265e',
-        'fish-audio-male': 'a5e6c9db-2b6c-4c3e-8c1e-2e8f0c3a4b5d',
-        'fish-narrator': '9d4f0c1e-5a2b-4c8d-9e6f-1a2b3c4d5e6f',
-    }
+    voice = LEGACY_FISH_AUDIO_VOICE_MAP.get(voice, voice)
+    ref_id = None
     if voice == 'custom':
         raw_ref_id = config.get('fishaudio_reference_id', '')
         ref_id = raw_ref_id.strip() if isinstance(raw_ref_id, str) else ''
         if not ref_id:
             return None, "自定义 Fish Audio 音色需要 Reference ID"
-    else:
-        # A saved custom reference must never override the built-in presets.
-        ref_id = voice_map.get(voice)
-        if not ref_id:
-            return None, f"不支持的 Fish Audio 音色: {voice}"
+    elif voice != FISH_AUDIO_DEFAULT_VOICE:
+        return None, f"不支持的 Fish Audio 音色: {voice}"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
     payload = {
         "text": text,
-        "reference_id": ref_id,
         "format": "mp3",
     }
+    # The API selects its default voice only when reference_id is omitted.
+    if ref_id:
+        payload["reference_id"] = ref_id
     def _do():
         resp = _http_session.post(
             "https://api.fish.audio/v1/tts",
@@ -3270,6 +3287,19 @@ def _validate_config_payload(data):
     return None
 
 
+def _normalize_legacy_config_payload(data):
+    """Return a copy with retired voice IDs replaced before validation."""
+    if not isinstance(data, dict):
+        return data
+    normalized = data.copy()
+    fish_voice = normalized.get('fishaudio_voice')
+    if isinstance(fish_voice, str):
+        stripped_voice = fish_voice.strip()
+        normalized['fishaudio_voice'] = LEGACY_FISH_AUDIO_VOICE_MAP.get(
+            stripped_voice, fish_voice)
+    return normalized
+
+
 def _apply_config_payload(config, data):
     """Merge an API/UI patch and return non-fatal compatibility warnings."""
     warnings = []
@@ -3326,7 +3356,7 @@ def api_config():
     if err:
         return err
     if request.method == 'POST':
-        data = request.get_json(silent=True)
+        data = _normalize_legacy_config_payload(request.get_json(silent=True))
         validation_error = _validate_config_payload(data)
         if validation_error:
             return _error_response(validation_error, 400, 'invalid_request_error')
@@ -3371,6 +3401,7 @@ def api_config_test():
     config = load_config()
     data = request.get_json(silent=True)
     if data is not None:
+        data = _normalize_legacy_config_payload(data)
         validation_error = _validate_config_payload(data)
         if validation_error:
             return _error_response(validation_error, 400, 'invalid_request_error')
@@ -3448,7 +3479,7 @@ def api_config_import():
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or not data:
         return _error_response('No JSON data', 400, 'invalid_request_error')
-    data = data.copy()
+    data = _normalize_legacy_config_payload(data)
     data.pop('_version', None)
     data.pop('_exported_at', None)
     masked_credentials = sorted(

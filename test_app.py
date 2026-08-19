@@ -263,6 +263,7 @@ class TestLoadConfig:
                 assert cfg['fallback_voice'] == 'zh-CN-XiaoxiaoNeural'
                 assert cfg['fallback_retry_count'] == 1
                 assert cfg['fallback_retry_delay_ms'] == 500
+                assert cfg['fishaudio_voice'] == 'fish-default'
             finally:
                 app_module.CONFIG_FILE = orig
 
@@ -314,6 +315,32 @@ class TestLoadConfig:
                 app_module.CONFIG_FILE = orig
         finally:
             os.unlink(path)
+
+    @pytest.mark.parametrize('legacy_voice', [
+        'fish-animated',
+        'fish-speech-zh',
+        'fish-audio-male',
+        'fish-narrator',
+    ])
+    def test_legacy_fishaudio_voice_is_migrated(
+            self, legacy_voice, monkeypatch, tmp_path):
+        import app as app_module
+
+        path = tmp_path / 'config.json'
+        _write_json(str(path), {
+            'provider': 'fishaudio',
+            'fishaudio_voice': legacy_voice,
+            'voice_favorites': [legacy_voice],
+        })
+        monkeypatch.setattr(app_module, 'CONFIG_FILE', str(path))
+
+        cfg = load_config()
+
+        assert cfg['fishaudio_voice'] == 'fish-default'
+        assert cfg['voice_favorites'] == ['fish-default']
+        persisted = _read_json(str(path), {})
+        assert persisted['fishaudio_voice'] == 'fish-default'
+        assert persisted['voice_favorites'] == ['fish-default']
 
 
 class TestAllVoicesUnique:
@@ -396,14 +423,14 @@ class TestDispatch:
         import app as app_module
         monkeypatch.setattr(app_module, 'FALLBACK_TO_EDGE', False)
         audio, error, actual_provider, actual_voice = app_module.dispatch(
-            'fishaudio', 'test', 'fish-animated', 0
+            'fishaudio', 'test', 'fish-default', 0
         )
         assert audio is None
         assert '未配置' in error
         assert actual_provider is None
         assert actual_voice is None
 
-    def test_fishaudio_preset_ignores_saved_custom_reference(self, monkeypatch):
+    def test_fishaudio_default_omits_reference_id(self, monkeypatch):
         import app as app_module
         captured = {}
 
@@ -418,14 +445,45 @@ class TestDispatch:
 
         monkeypatch.setattr(app_module._http_session, 'post', fake_post)
         audio, error = app_module.synthesize_fishaudio(
-            '测试', 'fish-animated', config={
+            '测试', 'fish-default', config={
                 'fishaudio_api_key': 'key',
                 'fishaudio_reference_id': 'custom-reference',
             })
 
         assert error is None
         assert audio == b'fish-audio'
-        assert captured['json']['reference_id'] == 'b7f4b37e-6e92-4f72-a650-d2c8a1dc50e3'
+        assert captured['json'] == {'text': '测试', 'format': 'mp3'}
+        assert captured['headers']['Authorization'] == 'Bearer key'
+
+    def test_fishaudio_custom_voice_sends_trimmed_reference_id(self, monkeypatch):
+        import app as app_module
+        captured = {}
+
+        class Response:
+            status_code = 200
+            content = b'custom-fish-audio'
+            text = ''
+
+        def fake_post(url, **kwargs):
+            captured['url'] = url
+            captured.update(kwargs)
+            return Response()
+
+        monkeypatch.setattr(app_module._http_session, 'post', fake_post)
+        audio, error = app_module.synthesize_fishaudio(
+            '测试', 'custom', config={
+                'fishaudio_api_key': 'key',
+                'fishaudio_reference_id': '  9a9cf47702da476aa4629e2506d4a857  ',
+            })
+
+        assert error is None
+        assert audio == b'custom-fish-audio'
+        assert captured['url'] == 'https://api.fish.audio/v1/tts'
+        assert captured['json'] == {
+            'text': '测试',
+            'format': 'mp3',
+            'reference_id': '9a9cf47702da476aa4629e2506d4a857',
+        }
 
     def test_fishaudio_custom_voice_requires_reference_id(self, monkeypatch):
         import app as app_module
@@ -621,6 +679,35 @@ class TestAPIEndpoints:
     def test_speech_stream_unknown_voice(self):
         r = self.client.post('/speech/stream', json={'text': 'hello', 'voice': 'invalid'})
         assert r.status_code == 400
+
+    def test_speech_stream_legacy_fish_voice_uses_default_payload(self, monkeypatch):
+        import app as app_module
+        captured = {}
+
+        class Response:
+            status_code = 200
+            content = b'fish-default-audio'
+            text = ''
+
+        def fake_post(url, **kwargs):
+            captured.update(kwargs)
+            return Response()
+
+        config = app_module.DEFAULT_CONFIG.copy()
+        config['fishaudio_api_key'] = 'key'
+        app_module.save_config(config)
+        monkeypatch.setattr(app_module._http_session, 'post', fake_post)
+
+        result = self.client.post('/speech/stream', json={
+            'text': '旧版链接',
+            'voice': 'fish-animated',
+            'provider': 'fishaudio',
+        })
+
+        assert result.status_code == 200
+        assert result.data == b'fish-default-audio'
+        assert result.headers['X-TTS-Voice'] == 'fish-default'
+        assert captured['json'] == {'text': '旧版链接', 'format': 'mp3'}
 
     def test_speech_stream_explicit_doubao_accepts_custom_voice(self, monkeypatch):
         import app as app_module
@@ -1227,6 +1314,17 @@ class TestAPIEndpoints:
         data = r.get_json()
         assert 'fishaudio' in data['provider_status']
 
+    def test_config_post_migrates_legacy_fishaudio_voice(self):
+        import app as app_module
+
+        result = self.client.post('/api/config', json={
+            'provider': 'fishaudio',
+            'fishaudio_voice': 'fish-narrator',
+        })
+
+        assert result.status_code == 200
+        assert app_module.load_config()['fishaudio_voice'] == 'fish-default'
+
     def test_openai_speech_speed_clamped(self):
         """Speed should be clamped to 0.25-4.0 range."""
         for speed in [0.0, -1.0, 5.0, 999.0]:
@@ -1504,8 +1602,8 @@ class TestLegadoEndpoints:
         ('tencent', '501002', '腾讯云 TTS - 智菊 - 阅读女声'),
         ('edge', 'zh-CN-XiaoxiaoNeural', 'Edge TTS - 晓晓 - 女声'),
         ('xiaomi', 'default_zh', '小米 MiMo - 中文女声'),
-        ('fishaudio', 'fish-animated',
-         'Fish Audio - Fish Animated - 活泼女声'),
+        # Copied links from releases with placeholder Fish presets still work.
+        ('fishaudio', 'fish-animated', 'Fish Audio - 默认音色'),
     ])
     def test_legado_config_uses_provider_and_voice_display_name(
             self, provider, voice, expected_name):
@@ -1796,6 +1894,22 @@ class TestConfigExportImport:
         from app import load_config
         config = load_config()
         assert config['provider'] == 'doubao'
+
+    def test_import_migrates_legacy_fishaudio_voice(self):
+        import app as app_module
+
+        result = self.client.post('/api/config/import', json={
+            '_version': '1.9.0',
+            'provider': 'fishaudio',
+            'fishaudio_api_key': 'key',
+            'fishaudio_voice': 'fish-animated',
+            'voice_favorites': ['fish-animated'],
+        })
+
+        assert result.status_code == 200
+        config = app_module.load_config()
+        assert config['fishaudio_voice'] == 'fish-default'
+        assert config['voice_favorites'] == ['fish-default']
 
     def test_import_empty_body(self):
         r = self.client.post('/api/config/import',

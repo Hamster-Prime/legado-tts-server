@@ -1,0 +1,11 @@
+[project]
+name = "legado-tts-server"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "edge-tts>=6.1",
+    "flask>=2.0",
+    "flask-cors>=3.0",
+    "gunicorn>=21.2",
+    "requests>=2.25",
+]

@@ -315,16 +315,19 @@
     }
 
     function updateThemeButton() {
-        const dark = document.documentElement.dataset.theme === 'dark';
+        const dark = document.documentElement.getAttribute('data-theme') === 'dark'
+            || document.documentElement.dataset.theme === 'dark';
         if ($('theme-icon')) $('theme-icon').textContent = dark ? '☀' : '◐';
         if ($('theme-label')) $('theme-label').textContent = dark ? '亮色' : '暗色';
         if ($('theme-button')) $('theme-button').setAttribute('aria-label', dark ? '切换到亮色主题' : '切换到暗色主题');
     }
 
     function toggleTheme() {
-        const dark = document.documentElement.dataset.theme === 'dark';
+        const dark = document.documentElement.getAttribute('data-theme') === 'dark'
+            || document.documentElement.dataset.theme === 'dark';
         const next = dark ? 'light' : 'dark';
         document.documentElement.dataset.theme = next;
+        document.documentElement.setAttribute('data-theme', next);
         try { localStorage.setItem('tts-theme', next); } catch (_) {}
         updateThemeButton();
     }
@@ -410,6 +413,7 @@
         $$('[data-console-tab]').forEach(tab => {
             const active = tab.dataset.consoleTab === pageName;
             tab.classList.toggle('is-active', active);
+            tab.classList.toggle('active', active);
             tab.setAttribute('aria-selected', String(active));
             tab.tabIndex = active ? 0 : -1;
         });
@@ -442,6 +446,25 @@
             });
         });
         setConsolePage('main');
+    }
+
+    function switchSubTab(sub) {
+        ['test', 'compare', 'logs'].forEach(t => {
+            const panel = $(`sub-panel-${t}`);
+            const btn = $(`btn-sub-${t}`);
+            const isActive = t === sub;
+            if (panel) {
+                panel.style.display = isActive ? 'flex' : 'none';
+                panel.classList.remove('fade-in');
+                void panel.offsetWidth;
+                panel.classList.add('fade-in');
+            }
+            if (btn) {
+                btn.classList.toggle('active', isActive);
+                btn.classList.toggle('is-active', isActive);
+            }
+        });
+        if (sub === 'logs') startMonitoring();
     }
 
     function credentialValue(field) {
@@ -837,7 +860,7 @@
             const actions = document.createElement('span');
             actions.className = 'custom-voice-actions';
             const use = document.createElement('button');
-            use.className = 'button ghost custom-voice-use';
+            use.className = 'btn btn-secondary btn-sm custom-voice-use';
             use.type = 'button';
             use.textContent = voice.id === currentVoiceId() ? '已选择' : '选择';
             use.disabled = state.customVoiceBusy || voice.id === currentVoiceId();
@@ -882,7 +905,8 @@
     function invalidateLegadoConfig(message = '正在生成配置…') {
         state.configRequestId += 1;
         state.legadoConfigText = '';
-        $('legado-config').textContent = message;
+        if ($('legado-config')) $('legado-config').textContent = message;
+        if ($('subscribe-url-display')) $('subscribe-url-display').value = message;
         $('copy-config-button').disabled = true;
         $('copy-subscribe-button').disabled = true;
         setFeedback('integration-feedback');
@@ -1011,9 +1035,10 @@
         }
         state.provider = provider;
         if (changed) restoreCustomVoiceForm(provider);
-        $$('.provider-option').forEach(button => {
+        $$('.provider-option, .provider-item').forEach(button => {
             const active = button.dataset.provider === provider;
             button.classList.toggle('is-active', active);
+            button.classList.toggle('active', active);
             button.setAttribute('aria-checked', String(active));
             button.tabIndex = active ? 0 : -1;
         });
@@ -1175,6 +1200,11 @@
             if (requestId !== state.configRequestId || voice !== currentVoiceId()) return;
             state.legadoConfigText = JSON.stringify(data);
             code.textContent = JSON.stringify(data, null, 2);
+            const subDisplay = $('subscribe-url-display');
+            if (subDisplay) {
+                const subUrl = `${window.location.origin}/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}&auto=true`;
+                subDisplay.value = subUrl;
+            }
             if (!$('copy-config-button').hasAttribute('aria-busy')) $('copy-config-button').disabled = false;
             if (!$('copy-subscribe-button').hasAttribute('aria-busy')) $('copy-subscribe-button').disabled = false;
         } catch (error) {
@@ -1450,8 +1480,10 @@
 
     function setServiceStatus(kind, text) {
         const element = $('service-status');
-        element.className = `service-pill is-${kind}`;
-        $('service-status-text').textContent = text;
+        if (element) {
+            element.className = `status-badge is-${kind}`;
+            $('service-status-text').textContent = text;
+        }
     }
 
     function renderHealth(health, metrics = null) {
@@ -1743,12 +1775,12 @@
             const actions = document.createElement('span');
             actions.className = 'voice-card-actions';
             const preview = document.createElement('button');
-            preview.className = 'button ghost';
+            preview.className = 'btn btn-secondary btn-sm';
             preview.type = 'button';
             preview.textContent = '试听';
             preview.addEventListener('click', () => previewLibraryVoice(voice, preview));
             const use = document.createElement('button');
-            use.className = 'button secondary';
+            use.className = 'btn btn-primary btn-sm';
             use.type = 'button';
             use.textContent = voice.id === currentVoiceId() ? '已选择' : '使用';
             use.disabled = voice.id === currentVoiceId();
@@ -1793,10 +1825,35 @@
         $('theme-button').addEventListener('click', toggleTheme);
         if ($('token-button')) $('token-button').addEventListener('click', setAdminToken);
         if ($('maintenance-token-button')) $('maintenance-token-button').addEventListener('click', setAdminToken);
-        $$('.provider-option').forEach(button => {
+        $$('.provider-option, .provider-item').forEach(button => {
             button.addEventListener('click', () => applyProvider(button.dataset.provider));
             button.addEventListener('keydown', handleProviderKeydown);
         });
+        $$('[data-subtab-target]').forEach(btn => {
+            btn.addEventListener('click', () => switchSubTab(btn.dataset.subtabTarget));
+        });
+        if ($('toggle-json-btn')) {
+            $('toggle-json-btn').addEventListener('click', () => {
+                const pre = $('legado-config');
+                if (pre) {
+                    const isHidden = pre.style.display === 'none';
+                    pre.style.display = isHidden ? 'block' : 'none';
+                    $('toggle-json-btn').textContent = isHidden ? '收起配置' : '展开配置';
+                }
+            });
+        }
+        if ($('clear-logs-btn')) {
+            $('clear-logs-btn').addEventListener('click', () => {
+                const feed = $('activity-feed');
+                if (feed) {
+                    feed.replaceChildren();
+                    const p = document.createElement('p');
+                    p.className = 'empty-state';
+                    p.textContent = '日志已清空，等待新的合成请求…';
+                    feed.appendChild(p);
+                }
+            });
+        }
         $('settings-form').addEventListener('submit', event => {
             event.preventDefault();
             if (state.dirty) saveConfig();
@@ -1915,7 +1972,7 @@
         } else if (configLoadError) {
             setFeedback('settings-feedback', `无法读取服务器设置：${configLoadError}`, 'warning');
         }
-        if (isSectionOpen('monitoring')) startMonitoring();
+        startMonitoring();
     }
 
     initialize().catch(error => {

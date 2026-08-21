@@ -934,6 +934,12 @@ FISH_AUDIO_VOICES = [
 ]
 
 ALL_PROVIDERS = ['doubao', 'tencent', 'edge', 'xiaomi', 'fishaudio']
+OPENAI_TTS_MODELS = (
+    'gpt-4o-mini-tts',
+    'gpt-4o-mini-tts-2025-12-15',
+    'tts-1',
+    'tts-1-hd',
+)
 CUSTOM_VOICE_PROVIDERS = ('doubao', 'fishaudio')
 MAX_CUSTOM_VOICES_PER_PROVIDER = 100
 MAX_CUSTOM_VOICE_NAME_LENGTH = 80
@@ -966,11 +972,18 @@ for _voices in [EDGE_VOICES, DOUBAO_VOICES, TENCENT_VOICES, XIAOMI_VOICES, FISH_
 _VOICE_ALIASES = {
     # OpenAI compatible aliases
     'alloy': 'zh-CN-XiaoxiaoNeural',
+    'ash': 'zh-CN-YunxiaNeural',
+    'ballad': 'zh-CN-XiaoyiNeural',
+    'coral': 'zh-CN-XiaoxiaoNeural',
     'echo': 'zh-CN-YunxiNeural',
     'fable': 'zh-CN-XiaoyiNeural',
     'onyx': 'zh-CN-YunjianNeural',
-    'nova': 'zh-CN-XiaochenNeural',
-    'shimmer': 'zh-CN-XiaohanNeural',
+    'nova': 'zh-CN-XiaoxiaoNeural',
+    'sage': 'zh-CN-YunyangNeural',
+    'shimmer': 'zh-CN-XiaoyiNeural',
+    'verse': 'zh-CN-YunyangNeural',
+    'marin': 'zh-CN-XiaoxiaoNeural',
+    'cedar': 'zh-CN-YunjianNeural',
     # Chinese shorthand
     '晓晓': 'zh-CN-XiaoxiaoNeural',
     '云希': 'zh-CN-YunxiNeural',
@@ -1820,8 +1833,9 @@ def _edge_communicate(text, voice, rate='+0%', style=None, volume='+0%', pitch='
         # SSML carries its own prosody; passing rate/volume/pitch too is rejected
         return edge_tts.Communicate(text, voice)
     kwargs = {'rate': rate}
-    if style:
-        kwargs['style'] = style
+    # edge-tts exposes numeric prosody controls but no free-form ``style``
+    # argument. Keep style in our internal call signature for compatibility
+    # with existing clients, but never forward an unsupported keyword.
     if volume != '+0%':
         kwargs['volume'] = volume
     if pitch != '+0Hz':
@@ -3870,7 +3884,11 @@ def api_openapi():
                          'requestBody': {'content': {'application/json': {'schema': {
                              'type': 'object',
                              'properties': {
-                                 'model': {'type': 'string', 'default': 'tts-1'},
+                                 'model': {
+                                     'type': 'string',
+                                     'enum': list(OPENAI_TTS_MODELS),
+                                     'default': 'tts-1',
+                                 },
                                  'input': {'type': 'string'},
                                  'voice': {
                                      'type': 'string',
@@ -3883,8 +3901,15 @@ def api_openapi():
                                  },
                                  'speed': {'type': 'number', 'default': 1.0},
                                  'response_format': {'type': 'string', 'enum': ['mp3', 'wav', 'ogg', 'aac', 'flac', 'pcm', 'opus']},
-                                 'stream_format': {'type': 'string', 'enum': ['audio', 'sse']},
-                                 'instructions': {'type': 'string', 'description': 'Style hint (Edge only)'},
+                                 'stream_format': {
+                                     'type': 'string',
+                                     'enum': ['audio', 'sse'],
+                                     'description': 'sse 仅支持 gpt-4o-mini-tts 系列模型',
+                                 },
+                                 'instructions': {
+                                     'type': 'string',
+                                     'description': '为兼容 OpenAI 请求而接受；当前聚合服务商不支持自由文本风格指令',
+                                 },
                              },
                              'required': ['input']
                          }}}},
@@ -4331,6 +4356,27 @@ def api_cache_clear():
 # OpenAI-compatible TTS API
 # ──────────────────────────────────────────────
 
+def _openai_sse_message(payload):
+    """Serialize one OpenAI speech event as an SSE data message."""
+    return f'data: {json.dumps(payload, separators=(",", ":"))}\n\n'
+
+
+def _openai_sse_delta(audio):
+    return _openai_sse_message({
+        'type': 'speech.audio.delta',
+        'audio': base64.b64encode(audio).decode(),
+    })
+
+
+def _openai_sse_done():
+    # Aggregated providers do not expose OpenAI token accounting. Report
+    # explicit zeroes instead of inventing token counts from character length.
+    return _openai_sse_message({
+        'type': 'speech.audio.done',
+        'usage': {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0},
+    })
+
+
 @app.route('/v1/audio/speech', methods=['POST'])
 def openai_speech():
     """OpenAI-compatible TTS endpoint.
@@ -4343,7 +4389,7 @@ def openai_speech():
         "response_format": "mp3",        // mp3|wav|ogg|aac|flac|pcm|opus (non-mp3 requires ffmpeg)
         "speed": 1.0,                    // 0.25-4.0
         "stream_format": "audio",        // audio (default) | sse (Server-Sent Events streaming)
-        "instructions": "speak slowly"   // optional: prepended to text as style hint (Edge only)
+        "instructions": "speak slowly"   // accepted for compatibility; currently ignored
     }
     """
     try:
@@ -4356,12 +4402,12 @@ def openai_speech():
             return key_err
 
         data = request.get_json(silent=True) or {}
+        model = str(data.get('model', 'tts-1')).strip() or 'tts-1'
         text = str(data.get('input', '')).strip()
         resp_format = str(data.get('response_format', 'mp3')).strip().lower()
         if resp_format not in _FORMAT_MIME:
             resp_format = 'mp3'
         stream_format = str(data.get('stream_format', 'audio')).strip().lower()
-        instructions = str(data.get('instructions', '')).strip()
         try:
             speed = float(data.get('speed', 1.0))
         except (ValueError, TypeError):
@@ -4373,6 +4419,14 @@ def openai_speech():
         if len(text) > MAX_TEXT_LENGTH:
             return _error_response(f'Input too long (max {MAX_TEXT_LENGTH})',
                                    400, 'invalid_request_error')
+        if stream_format not in ('audio', 'sse'):
+            return _error_response(
+                f'Unsupported stream_format: {stream_format}',
+                400, 'invalid_request_error')
+        if stream_format == 'sse' and model in ('tts-1', 'tts-1-hd'):
+            return _error_response(
+                f'stream_format=sse is not supported for model {model}',
+                400, 'invalid_request_error')
 
         voice, provider, target_error = _request_target(data)
         if target_error:
@@ -4388,49 +4442,69 @@ def openai_speech():
         if quota_err:
             return quota_err
 
-        # Apply instructions as style hint (currently Edge TTS only)
+        # OpenAI's GPT TTS models accept free-form instructions, while the
+        # aggregated providers expose only fixed prosody controls. Accept the
+        # field for client compatibility without sending an unsupported Edge
+        # ``style`` keyword (which would turn an otherwise valid request into
+        # a 500 response).
         style = None
-        if instructions and provider == 'edge':
-            style = instructions[:100]  # cap length to avoid abuse
 
         # Convert speed (0.25-4.0) to percentage (-75% to +300%)
         pct = (speed - 1.0) * 100
 
-        # SSE streaming mode (Edge TTS only; fallback to buffered for other providers)
-        if stream_format == 'sse' and provider == 'edge':
+        # MP3 from Edge can be forwarded incrementally. Other providers and
+        # formats are synthesized first, then wrapped in the same SSE schema.
+        if stream_format == 'sse' and provider == 'edge' and resp_format == 'mp3':
             clean_text = _clean_text(text)
             if not clean_text:
                 return _error_response('Text is empty after cleaning', 400, 'invalid_request_error')
 
             stream_state = getattr(request, '_tts_stream_state', None)
+            source = _edge_stream_iter(
+                clean_text, voice, rate=_pct_to_rate(pct), style=style)
+            try:
+                first_chunk = next(source)
+            except StopIteration:
+                error = 'Edge TTS returned empty audio'
+            except Exception as e:
+                error = str(e)
+            else:
+                error = None
+            if error is not None:
+                close_source = getattr(source, 'close', None)
+                if close_source:
+                    close_source()
+                return _error_response(
+                    f'TTS failed: {error}', 500, 'server_error',
+                    headers=_tts_retry_headers())
 
             def _sse_generate():
-                sent = 0
                 completed = False
                 try:
                     # Chunks arrive incrementally from upstream; each is forwarded as
                     # soon as it lands rather than after the whole synthesis completes.
-                    for chunk in _edge_stream_iter(clean_text, voice, rate=_pct_to_rate(pct),
-                                                   style=style):
-                        sent += len(chunk)
-                        b64 = base64.b64encode(chunk).decode()
-                        yield f'data: {json.dumps({"type": "audio_chunk", "data": b64})}\n\n'
-                    if not sent:
-                        raise RuntimeError('Edge TTS returned empty audio')
-                    yield f'data: {json.dumps({"type": "done"})}\n\n'
+                    yield _openai_sse_delta(first_chunk)
+                    for chunk in source:
+                        yield _openai_sse_delta(chunk)
+                    yield _openai_sse_done()
                     completed = True
                 except Exception as e:
                     log.error('SSE stream error: %s', e)
                     _mark_stream_failure(stream_state, e)
-                    yield f'data: {json.dumps({"type": "error", "message": str(e)})}\n\n'
+                    raise
                 finally:
+                    close_source = getattr(source, 'close', None)
+                    if close_source:
+                        close_source()
                     if completed:
                         update_stats(len(clean_text), provider, voice=voice)
 
             return Response(_sse_generate(), mimetype='text/event-stream',
                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
                                      'X-TTS-Provider': provider, 'X-TTS-Voice': voice,
-                                     'X-TTS-Retry-Count': '0'})
+                                     'X-TTS-Retry-Count': '0',
+                                     'X-TTS-Chars': str(len(text)),
+                                     'X-TTS-Format': 'mp3'})
 
         audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct, style=style)
 
@@ -4448,6 +4522,25 @@ def openai_speech():
                 audio, provider, voice, final_provider, final_voice, len(text))
             headers['Content-Type'] = mime
             headers['X-TTS-Format'] = actual_format
+            if stream_format == 'sse':
+                sse_headers = {
+                    'Cache-Control': 'no-cache',
+                    'X-Accel-Buffering': 'no',
+                    'X-TTS-Chars': str(len(text)),
+                    'X-TTS-Format': actual_format,
+                    **_tts_metadata_headers(
+                        provider, voice, final_provider, final_voice),
+                }
+
+                def _buffered_sse_generate():
+                    yield _openai_sse_delta(audio)
+                    yield _openai_sse_done()
+
+                return Response(
+                    _buffered_sse_generate(),
+                    mimetype='text/event-stream',
+                    headers=sse_headers,
+                )
             return Response(audio, mimetype=mime, headers=headers)
         return _error_response(
             f'TTS failed: {error}', 500, 'server_error',
@@ -4461,11 +4554,17 @@ def openai_speech():
 @app.route('/v1/models', methods=['GET'])
 def openai_models():
     """OpenAI-compatible models list."""
+    created = int(_metrics.get('_start_time', time.time()))
     return jsonify({
         'object': 'list',
         'data': [
-            {'id': 'tts-1', 'object': 'model', 'owned_by': 'legado-tts-server'},
-            {'id': 'tts-1-hd', 'object': 'model', 'owned_by': 'legado-tts-server'},
+            {
+                'id': model,
+                'object': 'model',
+                'created': created,
+                'owned_by': 'legado-tts-server',
+            }
+            for model in OPENAI_TTS_MODELS
         ]
     })
 

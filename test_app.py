@@ -1626,9 +1626,8 @@ class TestAPIEndpoints:
             'input': '测试',
             'voice': 'zh-CN-XiaoxiaoNeural',
         })
-        assert r.status_code in (200, 500)
-        if r.status_code == 200:
-            assert r.content_type == 'audio/mpeg'
+        assert r.status_code == 200
+        assert r.content_type == 'audio/mpeg'
 
     def test_openai_speech_missing_input(self):
         r = self.client.post('/v1/audio/speech', json={
@@ -1662,14 +1661,61 @@ class TestAPIEndpoints:
             'voice': 'zh-CN-XiaoxiaoNeural',
             'speed': 1.5,
         })
-        assert r.status_code in (200, 500)
+        assert r.status_code == 200
+
+    @pytest.mark.parametrize('model', ['tts-1', 'tts-1-hd'])
+    def test_openai_sse_rejects_legacy_tts_models(self, model):
+        r = self.client.post('/v1/audio/speech', json={
+            'model': model,
+            'input': '测试',
+            'voice': 'alloy',
+            'stream_format': 'sse',
+        })
+        assert r.status_code == 400
+        assert 'not supported' in r.get_json()['error']['message']
+
+    def test_openai_rejects_unknown_stream_format(self):
+        r = self.client.post('/v1/audio/speech', json={
+            'model': 'gpt-4o-mini-tts',
+            'input': '测试',
+            'voice': 'alloy',
+            'stream_format': 'invalid',
+        })
+        assert r.status_code == 400
 
     def test_openai_models(self):
         r = self.client.get('/v1/models')
         assert r.status_code == 200
         data = r.get_json()
         assert data['object'] == 'list'
-        assert len(data['data']) >= 2
+        assert {model['id'] for model in data['data']} == {
+            'gpt-4o-mini-tts',
+            'gpt-4o-mini-tts-2025-12-15',
+            'tts-1',
+            'tts-1-hd',
+        }
+        assert all(isinstance(model['created'], int) for model in data['data'])
+
+    @pytest.mark.parametrize('voice', [
+        'alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'onyx',
+        'nova', 'sage', 'shimmer', 'verse', 'marin', 'cedar',
+    ])
+    def test_openai_current_builtin_voice_aliases(self, voice):
+        r = self.client.post('/v1/audio/speech', json={
+            'model': 'gpt-4o-mini-tts',
+            'input': '测试',
+            'voice': voice,
+        })
+        assert r.status_code == 200
+        assert r.headers['X-TTS-Provider'] == 'edge'
+        assert r.headers['X-TTS-Voice'] in {
+            'zh-CN-XiaoxiaoNeural',
+            'zh-CN-XiaoyiNeural',
+            'zh-CN-YunjianNeural',
+            'zh-CN-YunxiNeural',
+            'zh-CN-YunxiaNeural',
+            'zh-CN-YunyangNeural',
+        }
 
     def test_openai_speech_voice_by_name(self):
         """Test voice resolution by display name."""
@@ -1678,7 +1724,7 @@ class TestAPIEndpoints:
             'input': '测试',
             'voice': '晓晓 - 女声',  # display name
         })
-        assert r.status_code in (200, 500)  # should resolve, not 400
+        assert r.status_code == 200
 
     def test_speech_stream_rate_parsing(self):
         """Test that rate parameter is correctly parsed."""
@@ -1788,7 +1834,7 @@ class TestAPIEndpoints:
                 'model': 'tts-1', 'input': '测试',
                 'voice': 'zh-CN-XiaoxiaoNeural', 'speed': speed,
             })
-            assert r.status_code in (200, 500), f"speed={speed} should be clamped, got {r.status_code}"
+            assert r.status_code == 200, f"speed={speed} should be clamped, got {r.status_code}"
 
     def test_openai_speech_speed_invalid_string(self):
         """Non-numeric speed should default to 1.0."""
@@ -1796,15 +1842,15 @@ class TestAPIEndpoints:
             'model': 'tts-1', 'input': '测试',
             'voice': 'zh-CN-XiaoxiaoNeural', 'speed': 'not_a_number',
         })
-        assert r.status_code in (200, 500)
+        assert r.status_code == 200
 
     def test_openai_speech_response_format_default(self):
         """Default response_format should be mp3."""
         r = self.client.post('/v1/audio/speech', json={
             'model': 'tts-1', 'input': '测试', 'voice': 'zh-CN-XiaoxiaoNeural',
         })
-        if r.status_code == 200:
-            assert r.content_type.startswith('audio/mpeg')
+        assert r.status_code == 200
+        assert r.content_type.startswith('audio/mpeg')
 
     def test_openai_speech_response_format_flac(self):
         """A supported non-mp3 format is honoured when ffmpeg is available,
@@ -1814,11 +1860,11 @@ class TestAPIEndpoints:
             'model': 'tts-1', 'input': '测试', 'voice': 'zh-CN-XiaoxiaoNeural',
             'response_format': 'flac',
         })
-        if r.status_code == 200:
-            actual = r.headers.get('X-TTS-Format')
-            assert actual in ('flac', 'mp3')
-            # The content type must always describe the bytes actually sent.
-            assert r.content_type.startswith(_FORMAT_MIME[actual])
+        assert r.status_code == 200
+        actual = r.headers.get('X-TTS-Format')
+        assert actual in ('flac', 'mp3')
+        # The content type must always describe the bytes actually sent.
+        assert r.content_type.startswith(_FORMAT_MIME[actual])
 
     def test_openai_speech_response_format_unsupported(self):
         """An unrecognized format falls back to mp3."""
@@ -1826,9 +1872,9 @@ class TestAPIEndpoints:
             'model': 'tts-1', 'input': '测试', 'voice': 'zh-CN-XiaoxiaoNeural',
             'response_format': 'nonsense',
         })
-        if r.status_code == 200:
-            assert r.content_type.startswith('audio/mpeg')
-            assert r.headers.get('X-TTS-Format') == 'mp3'
+        assert r.status_code == 200
+        assert r.content_type.startswith('audio/mpeg')
+        assert r.headers.get('X-TTS-Format') == 'mp3'
 
 
 class TestAdminAuth:
@@ -3623,6 +3669,107 @@ class TestStreaming:
         assert b''.join(r.response) == b'edge-1edge-2'
         r.close()
 
+    def test_openai_instructions_do_not_pass_unsupported_edge_style(self, monkeypatch):
+        import app as app_module
+
+        class FakeCommunicate:
+            def __init__(self, *args, **kwargs):
+                assert 'style' not in kwargs
+
+            async def stream(self):
+                yield {'type': 'audio', 'data': b'openai-edge-audio'}
+
+        app_module._cache_clear()
+        monkeypatch.setattr(app_module.edge_tts, 'Communicate', FakeCommunicate)
+        monkeypatch.setattr(app_module, 'update_stats', lambda *args, **kwargs: None)
+
+        result = self.client.post('/v1/audio/speech', json={
+            'model': 'gpt-4o-mini-tts',
+            'input': '测试',
+            'voice': 'coral',
+            'instructions': 'Speak clearly and warmly.',
+        })
+
+        assert result.status_code == 200
+        assert result.data == b'openai-edge-audio'
+        assert result.headers['X-TTS-Provider'] == 'edge'
+
+    def test_openai_sse_uses_official_event_schema(self, monkeypatch):
+        import app as app_module
+
+        monkeypatch.setattr(
+            app_module, '_edge_stream_iter',
+            lambda *args, **kwargs: iter((b'edge-1', b'edge-2')),
+        )
+        monkeypatch.setattr(app_module, 'update_stats', lambda *args, **kwargs: None)
+
+        result = self.client.post('/v1/audio/speech', json={
+            'model': 'gpt-4o-mini-tts',
+            'input': '测试',
+            'voice': 'alloy',
+            'stream_format': 'sse',
+        }, buffered=False)
+        body = b''.join(result.response).decode()
+        result.close()
+        events = [
+            json.loads(line.removeprefix('data: '))
+            for line in body.splitlines()
+            if line.startswith('data: ')
+        ]
+
+        assert result.status_code == 200
+        assert result.content_type.startswith('text/event-stream')
+        assert events == [
+            {
+                'type': 'speech.audio.delta',
+                'audio': base64.b64encode(b'edge-1').decode(),
+            },
+            {
+                'type': 'speech.audio.delta',
+                'audio': base64.b64encode(b'edge-2').decode(),
+            },
+            {
+                'type': 'speech.audio.done',
+                'usage': {
+                    'input_tokens': 0,
+                    'output_tokens': 0,
+                    'total_tokens': 0,
+                },
+            },
+        ]
+
+    def test_openai_sse_wraps_buffered_provider_audio(self, monkeypatch):
+        import app as app_module
+
+        monkeypatch.setattr(
+            app_module, 'dispatch',
+            lambda provider, text, voice, pct, **kwargs: (
+                b'tencent-audio', None, provider, voice),
+        )
+        monkeypatch.setattr(app_module, 'update_stats', lambda *args, **kwargs: None)
+
+        result = self.client.post('/v1/audio/speech', json={
+            'model': 'gpt-4o-mini-tts',
+            'input': '测试',
+            'provider': 'tencent',
+            'voice': '501000',
+            'stream_format': 'sse',
+        })
+        events = [
+            json.loads(line.removeprefix('data: '))
+            for line in result.get_data(as_text=True).splitlines()
+            if line.startswith('data: ')
+        ]
+
+        assert result.status_code == 200
+        assert result.content_type.startswith('text/event-stream')
+        assert result.headers['X-TTS-Provider'] == 'tencent'
+        assert events[0] == {
+            'type': 'speech.audio.delta',
+            'audio': base64.b64encode(b'tencent-audio').decode(),
+        }
+        assert events[-1]['type'] == 'speech.audio.done'
+
     def test_chunked_edge_failure_after_audio_is_reclassified(self, monkeypatch):
         import app as app_module
 
@@ -3665,17 +3812,16 @@ class TestStreaming:
             failed_before = app_module._metrics['requests_failed']
 
         result = self.client.post('/v1/audio/speech', json={
-            'model': 'tts-1',
+            'model': 'gpt-4o-mini-tts',
             'input': '测试',
             'voice': 'zh-CN-XiaoxiaoNeural',
             'stream_format': 'sse',
         }, buffered=False)
-        body = b''.join(result.response)
-        result.close()
 
         assert result.status_code == 200
-        assert b'audio_chunk' in body
-        assert b'openai sse interrupted' in body
+        with pytest.raises(RuntimeError, match='openai sse interrupted'):
+            b''.join(result.response)
+        result.close()
         with app_module._metrics_lock:
             assert app_module._metrics['requests_success'] == success_before
             assert app_module._metrics['requests_failed'] == failed_before + 1
@@ -3683,6 +3829,26 @@ class TestStreaming:
         audit = next(record for record in reversed(app_module._audit_log)
                      if record['request_id'] == request_id)
         assert audit['outcome'] == 'stream_failed'
+
+    def test_openai_sse_failure_before_audio_returns_http_error(self, monkeypatch):
+        import app as app_module
+
+        def failed_before_audio(*args, **kwargs):
+            raise RuntimeError('edge unavailable before audio')
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(app_module, '_edge_stream_iter', failed_before_audio)
+
+        result = self.client.post('/v1/audio/speech', json={
+            'model': 'gpt-4o-mini-tts',
+            'input': '测试',
+            'voice': 'alloy',
+            'stream_format': 'sse',
+        })
+
+        assert result.status_code == 500
+        assert result.is_json
+        assert 'edge unavailable before audio' in result.get_json()['error']['message']
 
     def test_rate_limit_headers_present(self):
         r = self.client.get('/health')

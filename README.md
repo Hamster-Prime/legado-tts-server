@@ -5,7 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.9.0-green.svg)
-![Tests](https://img.shields.io/badge/tests-330%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-350%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
 
@@ -69,7 +69,7 @@
 | 小米 MiMo | 3 | 风格控制、方言、歌声合成 |
 | Fish Audio | 默认 + 自定义音色库 | 可保存多条带名称的声音模型 Reference ID |
 
-**音色别名**：支持 OpenAI 音色名（alloy/echo/nova）、中文名（晓晓/云希）、倍速（1.5x/2x）等
+**音色别名**：支持 OpenAI 当前内置音色名（alloy/ash/ballad/coral/echo/fable/onyx/nova/sage/shimmer/verse/marin/cedar）、中文名（晓晓/云希）、倍速（1.5x/2x）等
 
 ---
 
@@ -283,6 +283,14 @@ curl -X POST http://localhost:8080/speech/stream \
 | POST | `/api/speech/batch` | 批量合成（最多 `BATCH_MAX_TEXTS` 条，默认20） |
 | POST | `/api/tts/preview` | 试听短句（返回音频，计入限流与配额） |
 
+OpenAI 兼容端点接受 `gpt-4o-mini-tts`、固定快照
+`gpt-4o-mini-tts-2025-12-15`、`tts-1` 和 `tts-1-hd` 模型名。模型名用于兼容
+OpenAI 客户端，实际服务商仍由 `provider`、`voice` 或 Web UI 保存的默认目标决定。
+`instructions` 字段也可正常传入，但当前聚合服务商不支持自由文本风格提示，因此会忽略
+该字段；语速请使用标准 `speed` 参数。使用 `stream_format=sse` 时，服务返回
+OpenAI 标准的 `speech.audio.delta` / `speech.audio.done` 事件；本地服务商不提供
+OpenAI token 计量，因此结束事件中的 `usage` 三项为 `0`。
+
 ### 音色管理
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -405,7 +413,8 @@ location /speech/stream {
 
 若客户端使用兼容入口 `/speech/stream/chunked`，请对该路径应用相同配置；外层 CDN 或网关也必须关闭响应缓冲，否则会重新变成整段音频完成后才开始播放。
 
-OpenAI 兼容接口和批量接口仍会收集完整音频，以支持格式转换和 Base64 批量返回。
+OpenAI 兼容接口默认的 `audio` 模式和批量接口会收集完整音频，以支持格式转换和
+Base64 批量返回；`stream_format=sse` 且使用 Edge 音色时会逐块返回音频事件。
 
 ---
 

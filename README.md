@@ -5,7 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.9.0-green.svg)
-![Tests](https://img.shields.io/badge/tests-350%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-368%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
 
@@ -280,16 +280,53 @@ curl -X POST http://localhost:8080/speech/stream \
 | POST | `/speech/stream` | Legado TTS；火山引擎端到端流式输出 |
 | POST | `/speech/stream/chunked` | 兼容入口；火山引擎和 Edge 流式输出 |
 | POST | `/v1/audio/speech` | OpenAI 兼容 TTS |
+| GET | `/v1/models` / `/v1/models/{id}` | OpenAI 兼容模型列表与查询 |
+| GET | `/v1/voices` | Provider 音色目录（OpenAI 扩展） |
 | POST | `/api/speech/batch` | 批量合成（最多 `BATCH_MAX_TEXTS` 条，默认20） |
 | POST | `/api/tts/preview` | 试听短句（返回音频，计入限流与配额） |
 
 OpenAI 兼容端点接受 `gpt-4o-mini-tts`、固定快照
-`gpt-4o-mini-tts-2025-12-15`、`tts-1` 和 `tts-1-hd` 模型名。模型名用于兼容
-OpenAI 客户端，实际服务商仍由 `provider`、`voice` 或 Web UI 保存的默认目标决定。
-`instructions` 字段也可正常传入，但当前聚合服务商不支持自由文本风格提示，因此会忽略
-该字段；语速请使用标准 `speed` 参数。使用 `stream_format=sse` 时，服务返回
-OpenAI 标准的 `speech.audio.delta` / `speech.audio.done` 事件；本地服务商不提供
-OpenAI token 计量，因此结束事件中的 `usage` 三项为 `0`。
+`gpt-4o-mini-tts-2025-12-15`、`tts-1` 和 `tts-1-hd` 模型名。若客户端只支持
+标准 OpenAI 字段（`model`、`voice`、`input`），可用以下 Provider 专用模型 ID
+固定路由，不需要额外发送非标准的 `provider` 字段：
+
+| 模型 ID | 服务商 | `voice` 示例 |
+|----------|--------|--------------|
+| `legado-edge-tts` | Edge TTS | `zh-CN-XiaoxiaoNeural` |
+| `legado-volcengine-tts` | 火山引擎 | `zh_female_cancan_uranus_bigtts` |
+| `legado-tencent-tts` | 腾讯云 | `501002` |
+| `legado-xiaomi-mimo-tts` | 小米 MiMo | `mimo_default` / `default_zh` |
+| `legado-fish-audio-tts` | Fish Audio | `fish-default` 或已保存的 Reference ID |
+
+模型名也接受短别名，例如 `doubao-tts`、`fishaudio-tts`、`mimo-v2-tts`、
+`tencent-tts` 和 `edge-tts`。省略 `voice` 时使用该服务商在 Web 管理页保存的音色。
+Fish Audio 自定义音色必须先在服务端音色库保存，然后可以直接作为 `voice` 传入。
+也可以使用 `fishaudio:my-reference-id`、`doubao:voice_type` 这样的命名空间音色；
+`GET /v1/voices` 会返回可直接复制的 Provider 音色目录。
+
+例如，标准 OpenAI TTS 客户端可将 Base URL 指向本服务，并使用：
+
+```json
+{
+  "model": "legado-volcengine-tts",
+  "voice": "zh_female_cancan_uranus_bigtts",
+  "input": "这段文字由火山引擎合成。"
+}
+```
+
+客户端配置时，Base URL 填服务地址加 `/v1`，例如
+`http://127.0.0.1:8080/v1`；如果客户端要求 API Key，在服务未设置
+`API_KEYS_REQUIRED=1` 时可填任意占位值。火山、腾讯、MiMo、Fish Audio 的上游
+凭证仍需先在本服务 Web 管理页配置并保存，客户端只访问本服务，不直接访问这些上游。
+同一个 Base URL 可以添加多个模型条目，分别选择不同 Provider。
+
+Provider 专用模型请求失败时不会静默切换到 Edge，客户端会收到错误；成功响应的
+`X-TTS-Provider` 和 `X-TTS-Voice` 头部会标明实际目标。`instructions` 字段也可传入，
+但当前聚合服务商不支持自由文本风格提示，因此会忽略该字段；语速请使用标准
+`speed` 参数。使用 `stream_format=sse` 时，服务返回 OpenAI 标准的
+`speech.audio.delta` / `speech.audio.done` 事件；本地服务商不提供 OpenAI token
+计量，因此结束事件中的 `usage` 三项为 `0`。非 Edge 流式通常是合成完成后再包装为一个
+音频事件，不代表上游实时分片。
 
 ### 音色管理
 | 方法 | 路径 | 说明 |

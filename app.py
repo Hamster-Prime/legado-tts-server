@@ -940,6 +940,43 @@ OPENAI_TTS_MODELS = (
     'tts-1',
     'tts-1-hd',
 )
+# Provider-specific model IDs make the server's non-OpenAI backends usable by
+# clients that only send the standard OpenAI ``model``/``voice`` fields.  The
+# IDs are aliases for routing; the upstream provider still supplies the audio.
+OPENAI_PROVIDER_MODELS = {
+    'legado-edge-tts': 'edge',
+    'legado-volcengine-tts': 'doubao',
+    'legado-tencent-tts': 'tencent',
+    'legado-xiaomi-mimo-tts': 'xiaomi',
+    'legado-fish-audio-tts': 'fishaudio',
+}
+OPENAI_PROVIDER_MODEL_ALIASES = {
+    **OPENAI_PROVIDER_MODELS,
+    # Short/brand aliases are accepted for clients where model IDs are typed
+    # manually.  Canonical IDs above are the ones advertised by /v1/models.
+    'edge-tts': 'edge',
+    'edge': 'edge',
+    'doubao-tts': 'doubao',
+    'volcengine-tts': 'doubao',
+    'volcengine': 'doubao',
+    'seed-tts-2.0': 'doubao',
+    'doubao': 'doubao',
+    'tencent-tts': 'tencent',
+    'tencent': 'tencent',
+    'mimo-v2-tts': 'xiaomi',
+    'mimo-v2': 'xiaomi',
+    'xiaomi-mimo-tts': 'xiaomi',
+    'xiaomi-mimo': 'xiaomi',
+    'xiaomi-tts': 'xiaomi',
+    'mimo': 'xiaomi',
+    'fishaudio-tts': 'fishaudio',
+    'fish-audio-tts': 'fishaudio',
+    'fish-tts': 'fishaudio',
+    'fish-audio': 'fishaudio',
+    'fish-speech': 'fishaudio',
+    'fishaudio': 'fishaudio',
+}
+OPENAI_TTS_MODELS = OPENAI_TTS_MODELS + tuple(OPENAI_PROVIDER_MODELS)
 CUSTOM_VOICE_PROVIDERS = ('doubao', 'fishaudio')
 MAX_CUSTOM_VOICES_PER_PROVIDER = 100
 MAX_CUSTOM_VOICE_NAME_LENGTH = 80
@@ -1168,6 +1205,44 @@ def _resolve_voice_alias(voice):
     if not voice or voice in _ALL_VOICE_IDS:
         return voice
     return _VOICE_NAME_TO_ID.get(voice.lower(), voice)
+
+
+_OPENAI_VOICE_PROVIDER_ALIASES = {
+    'edge': 'edge',
+    'doubao': 'doubao',
+    'volcengine': 'doubao',
+    'tencent': 'tencent',
+    'xiaomi': 'xiaomi',
+    'mimo': 'xiaomi',
+    'fishaudio': 'fishaudio',
+    'fish': 'fishaudio',
+    'fish-audio': 'fishaudio',
+}
+
+
+def _openai_provider_for_model(model):
+    """Return the fixed Provider selected by an OpenAI-compatible model ID."""
+    normalized = _sanitize_voice(model).lower()
+    return OPENAI_PROVIDER_MODEL_ALIASES.get(normalized)
+
+
+def _split_openai_voice_namespace(value):
+    """Support ``provider:voice`` (or ``provider/voice``) in standard clients.
+
+    OpenAI's public speech schema has no provider field.  A namespace is useful
+    for generic model IDs and for custom Fish/Volcengine voice IDs that cannot
+    be inferred from their raw identifier.  Only known provider prefixes are
+    stripped; colons inside the actual voice ID remain untouched.
+    """
+    voice = _sanitize_voice(value)
+    for separator in (':', '/'):
+        prefix, marker, remainder = voice.partition(separator)
+        if not marker or not remainder:
+            continue
+        provider = _OPENAI_VOICE_PROVIDER_ALIASES.get(prefix.lower())
+        if provider:
+            return remainder, provider
+    return voice, None
 
 
 def _tts_headers(audio, requested_provider, requested_voice,
@@ -2584,7 +2659,9 @@ def _apply_pronunciation_dict(text):
 def dispatch(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz'):
     """Route to the correct TTS provider and return (audio_bytes, error, actual_provider, actual_voice).
     When enabled in the persisted fallback policy and a non-edge provider
-    fails, synthesize with the configured Edge voice after provider retries."""
+    fails, synthesize with the configured Edge voice after provider retries.
+    OpenAI provider-specific model requests can disable that fallback through
+    the request-local ``_tts_allow_fallback`` flag."""
     text = _clean_text(text)
     if not text:
         return None, 'Text is empty after cleaning', None, None
@@ -2603,7 +2680,10 @@ def dispatch(provider, text, voice, pct, style=None, volume='+0%', pitch='+0Hz')
 
     # Fallback to Edge TTS if enabled and primary provider is not edge.
     policy = _fallback_policy()
-    if policy['enabled'] and provider != 'edge':
+    allow_fallback = True
+    if has_request_context():
+        allow_fallback = getattr(request, '_tts_allow_fallback', True)
+    if policy['enabled'] and provider != 'edge' and allow_fallback:
         fallback_voice = policy['voice']
         log.warning(
             "Fallback to Edge TTS: provider=%s voice=%s fallback_voice=%s retries=%d error=%s",
@@ -3375,15 +3455,57 @@ def _configured_request_target(config=None, requested_provider=None):
     return voice, provider, None
 
 
-def _request_target(data):
+def _request_target(data, requested_model=None):
     """Resolve a synthesis request, falling back to saved defaults.
 
     Explicit voices keep the historical alias/provider-inference behaviour.
     When ``voice`` is omitted, an explicit provider uses that provider's saved
     voice; when both are omitted, the saved active provider and voice are used.
     An explicitly supplied empty voice is still rejected as invalid input.
+
+    ``requested_model`` is used by the OpenAI-compatible endpoint to select a
+    provider without requiring the non-standard ``provider`` JSON field.
     """
     requested_provider = data.get('provider')
+    explicit_provider = _sanitize_voice(requested_provider).lower()
+    model_provider = _openai_provider_for_model(requested_model)
+
+    if explicit_provider and model_provider and explicit_provider != model_provider:
+        return '', None, (
+            f'Model {requested_model} selects provider {model_provider}, '
+            f'but provider={explicit_provider} was requested'
+        )
+
+    if 'voice' in data:
+        raw_voice_value = data.get('voice')
+        if isinstance(raw_voice_value, dict):
+            # The current OpenAI schema also permits a custom voice object
+            # such as {"id": "voice_123"}.  Treat its ID like the string form
+            # so provider-specific model routing works with both forms.
+            raw_voice_value = raw_voice_value.get('id')
+            if not isinstance(raw_voice_value, str):
+                return '', None, 'voice object must contain a string id'
+        raw_voice = _sanitize_voice(raw_voice_value)
+        namespaced_voice, voice_provider = _split_openai_voice_namespace(raw_voice)
+        if (explicit_provider and voice_provider
+                and explicit_provider != voice_provider):
+            return '', None, (
+                f'Voice namespace selects provider {voice_provider}, '
+                f'but provider={explicit_provider} was requested'
+            )
+        if (model_provider and voice_provider
+                and model_provider != voice_provider):
+            return '', None, (
+                f'Model {requested_model} selects provider {model_provider}, '
+                f'but voice namespace selects {voice_provider}'
+            )
+        if isinstance(data.get('voice'), dict) or namespaced_voice != raw_voice:
+            data = dict(data)
+            data['voice'] = namespaced_voice
+        requested_provider = requested_provider or model_provider or voice_provider
+    elif model_provider and not explicit_provider:
+        requested_provider = model_provider
+
     if 'voice' not in data:
         return _configured_request_target(
             requested_provider=requested_provider)
@@ -3888,11 +4010,26 @@ def api_openapi():
                                      'type': 'string',
                                      'enum': list(OPENAI_TTS_MODELS),
                                      'default': 'tts-1',
+                                     'description': (
+                                         '使用 legado-* 模型 ID 可固定路由到对应服务商；'
+                                         'gpt/tts 模型按 voice 或服务器默认目标路由'
+                                     ),
                                  },
                                  'input': {'type': 'string'},
                                  'voice': {
-                                     'type': 'string',
-                                     'description': '省略时使用已保存的默认音色',
+                                     'oneOf': [
+                                         {'type': 'string'},
+                                         {
+                                             'type': 'object',
+                                             'properties': {'id': {'type': 'string'}},
+                                             'required': ['id'],
+                                             'additionalProperties': False,
+                                         },
+                                     ],
+                                     'description': (
+                                         '省略时使用所选服务商的已保存音色；'
+                                         '也支持 provider:voice 命名空间'
+                                     ),
                                  },
                                  'provider': {
                                      'type': 'string',
@@ -3901,10 +4038,18 @@ def api_openapi():
                                  },
                                  'speed': {'type': 'number', 'default': 1.0},
                                  'response_format': {'type': 'string', 'enum': ['mp3', 'wav', 'ogg', 'aac', 'flac', 'pcm', 'opus']},
+                                 'format': {
+                                     'type': 'string',
+                                     'enum': ['mp3', 'wav', 'ogg', 'aac', 'flac', 'pcm', 'opus'],
+                                     'description': 'response_format 的兼容别名',
+                                 },
                                  'stream_format': {
                                      'type': 'string',
                                      'enum': ['audio', 'sse'],
-                                     'description': 'sse 仅支持 gpt-4o-mini-tts 系列模型',
+                                     'description': (
+                                         '官方 tts-1/tts-1-hd 不支持 sse；'
+                                         '聚合服务商的 sse 可能是缓冲后包装'
+                                     ),
                                  },
                                  'instructions': {
                                      'type': 'string',
@@ -3914,6 +4059,32 @@ def api_openapi():
                              'required': ['input']
                          }}}},
                          'responses': {'200': {'description': '音频数据'}}}
+            },
+            '/v1/voices': {
+                'get': {
+                    'summary': 'Provider 音色目录（扩展）',
+                    'tags': ['TTS'],
+                    'parameters': [{
+                        'name': 'provider',
+                        'in': 'query',
+                        'required': False,
+                        'schema': {'type': 'string', 'enum': ALL_PROVIDERS},
+                    }],
+                    'responses': {'200': {'description': '音色列表'}},
+                }
+            },
+            '/v1/models/{model_id}': {
+                'get': {
+                    'summary': '查询单个 OpenAI 兼容模型',
+                    'tags': ['TTS'],
+                    'parameters': [{
+                        'name': 'model_id',
+                        'in': 'path',
+                        'required': True,
+                        'schema': {'type': 'string'},
+                    }],
+                    'responses': {'200': {'description': '模型资源'}},
+                }
             },
             '/health': {'get': {'summary': '健康检查', 'tags': ['系统'],
                                 'responses': {'200': {'description': '服务状态'}}}},
@@ -4383,7 +4554,7 @@ def openai_speech():
 
     POST /v1/audio/speech
     {
-        "model": "tts-1",               // ignored, provider auto-detected from voice
+        "model": "tts-1",               // or legado-<provider>-tts to pin a provider
         "input": "Hello world.",
         "voice": "zh-CN-XiaoxiaoNeural", // optional; saved default when omitted
         "response_format": "mp3",        // mp3|wav|ogg|aac|flac|pcm|opus (non-mp3 requires ffmpeg)
@@ -4404,7 +4575,12 @@ def openai_speech():
         data = request.get_json(silent=True) or {}
         model = str(data.get('model', 'tts-1')).strip() or 'tts-1'
         text = str(data.get('input', '')).strip()
-        resp_format = str(data.get('response_format', 'mp3')).strip().lower()
+        # ``response_format`` is used by the OpenAI SDK; the current reference
+        # examples also show ``format`` for custom-voice requests, so accept
+        # both spellings.
+        resp_format = str(
+            data.get('response_format', data.get('format', 'mp3'))
+        ).strip().lower()
         if resp_format not in _FORMAT_MIME:
             resp_format = 'mp3'
         stream_format = str(data.get('stream_format', 'audio')).strip().lower()
@@ -4428,7 +4604,13 @@ def openai_speech():
                 f'stream_format=sse is not supported for model {model}',
                 400, 'invalid_request_error')
 
-        voice, provider, target_error = _request_target(data)
+        model_provider = _openai_provider_for_model(model)
+        # Provider-specific model IDs are strict: a failed upstream request
+        # must be reported to the OpenAI client instead of silently returning
+        # audio from the configured Edge fallback provider.
+        request._tts_allow_fallback = not bool(model_provider)
+        voice, provider, target_error = _request_target(
+            data, requested_model=model)
         if target_error:
             return _error_response(
                 target_error, 400, 'invalid_request_error')
@@ -4555,18 +4737,82 @@ def openai_speech():
 def openai_models():
     """OpenAI-compatible models list."""
     created = int(_metrics.get('_start_time', time.time()))
+    models = []
+    for model in OPENAI_TTS_MODELS:
+        models.append(_openai_model_record(model, created=created))
     return jsonify({
         'object': 'list',
-        'data': [
-            {
-                'id': model,
-                'object': 'model',
-                'created': created,
-                'owned_by': 'legado-tts-server',
-            }
-            for model in OPENAI_TTS_MODELS
-        ]
+        'data': models,
     })
+
+
+def _openai_model_record(model, *, created=None):
+    """Build one OpenAI model resource, including optional Provider metadata."""
+    item = {
+        'id': model,
+        'object': 'model',
+        'created': int(_metrics.get('_start_time', time.time()))
+        if created is None else created,
+        'owned_by': 'legado-tts-server',
+    }
+    provider = _openai_provider_for_model(model)
+    if provider:
+        item['provider'] = provider
+    return item
+
+
+@app.route('/v1/models/<path:model_id>', methods=['GET'])
+def openai_model_retrieve(model_id):
+    """Return one model resource for clients that validate model IDs."""
+    model = _sanitize_voice(model_id)
+    if model not in OPENAI_TTS_MODELS and not _openai_provider_for_model(model):
+        return _error_response(
+            f'Model {model} not found', 404, 'not_found_error')
+    return jsonify(_openai_model_record(model))
+
+
+@app.route('/v1/voices', methods=['GET'])
+@app.route('/v1/audio/voices', methods=['GET'])
+def openai_voices():
+    """List provider voices in a client-friendly OpenAI-compatible shape.
+
+    OpenAI's public API does not expose a voice catalog endpoint.  The
+    provider-prefixed ``id`` values returned here can be copied directly into
+    the standard ``voice`` request field (for example
+    ``fishaudio:my-reference-id``).
+    """
+    requested = request.args.get('provider', '').strip().lower()
+    if requested:
+        provider = _OPENAI_VOICE_PROVIDER_ALIASES.get(requested, requested)
+        if provider not in ALL_PROVIDERS:
+            return _error_response(
+                f'Unknown provider: {requested}', 400, 'invalid_request_error')
+        providers = (provider,)
+    else:
+        providers = tuple(ALL_PROVIDERS)
+
+    include_custom = _can_view_custom_voices()
+    config = load_config()
+    data = []
+    for provider in providers:
+        model = next(
+            (model_id for model_id, model_provider in OPENAI_PROVIDER_MODELS.items()
+             if model_provider == provider),
+            'gpt-4o-mini-tts',
+        )
+        for voice in _voice_catalog(
+                provider, config=config, include_custom=include_custom):
+            raw_id = voice['id']
+            data.append({
+                'id': f'{provider}:{raw_id}',
+                'object': 'voice',
+                'name': voice['name'],
+                'provider': provider,
+                'voice_id': raw_id,
+                'model': model,
+                **({'custom': True} if voice.get('custom') else {}),
+            })
+    return jsonify({'object': 'list', 'data': data})
 
 
 def _legado_engine_name(provider, voice):

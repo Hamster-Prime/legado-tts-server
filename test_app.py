@@ -20,7 +20,8 @@ from app import (
     resolve_provider, parse_rate, load_config, save_config,
     load_stats, _read_json, _write_json, _empty_provider_stats, ALL_PROVIDERS,
     DOUBAO_VOICES, TENCENT_VOICES, EDGE_VOICES, XIAOMI_VOICES, FISH_AUDIO_VOICES,
-    _clean_text, _split_text_chunks, _check_rate_limit, _concat_mp3,
+    OPENAI_PROVIDER_MODELS, _clean_text, _split_text_chunks, _check_rate_limit,
+    _concat_mp3,
 )
 
 
@@ -1693,8 +1694,25 @@ class TestAPIEndpoints:
             'gpt-4o-mini-tts-2025-12-15',
             'tts-1',
             'tts-1-hd',
+            *OPENAI_PROVIDER_MODELS,
         }
         assert all(isinstance(model['created'], int) for model in data['data'])
+        provider_models = {
+            model['id']: model['provider']
+            for model in data['data'] if 'provider' in model
+        }
+        assert provider_models == OPENAI_PROVIDER_MODELS
+
+    def test_openai_model_retrieve_supports_provider_alias(self):
+        response = self.client.get('/v1/models/fishaudio-tts')
+
+        assert response.status_code == 200
+        assert response.get_json()['id'] == 'fishaudio-tts'
+        assert response.get_json()['provider'] == 'fishaudio'
+
+    def test_openai_model_retrieve_unknown_returns_404(self):
+        response = self.client.get('/v1/models/not-a-model')
+        assert response.status_code == 404
 
     @pytest.mark.parametrize('voice', [
         'alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'onyx',
@@ -1725,6 +1743,201 @@ class TestAPIEndpoints:
             'voice': '晓晓 - 女声',  # display name
         })
         assert r.status_code == 200
+
+    @pytest.mark.parametrize(('model', 'voice', 'expected_provider'), [
+        ('legado-edge-tts', 'zh-CN-XiaoxiaoNeural', 'edge'),
+        ('legado-volcengine-tts',
+         'zh_female_cancan_uranus_bigtts', 'doubao'),
+        ('legado-tencent-tts', '501002', 'tencent'),
+        ('legado-xiaomi-mimo-tts', 'mimo_default', 'xiaomi'),
+        ('legado-fish-audio-tts', 'fish-default', 'fishaudio'),
+        # A short alias is accepted for manually configured clients too.
+        ('mimo-v2-tts', 'default_zh', 'xiaomi'),
+    ])
+    def test_openai_provider_model_routes_without_extension_field(
+            self, monkeypatch, model, voice, expected_provider):
+        import app as app_module
+
+        captured = {}
+
+        def fake_dispatch(provider, text, requested_voice, pct, **kwargs):
+            captured.update(provider=provider, voice=requested_voice)
+            return b'provider-model-audio', None, provider, requested_voice
+
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+        response = self.client.post('/v1/audio/speech', json={
+            'model': model,
+            'input': '模型路由测试',
+            'voice': voice,
+        })
+
+        assert response.status_code == 200
+        assert captured == {'provider': expected_provider, 'voice': voice}
+        assert response.headers['X-TTS-Provider'] == expected_provider
+
+    def test_openai_provider_model_uses_saved_voice_when_omitted(self, monkeypatch):
+        import app as app_module
+
+        config = app_module.DEFAULT_CONFIG.copy()
+        config.update({
+            'provider': 'xiaomi',
+            'xiaomi_api_key': 'xiaomi-key',
+            'xiaomi_voice': 'default_eh',
+        })
+        app_module.save_config(config)
+        captured = {}
+
+        def fake_dispatch(provider, text, voice, pct, **kwargs):
+            captured.update(provider=provider, voice=voice)
+            return b'saved-provider-audio', None, provider, voice
+
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+        response = self.client.post('/v1/audio/speech', json={
+            'model': 'legado-xiaomi-mimo-tts',
+            'input': '使用已保存音色',
+        })
+
+        assert response.status_code == 200
+        assert captured == {'provider': 'xiaomi', 'voice': 'default_eh'}
+
+    def test_openai_provider_model_accepts_saved_fish_reference_id(
+            self, monkeypatch):
+        import app as app_module
+
+        reference_id = 'reference_custom_01'
+        config = app_module.DEFAULT_CONFIG.copy()
+        config.update({
+            'provider': 'fishaudio',
+            'fishaudio_api_key': 'fish-key',
+            'fishaudio_voice': reference_id,
+            'custom_voices': {
+                'doubao': [],
+                'fishaudio': [{'id': reference_id, 'name': '自定义旁白'}],
+            },
+        })
+        app_module.save_config(config)
+        captured = {}
+
+        def fake_dispatch(provider, text, voice, pct, **kwargs):
+            captured.update(provider=provider, voice=voice)
+            return b'fish-custom-audio', None, provider, voice
+
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+        response = self.client.post('/v1/audio/speech', json={
+            'model': 'legado-fish-audio-tts',
+            'input': '自定义鱼声',
+            'voice': reference_id,
+        })
+
+        assert response.status_code == 200
+        assert captured == {'provider': 'fishaudio', 'voice': reference_id}
+
+    def test_openai_voice_namespace_selects_provider(self, monkeypatch):
+        import app as app_module
+
+        reference_id = 'reference_namespace_01'
+        config = app_module.DEFAULT_CONFIG.copy()
+        config['custom_voices'] = {
+            'doubao': [],
+            'fishaudio': [{'id': reference_id, 'name': '命名空间旁白'}],
+        }
+        app_module.save_config(config)
+        captured = {}
+
+        def fake_dispatch(provider, text, voice, pct, **kwargs):
+            captured.update(provider=provider, voice=voice)
+            return b'namespaced-audio', None, provider, voice
+
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+        response = self.client.post('/v1/audio/speech', json={
+            'model': 'gpt-4o-mini-tts',
+            'input': '命名空间测试',
+            'voice': f'fishaudio:{reference_id}',
+        })
+
+        assert response.status_code == 200
+        assert captured == {'provider': 'fishaudio', 'voice': reference_id}
+
+    def test_openai_custom_voice_object_selects_provider(self, monkeypatch):
+        import app as app_module
+
+        reference_id = 'reference_object_01'
+        config = app_module.DEFAULT_CONFIG.copy()
+        config['custom_voices'] = {
+            'doubao': [],
+            'fishaudio': [{'id': reference_id, 'name': '对象旁白'}],
+        }
+        app_module.save_config(config)
+        captured = {}
+
+        def fake_dispatch(provider, text, voice, pct, **kwargs):
+            captured.update(provider=provider, voice=voice)
+            return b'object-voice-audio', None, provider, voice
+
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+        response = self.client.post('/v1/audio/speech', json={
+            'model': 'legado-fish-audio-tts',
+            'input': '对象音色测试',
+            'voice': {'id': reference_id},
+        })
+
+        assert response.status_code == 200
+        assert captured == {'provider': 'fishaudio', 'voice': reference_id}
+
+    def test_openai_custom_voice_object_requires_id(self):
+        response = self.client.post('/v1/audio/speech', json={
+            'model': 'legado-fish-audio-tts',
+            'input': '缺少对象 ID',
+            'voice': {},
+        })
+
+        assert response.status_code == 400
+        assert 'voice object' in response.get_json()['error']['message']
+
+    def test_openai_provider_model_rejects_conflicting_provider(self):
+        response = self.client.post('/v1/audio/speech', json={
+            'model': 'legado-volcengine-tts',
+            'provider': 'xiaomi',
+            'voice': 'mimo_default',
+            'input': '冲突测试',
+        })
+
+        assert response.status_code == 400
+        assert 'selects provider doubao' in response.get_json()['error']['message']
+
+    def test_openai_provider_model_does_not_fallback_to_edge(self, monkeypatch):
+        import app as app_module
+
+        calls = []
+
+        def failed_dispatch_impl(provider, *args, **kwargs):
+            calls.append(provider)
+            return None, 'provider unavailable'
+
+        monkeypatch.setattr(app_module, '_dispatch_impl', failed_dispatch_impl)
+        response = self.client.post('/v1/audio/speech', json={
+            'model': 'legado-volcengine-tts',
+            'voice': 'zh_female_cancan_uranus_bigtts',
+            'input': '严格服务商测试',
+        })
+
+        assert response.status_code == 500
+        assert calls == ['doubao']
+        assert 'provider unavailable' in response.get_json()['error']['message']
+
+    def test_openai_voices_catalog_uses_provider_namespaces(self):
+        response = self.client.get('/v1/voices?provider=xiaomi')
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['object'] == 'list'
+        assert {item['provider'] for item in data['data']} == {'xiaomi'}
+        assert 'xiaomi:mimo_default' in {item['id'] for item in data['data']}
+        assert all(item['voice_id'] for item in data['data'])
+
+    def test_openai_voices_catalog_rejects_unknown_provider(self):
+        response = self.client.get('/v1/voices?provider=unknown')
+        assert response.status_code == 400
 
     def test_speech_stream_rate_parsing(self):
         """Test that rate parameter is correctly parsed."""

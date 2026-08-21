@@ -57,6 +57,9 @@ class TestResolveProvider:
         for v in FISH_AUDIO_VOICES:
             assert resolve_provider(v['id']) == 'fishaudio', f"{v['id']} should route to fishaudio"
 
+    def test_fishaudio_reference_id(self):
+        assert resolve_provider('e6882dded6cb4a96b36453914dc231db') == 'fishaudio'
+
     def test_empty_voice(self):
         assert resolve_provider('') is None
         assert resolve_provider(None) is None
@@ -1799,6 +1802,54 @@ class TestAPIEndpoints:
 
         assert response.status_code == 200
         assert captured == {'provider': 'xiaomi', 'voice': 'default_eh'}
+
+    @pytest.mark.parametrize(('model', 'expected_provider'), [
+        ('e6882dded6cb4a96b36453914dc231db', 'fishaudio'),
+        ('mimo_default', 'xiaomi'),
+        ('501002', 'tencent'),
+        ('zh-CN-XiaoxiaoNeural', 'edge'),
+    ])
+    def test_openai_model_value_can_be_provider_voice(
+            self, monkeypatch, model, expected_provider):
+        """Clients with only a model field can use it as the voice ID."""
+        import app as app_module
+
+        captured = {}
+
+        def fake_dispatch(provider, text, voice, pct, **kwargs):
+            captured.update(provider=provider, voice=voice)
+            return b'model-voice-audio', None, provider, voice
+
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+        response = self.client.post('/v1/audio/speech', json={
+            'model': model,
+            'input': 'Model 音色测试',
+        })
+
+        assert response.status_code == 200
+        assert captured == {'provider': expected_provider, 'voice': model}
+        assert response.headers['X-TTS-Provider'] == expected_provider
+        assert response.headers['X-TTS-Voice'] == model
+
+    def test_openai_fish_reference_id_also_works_in_voice_field(self, monkeypatch):
+        import app as app_module
+
+        reference_id = 'e6882dded6cb4a96b36453914dc231db'
+        captured = {}
+
+        def fake_dispatch(provider, text, voice, pct, **kwargs):
+            captured.update(provider=provider, voice=voice)
+            return b'fish-reference-audio', None, provider, voice
+
+        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+        response = self.client.post('/v1/audio/speech', json={
+            'model': 'tts-1',
+            'input': 'Fish Reference 音色测试',
+            'voice': reference_id,
+        })
+
+        assert response.status_code == 200
+        assert captured == {'provider': 'fishaudio', 'voice': reference_id}
 
     def test_openai_provider_model_accepts_saved_fish_reference_id(
             self, monkeypatch):

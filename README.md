@@ -5,7 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.9.0-green.svg)
-![Tests](https://img.shields.io/badge/tests-368%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-374%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
 
@@ -300,9 +300,24 @@ OpenAI 兼容端点接受 `gpt-4o-mini-tts`、固定快照
 
 模型名也接受短别名，例如 `doubao-tts`、`fishaudio-tts`、`mimo-v2-tts`、
 `tencent-tts` 和 `edge-tts`。省略 `voice` 时使用该服务商在 Web 管理页保存的音色。
-Fish Audio 自定义音色必须先在服务端音色库保存，然后可以直接作为 `voice` 传入。
+Fish Audio 的任意自定义音色可以先保存在服务端音色库，然后直接作为 `voice` 传入；
+常见的 32 位十六进制 Reference ID 也可以直接使用。
 也可以使用 `fishaudio:my-reference-id`、`doubao:voice_type` 这样的命名空间音色；
 `GET /v1/voices` 会返回可直接复制的 Provider 音色目录。
+
+如果客户端只能填写 `model`、没有单独的 `voice` 字段，可以直接把音色 ID 填在
+`model` 中。服务端会识别内置音色、服务端已保存的自定义音色，以及 Fish Audio
+常见的 32 位十六进制 Reference ID。例如：
+
+| `model` 中填写的值 | 实际服务商 |
+|--------------------|------------|
+| `e6882dded6cb4a96b36453914dc231db` | Fish Audio |
+| `mimo_default` | 小米 MiMo |
+| `501002` | 腾讯云 TTS |
+| `zh-CN-XiaoxiaoNeural` | Edge TTS |
+
+普通 OpenAI 模型名仍按标准请求处理；如果客户端同时发送了非空 `voice`，则以
+`voice` 为准。服务端上游 API Key 仍只需在 Web 管理页配置，客户端不需要填写。
 
 例如，标准 OpenAI TTS 客户端可将 Base URL 指向本服务，并使用：
 
@@ -396,6 +411,7 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 | 请求中显式传入 `provider` | 按指定 Provider 路由已保存的自定义音色 ID |
 | `mimo_*` / `default_zh` | 小米 MiMo |
 | `fish-default` | Fish Audio 默认音色 |
+| 32 位十六进制 Reference ID | Fish Audio 自定义音色 |
 | 已保存的 Reference ID + `provider=fishaudio` | Fish Audio 自定义音色 |
 | 别名/中文名 | 自动解析 |
 

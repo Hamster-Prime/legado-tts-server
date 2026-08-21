@@ -840,6 +840,9 @@ DOUBAO_VOICES = [
 # the explicit provider path below instead of relying on prefix inference.
 _DOUBAO_VOICE_PREFIXES = ('zh_', 'en_', 'multi_', 'ICL_', 'saturn_')
 _CUSTOM_VOICE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
+# Fish Audio reference IDs are commonly 32 hexadecimal characters.  Keep this
+# narrow so an arbitrary typo is not silently treated as a Fish voice.
+_FISH_AUDIO_REFERENCE_ID_RE = re.compile(r'^[A-Fa-f0-9]{32}$')
 
 LEGACY_DOUBAO_VOICE_MAP = {
     'zh_female_cancan_mars_bigtts': 'zh_female_cancan_uranus_bigtts',
@@ -1098,7 +1101,8 @@ def _normalize_custom_voice_entry(provider, item, *, reject_builtin=True):
         inferred = resolve_provider(voice_id)
         if provider == 'doubao' and inferred not in (None, 'doubao'):
             return None, f'音色 {voice_id} 不属于服务商 doubao'
-        if provider == 'fishaudio' and inferred is not None:
+        if (provider == 'fishaudio' and inferred is not None
+                and not _FISH_AUDIO_REFERENCE_ID_RE.fullmatch(voice_id)):
             return None, f'音色 {voice_id} 不能作为 Fish Audio Reference ID'
     return {'id': voice_id, 'name': name}, None
 
@@ -1243,6 +1247,58 @@ def _split_openai_voice_namespace(value):
         if provider:
             return remainder, provider
     return voice, None
+
+
+def _openai_voice_from_model(model, config=None):
+    """Resolve a recognizable provider voice supplied in OpenAI's ``model``.
+
+    Some OpenAI-compatible clients expose only a model field when configuring a
+    TTS target.  Keep normal model IDs untouched, but allow a real provider
+    voice ID (including a Fish Audio Reference ID) to serve as that model
+    value.  Unknown tokens are deliberately ignored so a typo still follows
+    the normal model/default-voice path.
+    """
+    token = _sanitize_voice(model)
+    if (not token or token in OPENAI_TTS_MODELS
+            or _openai_provider_for_model(token)):
+        return '', None
+
+    config = load_config() if config is None else config
+    candidate, namespaced_provider = _split_openai_voice_namespace(token)
+    library = _custom_voice_library(config)
+
+    def _saved_custom_provider(voice):
+        for provider in CUSTOM_VOICE_PROVIDERS:
+            if any(item.get('id') == voice for item in library.get(provider, [])):
+                return provider
+            field = _ACTIVE_VOICE_FIELDS.get(provider)
+            if (field and config.get(field) == voice
+                    and _is_valid_provider_voice(provider, voice, config)):
+                return provider
+        return None
+
+    # Preserve a saved custom ID before expanding aliases such as ``nova``;
+    # the same text may intentionally be a Volcengine/Fish custom voice.
+    saved_provider = _saved_custom_provider(candidate)
+    if saved_provider:
+        if not namespaced_provider or namespaced_provider == saved_provider:
+            return candidate, saved_provider
+        return '', None
+
+    candidate = _resolve_voice_alias(candidate)
+    if namespaced_provider:
+        if _is_valid_provider_voice(namespaced_provider, candidate, config):
+            return candidate, namespaced_provider
+        return '', None
+
+    inferred = resolve_provider(candidate)
+    if inferred and _is_valid_provider_voice(inferred, candidate, config):
+        return candidate, inferred
+
+    saved_provider = _saved_custom_provider(candidate)
+    if saved_provider:
+        return candidate, saved_provider
+    return '', None
 
 
 def _tts_headers(audio, requested_provider, requested_voice,
@@ -2103,6 +2159,8 @@ def resolve_provider(voice):
         return 'doubao'
     if voice in ('mimo_default', 'default_zh', 'default_eh') or voice.startswith('mimo_'):
         return 'xiaomi'
+    if _FISH_AUDIO_REFERENCE_ID_RE.fullmatch(voice):
+        return 'fishaudio'
     if voice.startswith('fish-') or voice == 'custom':
         return 'fishaudio'
     return None
@@ -3321,6 +3379,8 @@ def _is_valid_provider_voice(provider, voice, config=None):
     if provider == 'fishaudio':
         if voice in _PROVIDER_VOICE_IDS['fishaudio']:
             return True
+        if _FISH_AUDIO_REFERENCE_ID_RE.fullmatch(voice):
+            return True
         library = _custom_voice_library(config)
         return any(item['id'] == voice for item in library['fishaudio'])
     return resolve_provider(voice) == provider
@@ -3463,12 +3523,24 @@ def _request_target(data, requested_model=None):
     voice; when both are omitted, the saved active provider and voice are used.
     An explicitly supplied empty voice is still rejected as invalid input.
 
+    A recognizable provider voice may also be supplied as ``requested_model``
+    for clients whose model field is their only TTS setting.
+
     ``requested_model`` is used by the OpenAI-compatible endpoint to select a
     provider without requiring the non-standard ``provider`` JSON field.
     """
     requested_provider = data.get('provider')
     explicit_provider = _sanitize_voice(requested_provider).lower()
     model_provider = _openai_provider_for_model(requested_model)
+    model_voice, model_voice_provider = _openai_voice_from_model(requested_model)
+    model_voice_active = bool(model_voice) and (
+        'voice' not in data or not _sanitize_voice(data.get('voice'))
+    )
+    if model_voice_active:
+        # Work on a copy because callers may reuse the parsed request payload.
+        data = dict(data)
+        data['voice'] = model_voice
+        model_provider = model_provider or model_voice_provider
 
     if explicit_provider and model_provider and explicit_provider != model_provider:
         return '', None, (
@@ -4012,7 +4084,8 @@ def api_openapi():
                                      'default': 'tts-1',
                                      'description': (
                                          '使用 legado-* 模型 ID 可固定路由到对应服务商；'
-                                         'gpt/tts 模型按 voice 或服务器默认目标路由'
+                                         'gpt/tts 模型按 voice 或服务器默认目标路由；'
+                                         '客户端没有 voice 时，也可将可识别的服务商音色 ID 填在 model'
                                      ),
                                  },
                                  'input': {'type': 'string'},
@@ -4554,7 +4627,7 @@ def openai_speech():
 
     POST /v1/audio/speech
     {
-        "model": "tts-1",               // or legado-<provider>-tts to pin a provider
+        "model": "tts-1",               // or legado-<provider>-tts / a provider voice ID
         "input": "Hello world.",
         "voice": "zh-CN-XiaoxiaoNeural", // optional; saved default when omitted
         "response_format": "mp3",        // mp3|wav|ogg|aac|flac|pcm|opus (non-mp3 requires ffmpeg)
@@ -4605,10 +4678,16 @@ def openai_speech():
                 400, 'invalid_request_error')
 
         model_provider = _openai_provider_for_model(model)
+        model_voice, model_voice_provider = _openai_voice_from_model(model)
+        model_voice_active = bool(model_voice) and (
+            'voice' not in data or not _sanitize_voice(data.get('voice'))
+        )
         # Provider-specific model IDs are strict: a failed upstream request
         # must be reported to the OpenAI client instead of silently returning
         # audio from the configured Edge fallback provider.
-        request._tts_allow_fallback = not bool(model_provider)
+        request._tts_allow_fallback = not bool(
+            model_provider or (model_voice_active and model_voice_provider)
+        )
         voice, provider, target_error = _request_target(
             data, requested_model=model)
         if target_error:

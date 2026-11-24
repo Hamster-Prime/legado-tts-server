@@ -4,8 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark light">
-  <title>Legado TTS 控制台</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%236366f1'/%3E%3Cpath d='M21 27v10M32 19v26M43 24v16' stroke='white' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <meta name="description" content="为开源阅读配置、试听和管理多源语音合成服务。">
+  <title>Legado TTS · 语音工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230f9f8f'/%3E%3Cpath d='M18 28v8M27 21v22M36 15v34M45 24v16' stroke='white' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
   <script>
     try {
       const savedTheme = localStorage.getItem('tts-theme');
@@ -20,453 +21,212 @@
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
 
-  <div class="app-shell" id="main-content">
+  <svg class="svg-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="m9 6 9 6-9 6V6Z"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="icon-save" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></symbol>
+    <symbol id="icon-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="icon-library" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14ZM4 19.5A1.5 1.5 0 0 0 5.5 21H20v-4"/></symbol>
+    <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 16V4m-5 5 5-5 5 5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></symbol>
+    <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+    <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20.5 14A8.5 8.5 0 0 1 10 3.5 8.5 8.5 0 1 0 20.5 14Z"/></symbol>
+    <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9m-4 4 3 3m-6 0 3 3"/></symbol>
+    <symbol id="icon-external" viewBox="0 0 24 24"><path d="M14 4h6v6m0-6-9 9M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6.1 8a7 7 0 0 1 11.5-1L20 12M4 12l2.4 5a7 7 0 0 0 11.5-1"/></symbol>
+    <symbol id="icon-code" viewBox="0 0 24 24"><path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/></symbol>
+    <symbol id="icon-link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 7-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 1 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" transform="translate(1 0)"/></symbol>
+    <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.01"/></symbol>
+    <symbol id="icon-headphones" viewBox="0 0 24 24"><path d="M4 14v-3a8 8 0 0 1 16 0v3M4 13H3v7h4v-7H4Zm16 0h1v7h-4v-7h3Z"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  </svg>
 
-    <!-- 1. Top Header -->
+  <div class="app-shell">
     <header class="header">
-      <div class="brand-section">
-        <span class="brand-title">
-          Legado TTS
-          <span class="version-tag">v{{ version }}</span>
-        </span>
-        <div class="status-badge" id="service-status" role="status">
+      <a class="brand" href="/" aria-label="Legado TTS 首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span class="brand-name">Legado <strong>TTS</strong></span>
+        <span class="version-tag">v{{ version }}</span>
+      </a>
+
+      <nav class="nav-tabs" role="tablist" aria-label="控制台页面">
+        <button class="nav-tab-btn is-active active" id="console-main-tab" type="button" role="tab" data-console-tab="main" aria-controls="console-main-page" aria-selected="true">语音工作台</button>
+        <button class="nav-tab-btn" id="console-maintenance-tab" type="button" role="tab" data-console-tab="maintenance" aria-controls="console-maintenance-page" aria-selected="false" tabindex="-1">系统维护</button>
+      </nav>
+
+      <div class="header-actions">
+        <div class="status-badge is-loading" id="service-status" role="status">
           <span class="status-dot" aria-hidden="true"></span>
           <span id="service-status-text">正在连接</span>
         </div>
-      </div>
-
-      <!-- Tab Navigation -->
-      <nav class="nav-tabs" role="tablist" aria-label="控制台页面">
-        <button class="nav-tab-btn is-active active" id="console-main-tab" type="button" role="tab" data-console-tab="main" aria-controls="console-main-page" aria-selected="true">服务与语音调试</button>
-        <button class="nav-tab-btn" id="console-maintenance-tab" type="button" role="tab" data-console-tab="maintenance" aria-controls="console-maintenance-page" aria-selected="false">数据维护与备份</button>
-      </nav>
-
-      <!-- Global Actions -->
-      <div class="header-actions">
-        <button class="btn btn-secondary btn-sm" id="test-config-button" type="button">连通测试</button>
-        <button class="btn btn-primary btn-sm" id="save-button" type="button" disabled>保存更改</button>
         {% if admin_protected %}
-        <button class="icon-btn" id="token-button" type="button" title="设置管理令牌" aria-label="设置管理令牌">
-          <span class="button-label" style="font-size: 11.5px; font-weight: 500;">令牌</span>
+        <button class="icon-btn labeled-icon-btn" id="token-button" type="button" title="设置管理令牌" aria-label="设置管理令牌">
+          <svg class="icon" aria-hidden="true"><use href="#icon-key"/></svg><span class="button-label">令牌</span>
         </button>
         {% endif %}
-        <button class="icon-btn" id="theme-button" type="button" title="切换暗色/浅色主题" aria-label="切换暗色/浅色主题">
-          <span id="theme-icon" aria-hidden="true" style="display:none;"></span>
-          <span class="button-label" id="theme-label" style="font-size: 11.5px; font-weight: 500;">主题</span>
+        <button class="icon-btn" id="theme-button" type="button" title="切换暗色/浅色主题" aria-label="切换主题">
+          <svg class="icon" id="theme-icon" aria-hidden="true"><use id="theme-icon-use" href="#icon-moon"/></svg>
+          <span class="sr-only" id="theme-label">主题</span>
         </button>
       </div>
     </header>
 
-    <!-- 2. Metrics Bar -->
-    <section class="stats-strip" aria-label="服务运行摘要">
-      <div class="stat-item">
-        <div class="stat-info">
-          <span class="stat-label">累计合成字符</span>
-          <span class="stat-val" id="total-chars-all">—</span>
-        </div>
-        <span class="stat-badge">本次运行</span>
-      </div>
-      <div class="stat-item">
-        <div class="stat-info">
-          <span class="stat-label">累计请求调用</span>
-          <span class="stat-val" id="total-requests-all">—</span>
-        </div>
-        <span class="stat-badge">启动后</span>
-      </div>
-      <div class="stat-item">
-        <div class="stat-info">
-          <span class="stat-label">缓存命中率</span>
-          <span class="stat-val" id="cache-hit-rate">—</span>
-        </div>
-        <span class="stat-badge" style="color: var(--accent); background: var(--accent-soft);">缓存</span>
-      </div>
-      <div class="stat-item">
-        <div class="stat-info">
-          <span class="stat-label">P95 响应延时</span>
-          <span class="stat-val" id="response-time-p95">—</span>
-        </div>
-        <span class="stat-badge">极速</span>
-      </div>
-    </section>
-
-    <!-- 3. Page 1: Balanced Main Workspace (Symmetrical 2-Column Grid) -->
-    <div id="console-main-page" class="workspace-grid fade-in" role="tabpanel" data-console-page="main" aria-labelledby="console-main-tab">
-      
-      <!-- Left Box: Core Config -->
-      <div class="box">
-        <div class="box-header">
-          <span class="box-title">服务引擎与参数</span>
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span class="save-chip is-saved" id="save-chip" role="status" aria-live="polite">
-              <span class="status-dot" aria-hidden="true"></span>
-              <span id="save-chip-text">已保存</span>
-            </span>
-            <span style="font-size: 11.5px; color: var(--text-muted);" id="setup-summary">Edge · 晓晓</span>
-            <span id="active-provider-name" style="display:none;">Edge TTS</span>
+    <main id="main-content">
+      <div id="console-main-page" class="main-page fade-in" role="tabpanel" data-console-page="main" aria-labelledby="console-main-tab">
+        <section class="page-heading">
+          <div>
+            <p class="eyebrow">VOICE WORKSPACE</p>
+            <h1>让每一段文字，都有合适的声音。</h1>
+            <p>选择引擎与音色，试听满意后保存，再一键接入开源阅读。</p>
           </div>
-        </div>
-        <div class="box-body">
-          <form id="settings-form" novalidate style="display: flex; flex-direction: column; gap: 11px; flex: 1;">
-            
-            <!-- Provider Picker: 5-Segmented Bar -->
-            <div class="field">
-              <label class="field-label">
-                <span>语音服务商</span>
-                <span class="credential-badge" id="credential-badge">免凭证即用</span>
-                <span id="credential-title" style="display:none;">服务凭证</span>
-              </label>
-              <div class="provider-segment" role="radiogroup" aria-label="语音服务商">
-                <button class="provider-item active" data-provider="edge" type="button" role="radio" aria-checked="true">
-                  <span class="p-title">Edge</span>
-                  <span class="p-sub" id="edge-status">免费微软</span>
-                </button>
-                <button class="provider-item" data-provider="doubao" type="button" role="radio" aria-checked="false">
-                  <span class="p-title">火山豆包</span>
-                  <span class="p-sub" id="doubao-status">2.0 拟真</span>
-                </button>
-                <button class="provider-item" data-provider="tencent" type="button" role="radio" aria-checked="false">
-                  <span class="p-title">腾讯云</span>
-                  <span class="p-sub" id="tencent-status">精品音色</span>
-                </button>
-                <button class="provider-item" data-provider="xiaomi" type="button" role="radio" aria-checked="false">
-                  <span class="p-title">小米</span>
-                  <span class="p-sub" id="xiaomi-status">MiMo</span>
-                </button>
-                <button class="provider-item" data-provider="fishaudio" type="button" role="radio" aria-checked="false">
-                  <span class="p-title">Fish</span>
-                  <span class="p-sub" id="fishaudio-status">克隆模型</span>
-                </button>
-              </div>
-            </div>
+          <div class="page-heading-actions">
+            <button class="btn btn-secondary" id="test-config-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-pulse"/></svg><span class="btn-label">测试连接</span></button>
+            <button class="btn btn-primary" id="save-button" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#icon-save"/></svg><span class="btn-label">保存并应用</span></button>
+          </div>
+        </section>
 
-            <!-- Dynamic Credentials -->
-            <div id="cred-container" class="fade-in">
-              <div class="provider-settings is-active" data-settings-provider="edge">
-                <div class="info-box success">
-                  ✓ 微软 Edge 引擎直接连通，无需配置 API 密钥。
-                </div>
+        <div class="workspace-grid">
+          <section class="panel settings-panel" aria-labelledby="settings-title">
+            <header class="panel-header">
+              <div class="panel-heading">
+                <span class="step-number">01</span>
+                <div><h2 id="settings-title">服务与音色</h2><p>配置默认的语音合成方式</p></div>
               </div>
+              <span class="save-chip is-saved" id="save-chip" role="status" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span><span id="save-chip-text">已保存</span>
+              </span>
+            </header>
 
-              <div class="provider-settings" data-settings-provider="doubao" style="display: none;">
-                <div class="field">
-                  <label class="field-label" for="doubao-api-key">火山引擎 API Key</label>
-                  <input id="doubao-api-key" data-credential-field="doubao_api_key" type="password" autocomplete="new-password" class="input-control" placeholder="输入火山引擎 API Key" />
-                </div>
-              </div>
-
-              <div class="provider-settings" data-settings-provider="tencent" style="display: none;">
-                <div class="form-row">
-                  <div class="field">
-                    <label class="field-label" for="tencent-secret-id">SecretId</label>
-                    <input id="tencent-secret-id" data-credential-field="tencent_secret_id" type="password" autocomplete="new-password" class="input-control" placeholder="SecretId" />
-                  </div>
-                  <div class="field">
-                    <label class="field-label" for="tencent-secret-key">SecretKey</label>
-                    <input id="tencent-secret-key" data-credential-field="tencent_secret_key" type="password" autocomplete="new-password" class="input-control" placeholder="SecretKey" />
+            <div class="panel-body">
+              <form id="settings-form" novalidate>
+                <div class="field provider-field">
+                  <div class="field-label"><label>语音服务商</label><span class="credential-badge" id="credential-badge">免凭证即用</span><span id="credential-title" class="sr-only">服务凭证</span></div>
+                  <div class="provider-segment" role="radiogroup" aria-label="语音服务商">
+                    <button class="provider-item active" data-provider="edge" type="button" role="radio" aria-checked="true"><span class="provider-check"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></span><span class="p-title">Edge</span><span class="p-sub" id="edge-status">免费</span></button>
+                    <button class="provider-item" data-provider="doubao" type="button" role="radio" aria-checked="false" tabindex="-1"><span class="provider-check"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></span><span class="p-title">火山引擎</span><span class="p-sub" id="doubao-status">待配置</span></button>
+                    <button class="provider-item" data-provider="tencent" type="button" role="radio" aria-checked="false" tabindex="-1"><span class="provider-check"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></span><span class="p-title">腾讯云</span><span class="p-sub" id="tencent-status">待配置</span></button>
+                    <button class="provider-item" data-provider="xiaomi" type="button" role="radio" aria-checked="false" tabindex="-1"><span class="provider-check"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></span><span class="p-title">小米 MiMo</span><span class="p-sub" id="xiaomi-status">待配置</span></button>
+                    <button class="provider-item" data-provider="fishaudio" type="button" role="radio" aria-checked="false" tabindex="-1"><span class="provider-check"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></span><span class="p-title">Fish Audio</span><span class="p-sub" id="fishaudio-status">待配置</span></button>
                   </div>
                 </div>
-              </div>
 
-              <div class="provider-settings" data-settings-provider="xiaomi" style="display: none;">
-                <div class="field">
-                  <label class="field-label" for="xiaomi-api-key">小米 API Key</label>
-                  <input id="xiaomi-api-key" data-credential-field="xiaomi_api_key" type="password" autocomplete="new-password" class="input-control" placeholder="MiMo API Key" />
+                <div id="cred-container">
+                  <div class="provider-settings is-active" data-settings-provider="edge"><div class="info-box success"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg><span>无需 API Key，选择音色即可开始使用。</span></div></div>
+                  <div class="provider-settings" data-settings-provider="doubao" hidden><div class="field"><label class="field-label" for="doubao-api-key">火山引擎 API Key</label><input id="doubao-api-key" data-credential-field="doubao_api_key" type="password" autocomplete="new-password" class="input-control" placeholder="输入火山引擎 API Key" /></div></div>
+                  <div class="provider-settings" data-settings-provider="tencent" hidden><div class="form-row"><div class="field"><label class="field-label" for="tencent-secret-id">SecretId</label><input id="tencent-secret-id" data-credential-field="tencent_secret_id" type="password" autocomplete="new-password" class="input-control" placeholder="SecretId" /></div><div class="field"><label class="field-label" for="tencent-secret-key">SecretKey</label><input id="tencent-secret-key" data-credential-field="tencent_secret_key" type="password" autocomplete="new-password" class="input-control" placeholder="SecretKey" /></div></div></div>
+                  <div class="provider-settings" data-settings-provider="xiaomi" hidden><div class="field"><label class="field-label" for="xiaomi-api-key">小米 API Key</label><input id="xiaomi-api-key" data-credential-field="xiaomi_api_key" type="password" autocomplete="new-password" class="input-control" placeholder="MiMo API Key" /></div></div>
+                  <div class="provider-settings" data-settings-provider="fishaudio" hidden><div class="field"><label class="field-label" for="fishaudio-api-key">Fish Audio API Key</label><input id="fishaudio-api-key" data-credential-field="fishaudio_api_key" type="password" autocomplete="new-password" class="input-control" placeholder="输入 Fish Audio API Key" /></div></div>
                 </div>
-              </div>
 
-              <div class="provider-settings" data-settings-provider="fishaudio" style="display: none;">
-                <div class="field">
-                  <label class="field-label" for="fishaudio-api-key">Fish Audio API Key</label>
-                  <input id="fishaudio-api-key" data-credential-field="fishaudio_api_key" type="password" autocomplete="new-password" class="input-control" placeholder="输入 Fish Audio API Key" />
-                </div>
-              </div>
-            </div>
-
-            <!-- Voice Select & Failover in 2 Columns -->
-            <div class="form-row">
-              <div class="field">
-                <div class="field-label">
-                  <span>当前默认音色</span>
-                  <div style="display: flex; align-items: center; gap: 6px;">
-                    <span id="voice-count" style="font-size: 11px; color: var(--text-muted);">正在加载</span>
-                    <button class="btn-link" id="all-voices-button" type="button" style="font-size: 11px; color: var(--accent); background: none; border: none; cursor: pointer;">音色库</button>
+                <div class="field voice-field">
+                  <div class="field-label"><label for="voice-select">默认音色</label><button class="text-button" id="all-voices-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-library"/></svg>浏览音色库<svg class="icon chevron" aria-hidden="true"><use href="#icon-chevron"/></svg></button></div>
+                  <div class="voice-picker">
+                    <label class="search-control" for="voice-search"><svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg><input id="voice-search" type="search" placeholder="搜索音色" autocomplete="off" aria-label="搜索当前服务商音色"></label>
+                    <select id="voice-select" class="select-control" disabled><option>正在加载音色…</option></select>
                   </div>
+                  <div class="field-meta"><span id="voice-count">正在加载</span><button class="text-button" id="preview-button" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg><span class="btn-label">试听当前音色</span></button></div>
                 </div>
-                <div class="voice-picker-compact">
-                  <div style="display: flex; gap: 6px;">
-                    <input id="voice-search" type="search" class="input-control" style="width: 95px; font-size: 11.5px; padding: 6px 8px;" placeholder="过滤..." autocomplete="off">
-                    <select id="voice-select" class="select-control" style="flex: 1;" disabled><option>正在加载音色…</option></select>
-                  </div>
+
+                <section class="custom-voice-manager" id="custom-voice-manager" aria-labelledby="custom-voice-title" hidden>
+                  <div class="custom-voice-heading"><div><strong id="custom-voice-title">我的音色</strong><small id="custom-voice-summary">0 个已保存</small></div><span class="custom-voice-provider" id="custom-voice-provider">火山引擎</span></div>
+                  <div class="custom-voice-form"><div class="form-row"><div class="field"><label class="sr-only" for="custom-voice-name">音色名称</label><input id="custom-voice-name" type="text" class="input-control" autocomplete="off" maxlength="80" placeholder="音色名称，如：温柔旁白"></div><div class="field"><label class="sr-only" for="custom-voice-id">音色 ID</label><input id="custom-voice-id" type="text" class="input-control" autocomplete="off" maxlength="128" spellcheck="false" placeholder="音色 ID / Reference ID"></div></div><div class="custom-voice-form-actions"><button class="btn btn-primary btn-sm" id="custom-voice-save" type="button">添加音色</button><button class="btn btn-secondary btn-sm" id="custom-voice-cancel" type="button" hidden>取消</button></div></div>
+                  <div class="custom-voice-list" id="custom-voice-list"></div><p class="custom-voice-empty" id="custom-voice-empty">还没有保存自定义音色。</p><div class="inline-feedback" id="custom-voice-feedback" role="status" aria-live="polite" hidden></div>
+                </section>
+
+                <div class="fallback-field">
+                  <div class="fallback-heading"><div><label for="fallback-enabled">智能故障转移</label><p>原服务不可用时，自动切换到 Edge 备用音色</p></div><label class="toggle-switch" for="fallback-enabled"><input class="toggle-input" id="fallback-enabled" data-config-field="fallback_enabled" type="checkbox" role="switch" checked><span class="toggle-slider"></span><span class="sr-only">启用智能故障转移</span></label></div>
+                  <div class="fallback-layout" id="fallback-fields"><select id="fallback-voice" data-config-field="fallback_voice" class="select-control" aria-label="Edge 备用音色"><option value="zh-CN-XiaoxiaoNeural">Edge · 晓晓（备用）</option></select><input id="fallback-retry-count" data-config-field="fallback_retry_count" type="number" min="0" max="3" step="1" inputmode="numeric" value="1" hidden><input id="fallback-retry-delay-ms" data-config-field="fallback_retry_delay_ms" type="number" min="0" max="5000" step="1" inputmode="numeric" value="500" hidden></div>
                 </div>
+
+                <div class="inline-feedback" id="settings-feedback" role="status" aria-live="polite" hidden></div>
+                <div class="inline-feedback" id="voice-feedback" role="status" aria-live="polite" hidden></div>
+                <div class="inline-feedback" id="fallback-feedback" role="status" aria-live="polite" hidden></div>
+                <audio class="audio-player" id="preview-player" controls hidden></audio>
+                <div hidden><span id="save-state-title">所有更改均已保存</span><span id="save-state-description">已保存的服务商和音色将用于外部 UI 与无参数请求。</span></div>
+              </form>
+            </div>
+            <footer class="panel-note"><svg class="icon" aria-hidden="true"><use href="#icon-info"/></svg><span>修改仅保存在当前草稿中，点击「保存并应用」后生效。</span></footer>
+          </section>
+
+          <section class="panel studio-panel" aria-label="语音试听工作室">
+            <header class="panel-header studio-header">
+              <div class="panel-heading"><span class="step-number">02</span><div><h2>试听工作室</h2><p>先听一听，再决定</p></div></div>
+              <span class="live-state is-live" id="live-state"><span class="status-dot" aria-hidden="true"></span><span>就绪</span></span>
+            </header>
+            <div class="sub-tabs" role="tablist" aria-label="试听与监控">
+              <button class="sub-tab-btn is-active active" id="btn-sub-test" type="button" role="tab" aria-selected="true" aria-controls="sub-panel-test" data-subtab-target="test"><svg class="icon" aria-hidden="true"><use href="#icon-headphones"/></svg>文本试听</button>
+              <button class="sub-tab-btn" id="btn-sub-compare" type="button" role="tab" aria-selected="false" aria-controls="sub-panel-compare" data-subtab-target="compare" tabindex="-1">A/B 对比</button>
+              <button class="sub-tab-btn" id="btn-sub-logs" type="button" role="tab" aria-selected="false" aria-controls="sub-panel-logs" data-subtab-target="logs" tabindex="-1">实时活动</button>
+            </div>
+            <div class="panel-body studio-body">
+              <div id="sub-panel-test" class="sub-panel" role="tabpanel" aria-labelledby="btn-sub-test">
+                <div class="field text-field"><div class="field-label"><label for="test-text">输入要朗读的内容</label><span class="character-count"><span id="test-text-count">0</span> / 5000</span></div><textarea class="textarea-control" id="test-text" rows="7" maxlength="5000" placeholder="在这里输入或粘贴一段文字…">阳光透过层叠的树叶洒在林间小径上，微风拂过带来初夏的泥土清香。这是一个宁静而美好的午后。</textarea></div>
+                <div class="synthesis-context"><div class="context-icon"><svg class="icon" aria-hidden="true"><use href="#icon-headphones"/></svg></div><div><span>本次使用</span><strong id="active-provider-name">Edge TTS · 晓晓</strong></div><span class="format-tag">MP3</span></div>
+                <button class="btn btn-primary btn-generate" id="test-tts-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg><span class="btn-label">生成并播放</span><kbd>Ctrl ↵</kbd></button>
+                <audio class="audio-player" id="test-audio-player" controls hidden></audio>
+                <div class="inline-feedback" id="test-feedback" role="status" aria-live="polite" hidden></div>
+                <p class="studio-hint"><span id="play-voice-label">使用当前草稿试听</span><span>保存后同步到阅读客户端</span></p>
               </div>
 
-              <div class="field">
-                <div class="field-label">
-                  <span>智能故障转移</span>
-                  <label class="toggle-switch" for="fallback-enabled">
-                    <input class="toggle-input" id="fallback-enabled" data-config-field="fallback_enabled" type="checkbox" role="switch" checked>
-                    <span class="toggle-slider"></span>
-                  </label>
-                </div>
-                <div class="fallback-layout" id="fallback-fields">
-                  <select id="fallback-voice" data-config-field="fallback_voice" class="select-control" style="font-size: 12px;">
-                    <option value="zh-CN-XiaoxiaoNeural">Edge · 晓晓 (备用)</option>
-                  </select>
-                  <input id="fallback-retry-count" data-config-field="fallback_retry_count" type="number" min="0" max="3" step="1" inputmode="numeric" value="1" style="display:none;">
-                  <input id="fallback-retry-delay-ms" data-config-field="fallback_retry_delay_ms" type="number" min="0" max="5000" step="1" inputmode="numeric" value="500" style="display:none;">
-                </div>
+              <div id="sub-panel-compare" class="sub-panel" role="tabpanel" aria-labelledby="btn-sub-compare" hidden>
+                <div class="compare-intro"><h3>找到更动听的声音</h3><p>用同一段文字生成两条音频，直观比较不同音色。</p></div>
+                <div class="field"><label class="field-label" for="compare-text">对比文本</label><textarea class="textarea-control" id="compare-text" rows="4" maxlength="5000">今天天气真好，我们一起出去散步吧。</textarea></div>
+                <div class="form-row"><div class="field"><label class="field-label" for="compare-a">音色 A</label><select class="select-control" id="compare-a" disabled></select></div><div class="field"><label class="field-label" for="compare-b">音色 B</label><select class="select-control" id="compare-b" disabled></select></div></div>
+                <button class="btn btn-primary btn-generate" id="compare-button" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg><span class="btn-label">生成对比音频</span></button>
+                <div class="compare-audio-grid"><audio class="audio-player" id="audio-a" controls hidden></audio><audio class="audio-player" id="audio-b" controls hidden></audio></div>
+                <div class="inline-feedback" id="compare-feedback" role="status" aria-live="polite" hidden></div>
+              </div>
+
+              <div id="sub-panel-logs" class="sub-panel" role="tabpanel" aria-labelledby="btn-sub-logs" hidden>
+                <div class="log-toolbar"><span id="stats-provider-title">运行状态与实时请求</span><div><button class="btn btn-secondary btn-sm" id="refresh-monitor-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg><span class="btn-label">刷新</span></button><button class="btn btn-secondary btn-sm" id="clear-logs-btn" type="button">清屏</button></div></div>
+                <div class="metrics-mini-grid"><div class="mini-metric"><span class="m-lbl">累计字符</span><span class="m-val" id="total-chars">—</span></div><div class="mini-metric"><span class="m-lbl">累计请求</span><span class="m-val" id="total-requests">—</span></div><div class="mini-metric"><span class="m-lbl">今日字符</span><span class="m-val" id="today-chars">—</span></div><div class="mini-metric"><span class="m-lbl">今日请求</span><span class="m-val" id="today-requests">—</span></div></div>
+                <div class="log-container" id="activity-feed" role="log" aria-live="polite" aria-label="实时合成活动"><p class="empty-state" id="activity-empty">等待新的合成请求…</p></div>
+                <span id="monitor-updated-at" class="monitor-updated"></span><span id="monitor-summary" hidden></span><div class="inline-feedback" id="monitor-feedback" role="status" aria-live="polite" hidden></div>
               </div>
             </div>
-
-            <!-- Custom Voice Manager (If active) -->
-            <section class="custom-voice-manager" id="custom-voice-manager" aria-labelledby="custom-voice-title" hidden>
-              <div class="custom-voice-heading">
-                <div><strong id="custom-voice-title">我的音色</strong><small id="custom-voice-summary" style="margin-left: 6px; color: var(--text-muted);">0 个已保存</small></div>
-                <span class="custom-voice-provider" id="custom-voice-provider">火山引擎</span>
-              </div>
-              <div class="custom-voice-form">
-                <div class="form-row">
-                  <div class="field">
-                    <input id="custom-voice-name" type="text" class="input-control" autocomplete="off" maxlength="80" placeholder="音色名称 (如: 温柔旁白)">
-                  </div>
-                  <div class="field">
-                    <input id="custom-voice-id" type="text" class="input-control" autocomplete="off" maxlength="128" spellcheck="false" placeholder="音色 ID / Reference ID">
-                  </div>
-                </div>
-                <div class="custom-voice-form-actions">
-                  <button class="btn btn-primary btn-sm" id="custom-voice-save" type="button">添加音色</button>
-                  <button class="btn btn-secondary btn-sm" id="custom-voice-cancel" type="button" hidden>取消</button>
-                </div>
-              </div>
-              <div class="custom-voice-list" id="custom-voice-list"></div>
-              <p class="custom-voice-empty" id="custom-voice-empty">还没有保存自定义音色。</p>
-              <div class="inline-feedback" id="custom-voice-feedback" role="status" aria-live="polite" hidden></div>
-            </section>
-
-            <!-- Legado Integration: Priority JSON on Top, Subscribe URL Below -->
-            <div class="field" style="gap: 8px;">
-              <div class="field-label">
-                <span>开源阅读 (Legado) 一键接入</span>
-                <button class="btn-link" id="toggle-json-btn" type="button" style="font-size: 11px; color: var(--text-muted); background: none; border: none; cursor: pointer;">查看 JSON 内容</button>
-              </div>
-
-              <div class="field">
-                <label class="field-label" for="legado-api-key">Legado 客户端 API Key</label>
-                <input id="legado-api-key" type="password" class="input-control" autocomplete="off" spellcheck="false" placeholder="启用访问认证时，填写管理员分配的客户端密钥" aria-describedby="legado-api-key-help">
-                <p id="legado-api-key-help" class="field-hint">填写 API_KEYS 中的客户端密钥，不是服务商凭据或管理令牌。仅在本页生成的 JSON 请求头中使用，不保存到服务器或浏览器存储；含密钥的配置请勿分享。启用认证时请使用 JSON，不使用订阅链接。</p>
-              </div>
-
-              <!-- 1. JSON Block (Top Priority) -->
-              <div class="subscribe-bar">
-                <input type="text" class="subscribe-input" readonly value="JSON 引擎配置代码（包含完整请求头与参数）" />
-                <button class="btn btn-primary btn-sm" id="copy-config-button" type="button" disabled>复制 JSON 配置</button>
-              </div>
-              <pre class="config-preview" id="legado-config" tabindex="0" aria-label="开源阅读配置" style="display: none;">正在生成配置…</pre>
-
-              <!-- 2. Subscribe Link (Below JSON) -->
-              <div class="subscribe-bar">
-                <input type="text" class="subscribe-input" id="subscribe-url-display" readonly value="开源阅读订阅连接生成中..." />
-                <button class="btn btn-primary btn-sm" id="copy-subscribe-button" type="button" disabled>复制订阅链接</button>
-              </div>
-
-              <div class="inline-feedback" id="integration-feedback" role="status" aria-live="polite" hidden></div>
-            </div>
-
-            <div class="inline-feedback" id="settings-feedback" role="status" aria-live="polite" hidden></div>
-            <div class="inline-feedback" id="voice-feedback" role="status" aria-live="polite" hidden></div>
-            <div class="inline-feedback" id="fallback-feedback" role="status" aria-live="polite" hidden></div>
-
-            <div style="display:none;">
-              <span id="save-state-title">所有更改均已保存</span>
-              <span id="save-state-description">已保存的服务商和音色将用于外部 UI 与无参数请求。</span>
-            </div>
-          </form>
+          </section>
         </div>
+
+        <section class="integration-panel panel" aria-labelledby="integration-title">
+          <div class="integration-intro"><span class="step-number">03</span><div><h2 id="integration-title">接入开源阅读 <span class="recommended-tag">推荐</span></h2><p>先保存上方配置，再复制任一配置到 Legado，即可开始听书。</p><ol class="integration-steps"><li>保存设置</li><li>复制配置</li><li>在 Legado 中导入</li></ol></div></div>
+          <div class="integration-actions">
+            <div class="field legado-client-auth">
+              <label class="field-label" for="legado-api-key">Legado 客户端 API Key</label>
+              <input id="legado-api-key" type="password" class="input-control" autocomplete="off" spellcheck="false" placeholder="启用访问认证时，填写管理员分配的客户端密钥" aria-describedby="legado-api-key-help">
+              <p id="legado-api-key-help" class="field-hint">填写 API_KEYS 中的客户端密钥，不是服务商凭据或管理令牌。仅在本页生成的 JSON 请求头中使用，不保存到服务器或浏览器存储；含密钥的配置请勿分享。启用认证时请使用 JSON，不使用订阅链接。</p>
+            </div>
+            <div class="copy-field"><div class="copy-field-heading"><label for="legado-config"><svg class="icon" aria-hidden="true"><use href="#icon-code"/></svg>引擎配置 <span>本地导入</span></label><button class="text-button" id="toggle-json-btn" type="button" aria-controls="legado-config" aria-expanded="false">查看 JSON</button></div><div class="copy-field-row"><input type="text" class="copy-field-value" readonly value="包含语音引擎、请求头与参数的完整配置" aria-label="Legado JSON 引擎配置说明"><button class="btn btn-secondary" id="copy-config-button" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg><span class="btn-label">复制 JSON</span></button></div></div>
+            <div class="copy-field"><div class="copy-field-heading"><label for="subscribe-url-display"><svg class="icon" aria-hidden="true"><use href="#icon-link"/></svg>订阅链接 <span>远程导入</span></label></div><div class="copy-field-row"><input type="text" class="copy-field-value" id="subscribe-url-display" readonly value="订阅链接生成中…"><button class="btn btn-secondary" id="copy-subscribe-button" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg><span class="btn-label">复制链接</span></button></div></div>
+            <pre class="config-preview" id="legado-config" tabindex="0" aria-label="开源阅读配置" hidden>正在生成配置…</pre>
+            <div class="inline-feedback" id="integration-feedback" role="status" aria-live="polite" hidden></div>
+          </div>
+        </section>
+
+        <section class="runtime-section" aria-labelledby="runtime-title"><div class="section-caption"><h2 id="runtime-title">运行概览</h2><span>本次服务启动以来的数据</span></div><div class="stats-strip"><div class="stat-item"><span class="stat-label">合成字符</span><span class="stat-val" id="total-chars-all">—</span><span class="stat-unit">字符</span></div><div class="stat-item"><span class="stat-label">合成请求</span><span class="stat-val" id="total-requests-all">—</span><span class="stat-unit">次</span></div><div class="stat-item"><span class="stat-label">缓存命中率</span><span class="stat-val" id="cache-hit-rate">—</span><span class="stat-unit">缓存</span></div><div class="stat-item"><span class="stat-label">P95 响应延时</span><span class="stat-val" id="response-time-p95">—</span><span class="stat-unit">实时</span></div></div></section>
       </div>
 
-      <!-- Right Box: Playground / AB Compare / Live Logs (Tabbed) -->
-      <div class="box">
-        <div class="box-header">
-          <div class="sub-tabs">
-            <button class="sub-tab-btn is-active active" id="btn-sub-test" type="button" data-subtab-target="test">语音合成调试</button>
-            <button class="sub-tab-btn" id="btn-sub-compare" type="button" data-subtab-target="compare">A/B 音色对比</button>
-            <button class="sub-tab-btn" id="btn-sub-logs" type="button" data-subtab-target="logs">实时活动流</button>
-          </div>
-          <span class="live-state is-live" id="live-state" style="font-size: 11.5px;"><span class="status-dot"></span><span>就绪</span></span>
+      <div id="console-maintenance-page" class="maintenance-page fade-in" role="tabpanel" data-console-page="maintenance" aria-labelledby="console-maintenance-tab" hidden>
+        <section class="page-heading"><div><p class="eyebrow">SYSTEM MAINTENANCE</p><h1>系统维护</h1><p>备份个人配置，查看运行环境与管理服务数据。</p></div></section>
+        <div class="maint-grid">
+          <section class="panel maintenance-card"><header class="maintenance-card-header"><span class="maintenance-icon"><svg class="icon" aria-hidden="true"><use href="#icon-save"/></svg></span><div><h2>备份与迁移</h2><p>完整保留你的服务配置</p></div></header><div class="panel-body"><p>导出包含服务商凭证、音色偏好及容灾策略的配置文件，请妥善保管。</p><div class="maintenance-actions"><button class="btn btn-secondary" id="export-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg><span class="btn-label">导出完整配置</span></button><button class="btn btn-secondary file-button" id="import-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-upload"/></svg><span class="btn-label">导入配置文件</span></button><input class="sr-only" id="import-file" type="file" accept="application/json,.json"></div></div></section>
+          <section class="panel maintenance-card"><header class="maintenance-card-header"><span class="maintenance-icon"><svg class="icon" aria-hidden="true"><use href="#icon-pulse"/></svg></span><div><h2>用量统计</h2><p>管理本地统计数据</p></div></header><div class="panel-body"><p>清空累计使用量及历史统计。此操作不会删除服务配置或音频缓存。</p><div class="maintenance-actions"><button class="btn btn-danger" id="reset-stats-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-trash"/></svg><span class="btn-label">重置全部统计</span></button></div></div></section>
+          <section class="panel maintenance-card environment-card"><header class="maintenance-card-header"><span class="maintenance-icon"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></span><div><h2>运行环境</h2><p>服务组件与安全状态</p></div></header><div class="panel-body environment-list"><div><span>FFmpeg 转码</span><strong id="ffmpeg-status">检查中</strong></div><div><span>管理令牌保护</span><strong id="admin-status">检查中</strong></div><div><span>缓存占用内存</span><strong id="cache-memory">—</strong></div><div><span>缓存音频条目</span><strong id="cache-count">—</strong></div>{% if admin_protected %}<button class="btn btn-secondary btn-sm" id="maintenance-token-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-key"/></svg><span class="btn-label">更新管理令牌</span></button>{% endif %}</div></section>
         </div>
-        <div class="box-body">
-          
-          <!-- Sub-Tab 1: TTS Play -->
-          <div id="sub-panel-test" class="fade-in" style="display: flex; flex-direction: column; gap: 10px; flex: 1;">
-            <div class="field" style="display: flex; flex-direction: column; gap: 4px;">
-              <label class="field-label">
-                <span>测试文本</span>
-                <span style="font-size: 11px; color: var(--text-muted);" id="play-voice-label">当前选定音色</span>
-              </label>
-              <textarea class="textarea-control" id="test-text" rows="4" maxlength="5000" placeholder="输入测试段落...">阳光透过层叠的树叶洒在林间小径上，微风拂过带来初夏的泥土清香。这是一个宁静而美好的午后。</textarea>
-            </div>
-
-            <!-- Action Controllers -->
-            <div class="audio-player-bar">
-              <button class="btn btn-secondary btn-sm" id="preview-button" type="button" disabled>试听当前音色</button>
-              <button class="btn btn-primary btn-sm" id="test-tts-button" type="button">生成并播放</button>
-            </div>
-            <audio class="audio-player" id="preview-player" controls hidden></audio>
-            <audio class="audio-player" id="test-audio-player" controls hidden></audio>
-            <div class="inline-feedback" id="test-feedback" role="status" aria-live="polite" hidden></div>
-          </div>
-
-          <!-- Sub-Tab 2: A/B Compare -->
-          <div id="sub-panel-compare" class="fade-in" style="display: none; flex-direction: column; gap: 10px; flex: 1;">
-            <div class="field">
-              <label class="field-label">对比文本</label>
-              <textarea class="textarea-control" id="compare-text" rows="2" maxlength="5000">今天天气真好，我们一起出去散步吧。</textarea>
-            </div>
-            
-            <div class="form-row">
-              <div class="field">
-                <label class="field-label" for="compare-a">音色 A</label>
-                <select class="select-control" id="compare-a" disabled></select>
-              </div>
-              <div class="field">
-                <label class="field-label" for="compare-b">音色 B</label>
-                <select class="select-control" id="compare-b" disabled></select>
-              </div>
-            </div>
-
-            <div>
-              <button class="btn btn-secondary btn-sm" id="compare-button" style="width: 100%;" type="button" disabled>并行生成对比音频</button>
-            </div>
-
-            <div class="compare-audio-grid" style="display: flex; flex-direction: column; gap: 6px;">
-              <audio class="audio-player" id="audio-a" controls hidden></audio>
-              <audio class="audio-player" id="audio-b" controls hidden></audio>
-            </div>
-            <div class="inline-feedback" id="compare-feedback" role="status" aria-live="polite" hidden></div>
-          </div>
-
-          <!-- Sub-Tab 3: Live Logs & Monitoring -->
-          <div id="sub-panel-logs" class="fade-in" style="display: none; flex-direction: column; gap: 8px; flex: 1;">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span style="font-size: 11px; color: var(--text-muted);" id="stats-provider-title">运行状态与实时请求</span>
-              <div style="display: flex; gap: 6px;">
-                <button class="btn btn-secondary btn-sm" id="refresh-monitor-button" type="button">刷新</button>
-                <button class="btn btn-secondary btn-sm" id="clear-logs-btn" type="button">清屏</button>
-              </div>
-            </div>
-
-            <!-- Mini Runtime Metrics Bar -->
-            <div class="metrics-mini-grid">
-              <div class="mini-metric"><span class="m-lbl">累计字符</span><span class="m-val" id="total-chars">—</span></div>
-              <div class="mini-metric"><span class="m-lbl">累计请求</span><span class="m-val" id="total-requests">—</span></div>
-              <div class="mini-metric"><span class="m-lbl">今日字符</span><span class="m-val" id="today-chars">—</span></div>
-              <div class="mini-metric"><span class="m-lbl">今日请求</span><span class="m-val" id="today-requests">—</span></div>
-            </div>
-
-            <div class="log-container" id="activity-feed" role="log" aria-live="polite" aria-label="实时合成活动">
-              <p class="empty-state" id="activity-empty">等待新的合成请求…</p>
-            </div>
-            <span id="monitor-updated-at" style="display:none;"></span>
-            <span id="monitor-summary" style="display:none;"></span>
-            <div class="inline-feedback" id="monitor-feedback" role="status" aria-live="polite" hidden></div>
-          </div>
-
-        </div>
+        <div class="inline-feedback" id="maintenance-feedback" role="status" aria-live="polite" hidden></div>
       </div>
+    </main>
 
-    </div>
-
-    <!-- 4. Page 2: Maintenance Grid View -->
-    <div id="console-maintenance-page" class="maint-grid fade-in" role="tabpanel" data-console-page="maintenance" aria-labelledby="console-maintenance-tab" hidden>
-      
-      <!-- Box 1: Backup & Restore -->
-      <div class="box">
-        <div class="box-header">
-          <span class="box-title">配置备份与迁移</span>
-        </div>
-        <div class="box-body">
-          <p style="font-size: 12px; color: var(--text-muted);">导出当前包含全部服务商 API Key、音色偏好及容灾策略的配置文件。</p>
-          <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px;">
-            <button class="btn btn-secondary" id="export-button" type="button">导出完整配置</button>
-            <button class="btn btn-secondary file-button" id="import-button" type="button">导入配置文件...</button>
-            <input class="sr-only" id="import-file" type="file" accept="application/json,.json">
-          </div>
-        </div>
-      </div>
-
-      <!-- Box 2: Cache & Clean -->
-      <div class="box">
-        <div class="box-header">
-          <span class="box-title">缓存与统计管理</span>
-        </div>
-        <div class="box-body">
-          <p style="font-size: 12px; color: var(--text-muted);">清理累计使用量统计，不会删除配置或音频缓存。</p>
-          <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px;">
-            <button class="btn btn-danger" id="reset-stats-button" type="button">重置全部统计</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Box 3: Runtime Status -->
-      <div class="box">
-        <div class="box-header">
-          <span class="box-title">服务运行环境</span>
-        </div>
-        <div class="box-body">
-          <div style="display: flex; flex-direction: column; gap: 8px; font-size: 12.5px;">
-            <div style="display: flex; justify-content: space-between;">
-              <span style="color: var(--text-secondary);">FFmpeg 转码</span>
-              <span id="ffmpeg-status" style="color: var(--green); font-weight: 500;">✓ 已就绪</span>
-            </div>
-            <div style="display: flex; justify-content: space-between;">
-              <span style="color: var(--text-secondary);">管理令牌保护</span>
-              <span id="admin-status" style="color: var(--text-secondary);">未启用</span>
-            </div>
-            <div style="display: flex; justify-content: space-between;">
-              <span style="color: var(--text-secondary);">缓存占用内存</span>
-              <span id="cache-memory" style="font-family: var(--font-mono);">—</span>
-            </div>
-            <div style="display: flex; justify-content: space-between;">
-              <span style="color: var(--text-secondary);">缓存音频条目</span>
-              <span id="cache-count" style="font-family: var(--font-mono);">—</span>
-            </div>
-            {% if admin_protected %}
-            <div style="margin-top: 4px;">
-              <button class="btn btn-secondary btn-sm" id="maintenance-token-button" style="width: 100%;" type="button">更新管理令牌</button>
-            </div>
-            {% endif %}
-          </div>
-        </div>
-      </div>
-      <div class="inline-feedback" id="maintenance-feedback" role="status" aria-live="polite" hidden></div>
-    </div>
-
-    <footer class="footer">
-      <span>Legado TTS Server v{{ version }}</span>
-      <a href="/health" target="_blank" rel="noopener">查看健康状态</a>
-    </footer>
-
+    <footer class="footer"><span>为更好的阅读体验而构建 · Legado TTS Server</span><a href="/health" target="_blank" rel="noopener">服务健康状态<svg class="icon" aria-hidden="true"><use href="#icon-external"/></svg></a></footer>
   </div>
 
-  <!-- Voice Library Modal Dialog -->
   <dialog class="voice-dialog" id="voice-dialog" aria-labelledby="voice-dialog-title">
-    <div class="dialog-shell">
-      <header class="dialog-header">
-        <div><h2 id="voice-dialog-title" style="font-size: 14px; font-weight: 600;">浏览全部音色</h2></div>
-        <button class="dialog-close" id="voice-dialog-close" type="button" aria-label="关闭音色库">×</button>
-      </header>
-      <div class="dialog-toolbar">
-        <label class="search-field" for="dialog-voice-search" style="flex:1;">
-          <input id="dialog-voice-search" type="search" class="input-control" placeholder="搜索名称或音色 ID">
-        </label>
-        <span id="dialog-voice-count" style="font-size: 11.5px; color: var(--text-muted);">0 个音色</span>
-      </div>
-      <div class="voice-library" id="voice-library"></div>
-      <p class="empty-state" id="dialog-empty" hidden>没有匹配的音色。</p>
-    </div>
+    <div class="dialog-shell"><header class="dialog-header"><div><p class="eyebrow">VOICE LIBRARY</p><h2 id="voice-dialog-title">浏览全部音色</h2></div><button class="dialog-close" id="voice-dialog-close" type="button" aria-label="关闭音色库"><svg class="icon" aria-hidden="true"><use href="#icon-close"/></svg></button></header><div class="dialog-toolbar"><label class="search-control" for="dialog-voice-search"><svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg><input id="dialog-voice-search" type="search" placeholder="搜索名称或音色 ID"></label><span id="dialog-voice-count">0 个音色</span></div><div class="voice-library" id="voice-library"></div><p class="empty-state" id="dialog-empty" hidden>没有匹配的音色。</p></div>
   </dialog>
 
-  <!-- Toast Notification Container -->
   <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>

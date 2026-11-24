@@ -611,8 +611,10 @@
         const width = activeTab.offsetWidth;
         const left = activeTab.offsetLeft;
         if (!width) return;
+        const firstPaint = !container.classList.contains('has-indicator');
         indicator.style.width = `${width}px`;
         indicator.style.transform = `translateX(${left}px)`;
+        if (firstPaint) void indicator.offsetWidth;
         container.classList.add('has-indicator');
     }
 
@@ -1552,7 +1554,10 @@
         $('copy-subscribe-button').disabled = true;
         setFeedback('integration-feedback');
         try {
-            const template = await jsonRequest(`/api/legado/config?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}`);
+            const origin = window.location && window.location.origin && window.location.origin !== 'null'
+                ? window.location.origin : '';
+            const serverParam = origin ? `&server=${encodeURIComponent(origin)}` : '';
+            const template = await jsonRequest(`/api/legado/config?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}${serverParam}`);
             if (requestId !== state.configRequestId || voice !== currentVoiceId()) return;
             // Add only the explicitly entered client key, entirely locally.
             // getToken() is intentionally not used: it holds the admin secret.
@@ -1561,7 +1566,7 @@
             code.textContent = JSON.stringify(data, null, 2);
             const subDisplay = $('subscribe-url-display');
             if (subDisplay) {
-                const subUrl = `${window.location.origin}/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}&auto=true`;
+                const subUrl = `${origin}/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}&auto=true`;
                 subDisplay.value = legadoSubscriptionAllowed()
                     ? subUrl : '认证配置仅支持复制 JSON；密钥不会写入订阅链接。';
             }
@@ -1611,12 +1616,16 @@
         setButtonBusy(button, true, '生成中');
         try {
             const provider = encodeURIComponent(selectedProvider);
-            const data = await jsonRequest(`/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${provider}`);
-            const url = data.url || `${window.location.origin}/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${provider}&auto=true`;
+            const origin = window.location && window.location.origin && window.location.origin !== 'null'
+                ? window.location.origin : '';
+            const serverParam = origin ? `&server=${encodeURIComponent(origin)}` : '';
+            const data = await jsonRequest(`/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${provider}${serverParam}`);
+            const url = data.url || `${origin}/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${provider}&auto=true`;
             if (voice !== currentVoiceId() || selectedProvider !== state.provider
                     || !legadoSubscriptionAllowed()) {
                 throw new Error('音色或认证设置已更改，请重新复制');
             }
+            if ($('subscribe-url-display')) $('subscribe-url-display').value = url;
             await copyText(url);
             if (button && button.classList) {
                 button.classList.add('is-copied');

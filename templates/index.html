@@ -128,9 +128,59 @@
           </div>
         </section>
 
+        <!-- Runtime Overview (Top KPI Strip) -->
+        <section class="runtime-section reveal-card" style="--stagger: 1" aria-labelledby="runtime-title">
+          <div class="section-caption">
+            <h2 id="runtime-title">运行概览</h2>
+            <span>自本次服务启动以来的全局指标</span>
+          </div>
+          <div class="stats-strip">
+            <div class="stat-item">
+              <div class="stat-head">
+                <span class="stat-label">累计合成字符</span>
+                <span class="stat-icon tone-teal" aria-hidden="true"><svg class="icon"><use href="#icon-text"/></svg></span>
+              </div>
+              <div class="stat-body">
+                <span class="stat-val" id="total-chars-all">—</span>
+                <span class="stat-unit">字符</span>
+              </div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-head">
+                <span class="stat-label">累计合成请求</span>
+                <span class="stat-icon tone-blue" aria-hidden="true"><svg class="icon"><use href="#icon-bolt"/></svg></span>
+              </div>
+              <div class="stat-body">
+                <span class="stat-val" id="total-requests-all">—</span>
+                <span class="stat-unit">次</span>
+              </div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-head">
+                <span class="stat-label">音频缓存命中率</span>
+                <span class="stat-icon tone-green" aria-hidden="true"><svg class="icon"><use href="#icon-layers"/></svg></span>
+              </div>
+              <div class="stat-body">
+                <span class="stat-val" id="cache-hit-rate">—</span>
+                <span class="stat-unit">命中</span>
+              </div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-head">
+                <span class="stat-label">P95 响应延时</span>
+                <span class="stat-icon tone-amber" aria-hidden="true"><svg class="icon"><use href="#icon-gauge"/></svg></span>
+              </div>
+              <div class="stat-body">
+                <span class="stat-val" id="response-time-p95">—</span>
+                <span class="stat-unit">实时</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <div class="workspace-grid">
           <!-- Step 01: Settings Panel -->
-          <section class="panel settings-panel reveal-card" style="--stagger: 1" aria-labelledby="settings-title">
+          <section class="panel settings-panel reveal-card" style="--stagger: 2" aria-labelledby="settings-title">
             <header class="panel-header">
               <div class="panel-heading">
                 <span class="step-number">01</span>
@@ -399,7 +449,7 @@
           </section>
 
           <!-- Step 02: Studio Panel -->
-          <section class="panel studio-panel reveal-card" style="--stagger: 2" aria-label="语音试听工作室">
+          <section class="panel studio-panel reveal-card" style="--stagger: 3" aria-label="语音试听工作室">
             <header class="panel-header studio-header">
               <div class="panel-heading">
                 <span class="step-number">02</span>
@@ -631,7 +681,7 @@
         </div>
 
         <!-- Step 03: Legado Integration -->
-        <section class="integration-panel panel reveal-card" style="--stagger: 3" aria-labelledby="integration-title">
+        <section class="integration-panel panel reveal-card" style="--stagger: 4" aria-labelledby="integration-title">
           <div class="integration-intro">
             <span class="step-number">03</span>
             <div>
@@ -695,56 +745,6 @@
 
             <pre class="config-preview" id="legado-config" tabindex="0" aria-label="开源阅读配置" hidden>正在生成配置…</pre>
             <div class="inline-feedback" id="integration-feedback" role="status" aria-live="polite" hidden></div>
-          </div>
-        </section>
-
-        <!-- Runtime Overview -->
-        <section class="runtime-section reveal-card" style="--stagger: 4" aria-labelledby="runtime-title">
-          <div class="section-caption">
-            <h2 id="runtime-title">运行概览</h2>
-            <span>自本次服务启动以来的全局指标</span>
-          </div>
-          <div class="stats-strip">
-            <div class="stat-item">
-              <div class="stat-head">
-                <span class="stat-label">累计合成字符</span>
-                <span class="stat-icon tone-teal" aria-hidden="true"><svg class="icon"><use href="#icon-text"/></svg></span>
-              </div>
-              <div class="stat-body">
-                <span class="stat-val" id="total-chars-all">—</span>
-                <span class="stat-unit">字符</span>
-              </div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-head">
-                <span class="stat-label">累计合成请求</span>
-                <span class="stat-icon tone-blue" aria-hidden="true"><svg class="icon"><use href="#icon-bolt"/></svg></span>
-              </div>
-              <div class="stat-body">
-                <span class="stat-val" id="total-requests-all">—</span>
-                <span class="stat-unit">次</span>
-              </div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-head">
-                <span class="stat-label">音频缓存命中率</span>
-                <span class="stat-icon tone-green" aria-hidden="true"><svg class="icon"><use href="#icon-layers"/></svg></span>
-              </div>
-              <div class="stat-body">
-                <span class="stat-val" id="cache-hit-rate">—</span>
-                <span class="stat-unit">命中</span>
-              </div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-head">
-                <span class="stat-label">P95 响应延时</span>
-                <span class="stat-icon tone-amber" aria-hidden="true"><svg class="icon"><use href="#icon-gauge"/></svg></span>
-              </div>
-              <div class="stat-body">
-                <span class="stat-val" id="response-time-p95">—</span>
-                <span class="stat-unit">实时</span>
-              </div>
-            </div>
           </div>
         </section>
       </div>

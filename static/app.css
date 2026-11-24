@@ -114,6 +114,8 @@ html {
   scroll-behavior: smooth;
   scrollbar-color: var(--border-strong) transparent;
   scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  overflow-y: scroll;
 }
 
 body {
@@ -128,7 +130,7 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   transition: background-color 0.3s var(--ease-out), color 0.3s var(--ease-out);
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 /* Custom thin scrollbars */
@@ -259,36 +261,44 @@ svg {
 }
 
 /* ───────────────────────────────────────────────────────────────
-   Sticky Glassmorphic Header
+   Floating Glassmorphic Capsule Header
    ─────────────────────────────────────────────────────────────── */
 .header-bar {
   position: sticky;
-  top: 0;
-  z-index: 50;
-  border-bottom: 1px solid var(--border);
+  top: 14px;
+  z-index: 60;
+  width: min(1320px, calc(100% - 48px));
+  margin: 14px auto 0;
+  padding: 0 12px 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
   background: var(--bg-header);
-  backdrop-filter: blur(18px) saturate(160%);
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
-  transition: background-color 0.3s var(--ease-out), border-color 0.3s var(--ease-out);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  box-shadow: 0 12px 32px -14px rgba(0, 0, 0, 0.48), var(--surface-highlight);
+  transition: background-color 0.3s var(--ease-out), border-color 0.3s var(--ease-out), box-shadow 0.3s var(--ease-out);
+}
+[data-theme="light"] .header-bar {
+  box-shadow: 0 10px 28px -12px rgba(15, 23, 42, 0.14), 0 1px 3px rgba(15, 23, 42, 0.05), var(--surface-highlight);
 }
 
 .header-inner {
-  width: min(1320px, calc(100% - 48px));
-  margin: 0 auto;
-  display: flex;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
-  min-height: 68px;
-  gap: 20px;
+  min-height: 60px;
+  gap: 16px;
 }
 
 .brand {
+  justify-self: start;
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 11px;
   flex-shrink: 0;
-  border-radius: var(--radius);
-  padding: 4px 6px 4px 2px;
+  border-radius: var(--radius-pill);
+  padding: 4px 10px 4px 4px;
   transition: opacity var(--duration-fast) ease;
 }
 .brand:hover {
@@ -300,9 +310,9 @@ svg {
   align-items: center;
   justify-content: center;
   gap: 3px;
-  width: 38px;
-  height: 38px;
-  border-radius: 11px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
   background: var(--accent-gradient);
   color: var(--accent-contrast);
   box-shadow: 0 4px 14px -3px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.32);
@@ -371,8 +381,11 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
 
 /* Segmented Nav Pill */
 .nav-tabs {
+  justify-self: center;
   position: relative;
-  display: inline-flex;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   align-items: center;
   gap: 4px;
   padding: 4px;
@@ -391,23 +404,24 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
   border: 1px solid var(--border);
   opacity: 0;
   pointer-events: none;
-  transition: transform 0.34s var(--ease-out), width 0.34s var(--ease-out), opacity 0.2s ease;
 }
 .nav-tabs.has-indicator .tab-indicator {
   opacity: 1;
+  transition: transform 0.32s var(--ease-out), width 0.32s var(--ease-out);
 }
 .nav-tab-btn {
   position: relative;
   z-index: 1;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
   height: 36px;
-  padding: 0 16px;
+  padding: 0 18px;
   border-radius: var(--radius-pill);
   color: var(--text-secondary);
   font-size: 14px;
-  font-weight: 550;
+  font-weight: 600;
   white-space: nowrap;
   transition: color var(--duration-fast) ease, background-color var(--duration-fast) ease;
 }
@@ -421,7 +435,6 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
 .nav-tab-btn.is-active,
 .nav-tab-btn.active {
   color: var(--accent);
-  font-weight: 650;
 }
 .nav-tabs:not(.has-indicator) .nav-tab-btn.is-active,
 .nav-tabs:not(.has-indicator) .nav-tab-btn.active {
@@ -431,9 +444,10 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
 
 /* Header Actions */
 .header-actions {
+  justify-self: end;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .status-badge {
@@ -500,14 +514,18 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
   gap: 7px;
   min-width: 38px;
   height: 38px;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   background: var(--bg-panel);
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 550;
   transition: border-color var(--duration-fast) ease, background-color var(--duration-fast) ease, color var(--duration-fast) ease, transform var(--duration-fast) var(--ease-spring);
+}
+.theme-toggle-btn {
+  width: 38px;
+  padding: 0;
 }
 .icon-btn:hover {
   border-color: var(--border-strong);
@@ -539,7 +557,7 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  padding: 32px 0 26px;
+  padding: 26px 0 20px;
 }
 .page-heading-copy {
   max-width: 660px;
@@ -2048,10 +2066,10 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
   background: var(--accent-gradient);
   opacity: 0;
   pointer-events: none;
-  transition: transform 0.32s var(--ease-out), width 0.32s var(--ease-out), opacity 0.2s ease;
 }
 .sub-tabs.has-indicator .tab-indicator {
   opacity: 1;
+  transition: transform 0.32s var(--ease-out), width 0.32s var(--ease-out);
 }
 .sub-tab-btn {
   position: relative;
@@ -2062,7 +2080,7 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
   padding: 0 14px;
   color: var(--text-muted);
   font-size: 14px;
-  font-weight: 550;
+  font-weight: 600;
   white-space: nowrap;
   transition: color var(--duration-fast) ease;
 }
@@ -2076,7 +2094,6 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
 .sub-tab-btn.is-active,
 .sub-tab-btn.active {
   color: var(--accent);
-  font-weight: 650;
 }
 .sub-tabs:not(.has-indicator) .sub-tab-btn.is-active::after,
 .sub-tabs:not(.has-indicator) .sub-tab-btn.active::after {
@@ -2650,16 +2667,17 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
 }
 
 /* ───────────────────────────────────────────────────────────────
-   Runtime Overview KPI Strip
+   Runtime Overview KPI Strip (Top of Workspace)
    ─────────────────────────────────────────────────────────────── */
 .runtime-section {
-  margin-top: 28px;
+  margin-top: 0;
+  margin-bottom: 22px;
 }
 .section-caption {
   display: flex;
   align-items: baseline;
-  gap: 12px;
-  margin-bottom: 14px;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 .section-caption h2 {
   font-size: 15px;
@@ -3234,7 +3252,7 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
    Responsive Breakpoints
    ─────────────────────────────────────────────────────────────── */
 @media (max-width: 1120px) {
-  .header-inner,
+  .header-bar,
   .app-shell {
     width: min(100% - 36px, 980px);
   }
@@ -3263,14 +3281,22 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
 }
 
 @media (max-width: 768px) {
-  .header-inner,
+  .header-bar,
   .app-shell {
     width: calc(100% - 28px);
   }
+  .header-bar {
+    top: 10px;
+    margin-top: 10px;
+    padding: 10px 14px;
+    border-radius: 26px;
+  }
   .header-inner {
+    display: flex;
     flex-wrap: wrap;
-    padding: 12px 0;
-    gap: 12px;
+    justify-content: space-between;
+    min-height: 0;
+    gap: 10px;
   }
   .version-tag {
     display: none;
@@ -3278,20 +3304,22 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
   .labeled-icon-btn .button-label {
     display: none;
   }
+  .labeled-icon-btn {
+    width: 38px;
+    padding: 0;
+  }
   .nav-tabs {
     order: 3;
     width: 100%;
-    justify-content: stretch;
   }
   .nav-tab-btn {
-    flex: 1;
-    justify-content: center;
+    padding: 0 12px;
   }
   .page-heading {
     flex-direction: column;
     align-items: flex-start;
-    gap: 16px;
-    padding: 24px 0 20px;
+    gap: 14px;
+    padding: 20px 0 16px;
   }
   .active-profile-pill {
     width: 100%;
@@ -3367,7 +3395,7 @@ body.is-synthesizing .brand-mark i:nth-child(4) { animation-delay: 420ms; }
 }
 
 @media (max-width: 480px) {
-  .header-inner,
+  .header-bar,
   .app-shell {
     width: calc(100% - 22px);
   }

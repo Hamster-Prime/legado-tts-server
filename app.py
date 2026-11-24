@@ -215,10 +215,14 @@ def handle_500(e):
 @app.before_request
 def _before_request():
     # Only trust forwarding headers from explicitly configured proxy networks.
+    request._proxy_trusted = False
+    request._peer_is_local = False
     peer = request.environ.get('REMOTE_ADDR', '')
     try:
         peer_ip = ipaddress.ip_address(peer)
+        request._peer_is_local = bool(peer_ip.is_loopback or peer_ip.is_private)
         if any(peer_ip in network for network in TRUSTED_PROXIES):
+            request._proxy_trusted = True
             forwarded = request.headers.get('X-Forwarded-For', '')
             if forwarded:
                 chain = [ipaddress.ip_address(part.strip())
@@ -5045,6 +5049,34 @@ def _legado_voice_and_provider(config):
     return voice, provider, provider_error
 
 
+def _legado_server_url():
+    """Resolve the public server origin for Legado exports."""
+    explicit = request.args.get('server', '').strip().rstrip('/')
+    if explicit:
+        parsed = urlsplit(explicit)
+        if (parsed.scheme in ('http', 'https')
+                and parsed.netloc
+                and not parsed.query
+                and not parsed.fragment
+                and not parsed.username
+                and not parsed.password):
+            return explicit
+    detected = request.host_url.rstrip('/')
+    proxy_trusted = getattr(request, '_proxy_trusted', False)
+    peer_local = getattr(request, '_peer_is_local', False)
+    if proxy_trusted or peer_local:
+        proto = request.headers.get('X-Forwarded-Proto', '').split(',')[0].strip().lower()
+        host = request.headers.get('X-Forwarded-Host', '').split(',')[0].strip() if proxy_trusted else ''
+        if proto in ('http', 'https') or host:
+            parsed = urlsplit(detected)
+            scheme = proto if proto in ('http', 'https') else parsed.scheme
+            netloc = host or parsed.netloc
+            if (netloc and '/' not in netloc and '@' not in netloc
+                    and not any(c.isspace() for c in netloc)):
+                return f'{scheme}://{netloc}'
+    return detected
+
+
 @app.route('/api/legado/config', methods=['GET'])
 def api_legado_config():
     """Generate Legado-compatible TTS engine configuration JSON.
@@ -5057,10 +5089,7 @@ def api_legado_config():
     voice, provider, provider_error = _legado_voice_and_provider(config)
     if provider_error:
         return _error_response(provider_error, 400, 'invalid_request_error')
-    server = request.args.get('server', '').strip()
-    if not server:
-        # Auto-detect from request
-        server = request.host_url.rstrip('/')
+    server = _legado_server_url()
     rate = request.args.get('rate', '+0%').strip()
     legado_cfg = _build_legado_config(server, voice, rate, provider)
     return Response(
@@ -5071,9 +5100,9 @@ def api_legado_config():
 
 @app.route('/api/legado/subscribe', methods=['GET'])
 def api_legado_subscribe():
-    """Generate a Legado subscription URL (base64-encoded config JSON).
+    """Generate a Legado network-importable subscription URL and payload.
 
-    Usage: Import this URL directly into Legado as a speech engine.
+    Usage: Paste the ?auto=true URL directly into Legado -> 朗读引擎 -> 网络导入.
     """
     if API_KEYS_REQUIRED:
         return _error_response(
@@ -5084,9 +5113,7 @@ def api_legado_subscribe():
     voice, provider, provider_error = _legado_voice_and_provider(config)
     if provider_error:
         return _error_response(provider_error, 400, 'invalid_request_error')
-    server = request.args.get('server', '').strip()
-    if not server:
-        server = request.host_url.rstrip('/')
+    server = _legado_server_url()
     rate = request.args.get('rate', '+0%').strip()
     legado_cfg = _build_legado_config(server, voice, rate, provider)
     encoded = base64.b64encode(
@@ -5095,9 +5122,21 @@ def api_legado_subscribe():
     subscribe_query = {'voice': voice, 'auto': 'true'}
     if provider:
         subscribe_query['provider'] = provider
+    if request.args.get('rate', '').strip():
+        subscribe_query['rate'] = rate
+    if request.args.get('server', '').strip() and server != request.host_url.rstrip('/'):
+        subscribe_query['server'] = server
     subscribe_url = f"{server}/api/legado/subscribe?{urlencode(subscribe_query)}"
     if request.args.get('auto') == 'true':
-        return Response(encoded, mimetype='text/plain')
+        if request.args.get('format') == 'base64':
+            return Response(encoded, mimetype='text/plain')
+        # Legado network import parses a JSON array (or object) directly;
+        # returning raw base64 causes "格式不对" import failures.
+        return Response(
+            _serialize_legado_config([legado_cfg]),
+            content_type='application/json; charset=utf-8',
+            headers={'Cache-Control': 'no-store'},
+        )
     return jsonify({'url': subscribe_url, 'config': legado_cfg, 'encoded': encoded})
 
 

@@ -2574,12 +2574,39 @@ class TestLegadoEndpoints:
             '&auto=true'
         )
         assert r.status_code == 200
+        assert r.headers['Content-Type'] == 'application/json; charset=utf-8'
+        decoded = r.get_json()
+        assert isinstance(decoded, list) and len(decoded) == 1
+        assert decoded[0]['name'] == '火山引擎 - 少年梓辛 2.0'
+        assert 'speech/stream' in decoded[0]['url']
+
+    def test_legado_subscribe_base64_opt_in(self):
+        r = self.client.get(
+            '/api/legado/subscribe'
+            '?provider=doubao'
+            '&voice=zh_male_shaonianzixin_uranus_bigtts'
+            '&auto=true&format=base64'
+        )
+        assert r.status_code == 200
         import base64
         decoded_text = base64.b64decode(r.data).decode('utf-8')
         assert decoded_text.startswith('{\n  "concurrentRate": "0",')
         decoded = json.loads(decoded_text)
         assert decoded['name'] == '火山引擎 - 少年梓辛 2.0'
         assert 'speech/stream' in decoded['url']
+
+    def test_legado_subscribe_preserves_explicit_https_server(self):
+        r = self.client.get(
+            '/api/legado/subscribe'
+            '?provider=edge'
+            '&voice=zh-CN-XiaoxiaoNeural'
+            '&server=https://tts.example.com'
+        )
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data['url'].startswith('https://tts.example.com/api/legado/subscribe?')
+        assert 'server=https%3A%2F%2Ftts.example.com' in data['url']
+        assert data['config']['url'].startswith('https://tts.example.com/speech/stream,')
 
     def test_legado_subscribe_json(self):
         r = self.client.get('/api/legado/subscribe')

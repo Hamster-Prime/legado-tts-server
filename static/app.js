@@ -237,14 +237,15 @@
 
     function setButtonBusy(button, busy, busyText) {
         if (!button) return;
+        const label = button.querySelector('.btn-label');
         if (busy) {
-            if (!button.dataset.idleText) button.dataset.idleText = button.textContent.trim();
+            if (!button.dataset.idleText) button.dataset.idleText = (label || button).textContent.trim();
             button.disabled = true;
             button.setAttribute('aria-busy', 'true');
-            if (busyText) button.textContent = busyText;
+            if (busyText) (label || button).textContent = busyText;
         } else {
             button.removeAttribute('aria-busy');
-            if (button.dataset.idleText) button.textContent = button.dataset.idleText;
+            if (button.dataset.idleText) (label || button).textContent = button.dataset.idleText;
             button.disabled = false;
         }
     }
@@ -319,7 +320,7 @@
     function updateThemeButton() {
         const dark = document.documentElement.getAttribute('data-theme') === 'dark'
             || document.documentElement.dataset.theme === 'dark';
-        if ($('theme-icon')) $('theme-icon').textContent = dark ? '☀' : '◐';
+        if ($('theme-icon-use')) $('theme-icon-use').setAttribute('href', dark ? '#icon-sun' : '#icon-moon');
         if ($('theme-label')) $('theme-label').textContent = dark ? '亮色' : '暗色';
         if ($('theme-button')) $('theme-button').setAttribute('aria-label', dark ? '切换到亮色主题' : '切换到暗色主题');
     }
@@ -458,7 +459,9 @@
             const btn = $(`btn-sub-${t}`);
             const isActive = t === sub;
             if (panel) {
+                panel.hidden = !isActive;
                 panel.style.display = isActive ? 'flex' : 'none';
+                panel.setAttribute('aria-hidden', String(!isActive));
                 panel.classList.remove('fade-in');
                 void panel.offsetWidth;
                 panel.classList.add('fade-in');
@@ -466,9 +469,16 @@
             if (btn) {
                 btn.classList.toggle('active', isActive);
                 btn.classList.toggle('is-active', isActive);
+                btn.setAttribute('aria-selected', String(isActive));
+                btn.tabIndex = isActive ? 0 : -1;
             }
         });
         if (sub === 'logs') startMonitoring();
+    }
+
+    function updateTextCount() {
+        const input = $('test-text');
+        if ($('test-text-count') && input) $('test-text-count').textContent = input.value.length.toLocaleString();
     }
 
     function credentialValue(field) {
@@ -778,8 +788,9 @@
 
     function updateSetupSummary() {
         const voice = voiceName(currentVoiceId());
-        $('setup-summary').textContent = `${providerMeta().short} · ${voice || '未选择音色'}`;
+        if ($('setup-summary')) $('setup-summary').textContent = `${providerMeta().short} · ${voice || '未选择音色'}`;
         $('active-provider-name').textContent = `${providerMeta().name} · ${voice || '未选择音色'}`;
+        if ($('play-voice-label')) $('play-voice-label').textContent = `当前草稿 · ${providerMeta().name}`;
         $('stats-provider-title').textContent = `${providerMeta().name} 使用量`;
     }
 
@@ -1053,6 +1064,7 @@
         $$('[data-settings-provider]').forEach(panel => {
             const active = panel.dataset.settingsProvider === provider;
             panel.classList.toggle('is-active', active);
+            panel.hidden = !active;
             panel.style.display = active ? '' : 'none';
             panel.setAttribute('aria-hidden', String(!active));
             panel.inert = !active;
@@ -1503,9 +1515,9 @@
         $('cache-count').textContent = Number(cache.count || cache.size || 0).toLocaleString();
         $('cache-memory').textContent = `${(Number(cache.bytes || 0) / (1024 * 1024)).toFixed(1)} MB`;
         $('ffmpeg-status').textContent = health.ffmpeg_available ? '可用' : '不可用';
-        $('ffmpeg-status').style.color = health.ffmpeg_available ? 'var(--success)' : 'var(--warning)';
+        $('ffmpeg-status').style.color = health.ffmpeg_available ? 'var(--green)' : 'var(--yellow)';
         $('admin-status').textContent = health.admin_protected ? '已启用' : '未启用';
-        $('admin-status').style.color = health.admin_protected ? 'var(--success)' : 'var(--text-soft)';
+        $('admin-status').style.color = health.admin_protected ? 'var(--green)' : 'var(--text-secondary)';
         if (metrics) {
             $('total-chars-all').textContent = Number(metrics.totalChars || 0).toLocaleString();
             $('total-requests-all').textContent = Number(metrics.totalRequests || 0).toLocaleString();
@@ -1845,14 +1857,27 @@
         });
         $$('[data-subtab-target]').forEach(btn => {
             btn.addEventListener('click', () => switchSubTab(btn.dataset.subtabTarget));
+            btn.addEventListener('keydown', event => {
+                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                event.preventDefault();
+                const tabs = $$('[data-subtab-target]');
+                const current = tabs.indexOf(event.currentTarget);
+                let next = event.key === 'ArrowLeft' ? current - 1 : current + 1;
+                if (event.key === 'Home') next = 0;
+                if (event.key === 'End') next = tabs.length - 1;
+                const target = tabs[(next + tabs.length) % tabs.length];
+                switchSubTab(target.dataset.subtabTarget);
+                target.focus();
+            });
         });
         if ($('toggle-json-btn')) {
             $('toggle-json-btn').addEventListener('click', () => {
                 const pre = $('legado-config');
                 if (pre) {
-                    const isHidden = pre.style.display === 'none';
-                    pre.style.display = isHidden ? 'block' : 'none';
-                    $('toggle-json-btn').textContent = isHidden ? '收起配置' : '展开配置';
+                    const isHidden = pre.hidden;
+                    pre.hidden = !isHidden;
+                    $('toggle-json-btn').textContent = isHidden ? '收起 JSON' : '查看 JSON';
+                    $('toggle-json-btn').setAttribute('aria-expanded', String(isHidden));
                 }
             });
         }
@@ -1875,6 +1900,12 @@
         });
 
         $('voice-search').addEventListener('input', renderVoiceSelect);
+        $('test-text').addEventListener('input', updateTextCount);
+        $('test-text').addEventListener('keydown', event => {
+            if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey)) return;
+            event.preventDefault();
+            if (!$('test-tts-button').disabled) testTTS();
+        });
         $('voice-select').addEventListener('change', event => {
             if (!event.currentTarget.value) return;
             selectVoice(event.currentTarget.value);
@@ -1942,6 +1973,7 @@
 
     async function initialize() {
         updateThemeButton();
+        updateTextCount();
         initCollapsibles();
         initConsoleNavigation();
         let loadedConfig = null;

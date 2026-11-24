@@ -21,6 +21,9 @@ services:
       - FALLBACK_RETRY_COUNT=1
       - FALLBACK_RETRY_DELAY_MS=500
       # - ADMIN_TOKEN=your-secret-token  # uncomment to enable auth
+      # - API_KEYS_REQUIRED=1
+      # - API_KEYS=your-client-api-key   # required when forcing client auth
+      # - TRUSTED_PROXIES=172.20.0.2/32 # actual proxy IP, never all networks
       # - GUNICORN_THREADS=16            # concurrency knob (keep workers at 1)
     restart: unless-stopped
 

@@ -214,6 +214,23 @@ Fish Audio 的 API Key 只放在凭证区。声音模型在“选择音色”的
 
 ---
 
+## Legado 访问认证
+
+开启 `API_KEYS_REQUIRED=1` 后，请同时配置 `API_KEYS`，并为阅读客户端分配独立的
+客户端密钥。未配置任何密钥时，匿名请求仍会被拒绝，不会自动退回开放模式。
+
+在 Web 管理界面的“开源阅读 (Legado) 一键接入”区域，将分配的密钥填入
+“Legado 客户端 API Key”，然后复制 JSON 配置导入阅读。浏览器会将该密钥写入
+引擎的 `Authorization: Bearer ...` 请求头；不会使用服务商凭据或自动复制
+管理令牌，也不会将输入保存到服务端或浏览器持久化存储。
+
+**JSON 配置含客户端密钥，请勿公开分享，并通过 HTTPS 使用服务。** 为避免密钥进入
+URL、访问日志或共享订阅，开启认证或输入客户端密钥时不提供订阅链接；请使用
+JSON 导入。`/api/legado/config` 返回的是不含凭据的模板，直接调用该接口的客户端
+需要自行在引擎请求头中添加认证信息。
+
+---
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -226,10 +243,11 @@ Fish Audio 的 API Key 只放在凭证区。声音模型在“选择音色”的
 | `AUDIO_CACHE_SIZE` | `100` | 缓存最大条目数 |
 | `AUDIO_CACHE_MAX_MB` | `200` | 缓存最大内存(MB) |
 | `RATE_LIMIT_RPM` | `120` | 每IP每分钟请求限制(0=不限) |
-| `RATE_LIMIT_WHITELIST` | `127.0.0.1,::1` | 限流白名单IP |
+| `RATE_LIMIT_WHITELIST` | `""` | 显式限流白名单 IP，逗号分隔；默认包括本机在内均限流 |
+| `TRUSTED_PROXIES` | `""` | 可信反向代理 IP/CIDR，逗号分隔；仅信任来自这些地址的 `X-Forwarded-For` |
 | `ADMIN_TOKEN` | `""` | 管理 API 认证 Token；非本机部署必须设置强随机值 |
 | `API_KEYS` | `""` | TTS访问密钥(逗号分隔) |
-| `API_KEYS_REQUIRED` | `0` | 强制API密钥认证(1=是) |
+| `API_KEYS_REQUIRED` | `0` | 强制API密钥认证(1=是)；开启但未配置密钥时拒绝匿名访问，管理令牌仍可认证 |
 | `ALLOW_SSML` | `1` | 允许SSML输入(1=是/0=否) |
 | `FALLBACK_TO_EDGE` | `1` | 启用自动故障转移(1=是/0=否) |
 | `FALLBACK_VOICE` | `zh-CN-XiaoxiaoNeural` | 故障转移时使用的 Edge 音色 |
@@ -249,11 +267,11 @@ Fish Audio 的 API Key 只放在凭证区。声音模型在“选择音色”的
 | `FFMPEG_TIMEOUT` | `30` | 单次 ffmpeg 转码超时(秒) |
 | `GUNICORN_THREADS` | `min(CPU×4, 32)` | gunicorn 线程数(并发调节首选) |
 | `GUNICORN_WORKERS` | `1` | gunicorn 进程数，>1 会使限流/配额/缓存按进程各自独立 |
+| `SSE_MAX_SUBSCRIBERS` | `20` | SSE 订阅上限；Gunicorn 会根据实际线程数进一步收紧，预留普通请求容量 |
 
 > 安全提示：未设置 `ADMIN_TOKEN` 时，同源 WebUI 与不携带 `Origin` 的直接客户端
 > 会继续采用兼容开放模式。只要服务会被局域网或公网访问，就必须设置强随机 Token；
 > 跨站浏览器管理请求会被拒绝，但这不能替代身份认证。
-| `SSE_MAX_SUBSCRIBERS` | `20` | `/api/events` 最大并发订阅数 |
 
 ---
 
@@ -384,15 +402,21 @@ Provider 专用模型请求失败时不会静默切换到 Edge，客户端会收
 | GET | `/api/openapi.json` | OpenAPI 3.0 规范 |
 
 `/api/events` 与 `/api/audit` 会暴露客户端 IP、音色与字符数，因此同样受
-`ADMIN_TOKEN` 保护。浏览器的 `EventSource` 无法自定义请求头，故该端点
-额外支持查询参数传令牌：
+`ADMIN_TOKEN` 保护。令牌必须通过 `Authorization` 请求头传递，
+不再接受 `?token=` 查询参数，以免管理密钥进入访问日志。浏览器可用 fetch 读取 SSE：
 
 ```js
-new EventSource('/api/events?token=' + encodeURIComponent(token))
+const response = await fetch('/api/events', {
+  headers: {Authorization: `Bearer ${token}`, Accept: 'text/event-stream'}
+});
+const reader = response.body.getReader(); // 按 SSE 格式增量解析
 ```
 
 并发订阅数受 `SSE_MAX_SUBSCRIBERS`（默认 20）限制；超出时返回 `503` 并带
-`Retry-After: 30`（每个订阅会占用一个工作线程）。
+`Retry-After: 30`（每个订阅会占用一个工作线程）。Gunicorn 按实际线程数
+至少预留一个、最多四个普通请求线程，只有一个线程时禁用 SSE。
+WebUI 仅在日志面板可见时建立连接，离开后关闭；积压过多的订阅会被断开。
+内置 Gunicorn 访问日志不再记录查询参数，外部代理仍应配置日志脱敏。
 
 ### Legado 专用
 | 方法 | 路径 | 说明 |
@@ -450,6 +474,13 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 
 ## 流式部署说明
 
+反向代理部署请显式设置 `TRUSTED_PROXIES`（例如同机 Nginx 设置为
+`127.0.0.1/32,::1/128`），并让代理覆盖或正确追加 `X-Forwarded-For`。
+应用从右向左剥离可信代理地址，以第一个不可信地址作为客户端 IP。
+不要配置为所有网络，也不要把代理地址加入 `RATE_LIMIT_WHITELIST`。
+未配置可信代理时，转发头被忽略，所有代理后的用户会共享代理 IP 的限流/配额。
+应用端口应只允许这些代理连接，或直接在入口代理实施限流。
+
 - `/speech/stream` 对火山引擎执行真实的端到端流式传输：上游返回按行分隔的 JSON 事件，服务逐块 Base64 解码并以 `audio/mpeg` 立即转发给 Legado，不等待整段音频完成。
 - 流式响应不设置 `Content-Length`，并发送 `X-Accel-Buffering: no`。
 - 如前置 Nginx，请关闭该路径的响应缓冲和缓存，并把读取超时设置得足够覆盖长段落：
@@ -457,6 +488,7 @@ new EventSource('/api/events?token=' + encodeURIComponent(token))
 ```nginx
 location /speech/stream {
     proxy_pass http://legado_tts;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_http_version 1.1;
     proxy_buffering off;
     proxy_cache off;

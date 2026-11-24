@@ -373,6 +373,13 @@
         return Boolean(panel && panel.classList.contains('is-open'));
     }
 
+    function isMonitoringVisible() {
+        const main = document.querySelector('[data-console-page="main"]');
+        if (main && main.hidden) return false;
+        const logs = $('sub-panel-logs');
+        return logs ? logs.style.display !== 'none' : isSectionOpen('monitoring');
+    }
+
     function setSectionOpen(panel, open, persist = true, runEffects = true) {
         const toggle = panel.querySelector('.panel-toggle');
         const content = panel.querySelector('.panel-collapse');
@@ -428,7 +435,7 @@
             setSectionOpen(maintenancePanel, true, false);
         }
         if (pageName !== 'main') stopMonitoring();
-        else if (state.initialized && ($('sub-panel-logs') || isSectionOpen('monitoring'))) {
+        else if (state.initialized && isMonitoringVisible()) {
             startMonitoring();
         }
     }
@@ -469,6 +476,7 @@
             }
         });
         if (sub === 'logs') startMonitoring();
+        else stopMonitoring();
     }
 
     function credentialValue(field) {
@@ -1195,30 +1203,66 @@
         }
     }
 
+    function getLegadoClientKey() {
+        return ($('legado-api-key')?.value || '').trim();
+    }
+
+    function legadoSubscriptionAllowed() {
+        // Never put client credentials into a URL, including an encoded
+        // subscription. Authenticated engines are exported as JSON only.
+        return !INITIAL.apiKeysRequired && !getLegadoClientKey();
+    }
+
+    function withLegadoClientKey(config, clientKey) {
+        if (!clientKey) return config;
+        if (/[\x00-\x1f\x7f]/.test(clientKey)) {
+            throw new Error('客户端 API Key 不能包含控制字符');
+        }
+        const delimiter = typeof config.url === 'string' ? config.url.indexOf(',') : -1;
+        if (delimiter < 0) throw new Error('引擎配置格式无效');
+        const options = JSON.parse(config.url.slice(delimiter + 1));
+        options.headers = {...options.headers, Authorization: `Bearer ${clientKey}`};
+        return {...config, url: `${config.url.slice(0, delimiter)},${JSON.stringify(options)}`};
+    }
+
     async function updateLegadoConfig() {
         const voice = currentVoiceId();
         if (!voice || !hasUsableCurrentVoice()) {
             invalidateLegadoConfig(voice ? '当前音色不可用，请重新选择。' : '请先选择音色。');
             return;
         }
+        const clientKey = getLegadoClientKey();
+        if (INITIAL.apiKeysRequired && !clientKey) {
+            invalidateLegadoConfig('本服务要求 API Key，请填写客户端密钥后复制 JSON 配置。');
+            setFeedback('integration-feedback', '认证已启用：请输入管理员分配的客户端 API Key。订阅链接不可用于此认证模式。', 'warning');
+            return;
+        }
         const requestId = ++state.configRequestId;
         const code = $('legado-config');
+        state.legadoConfigText = '';
         code.textContent = '正在生成配置…';
         $('copy-config-button').disabled = true;
         $('copy-subscribe-button').disabled = true;
         setFeedback('integration-feedback');
         try {
-            const data = await jsonRequest(`/api/legado/config?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}`);
+            const template = await jsonRequest(`/api/legado/config?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}`);
             if (requestId !== state.configRequestId || voice !== currentVoiceId()) return;
+            // Add only the explicitly entered client key, entirely locally.
+            // getToken() is intentionally not used: it holds the admin secret.
+            const data = withLegadoClientKey(template, clientKey);
             state.legadoConfigText = JSON.stringify(data);
             code.textContent = JSON.stringify(data, null, 2);
             const subDisplay = $('subscribe-url-display');
             if (subDisplay) {
                 const subUrl = `${window.location.origin}/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${encodeURIComponent(state.provider)}&auto=true`;
-                subDisplay.value = subUrl;
+                subDisplay.value = legadoSubscriptionAllowed()
+                    ? subUrl : '认证配置仅支持复制 JSON；密钥不会写入订阅链接。';
             }
             if (!$('copy-config-button').hasAttribute('aria-busy')) $('copy-config-button').disabled = false;
-            if (!$('copy-subscribe-button').hasAttribute('aria-busy')) $('copy-subscribe-button').disabled = false;
+            if (!$('copy-subscribe-button').hasAttribute('aria-busy')) $('copy-subscribe-button').disabled = !legadoSubscriptionAllowed();
+            if (clientKey) {
+                setFeedback('integration-feedback', 'JSON 已包含客户端密钥，请妥善保管并勿公开分享。为避免泄漏，订阅链接已禁用。', 'warning');
+            }
         } catch (error) {
             if (requestId !== state.configRequestId) return;
             state.legadoConfigText = '';
@@ -1243,6 +1287,10 @@
     }
 
     async function copySubscribeUrl() {
+        if (!legadoSubscriptionAllowed()) {
+            setFeedback('integration-feedback', '认证配置不能通过订阅链接传递，请复制 JSON 配置。', 'warning');
+            return;
+        }
         const voice = currentVoiceId();
         if (!voice) return;
         const selectedProvider = state.provider;
@@ -1252,8 +1300,9 @@
             const provider = encodeURIComponent(selectedProvider);
             const data = await jsonRequest(`/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${provider}`);
             const url = data.url || `${window.location.origin}/api/legado/subscribe?voice=${encodeURIComponent(voice)}&provider=${provider}&auto=true`;
-            if (voice !== currentVoiceId() || selectedProvider !== state.provider) {
-                throw new Error('音色已更改，请重新复制');
+            if (voice !== currentVoiceId() || selectedProvider !== state.provider
+                    || !legadoSubscriptionAllowed()) {
+                throw new Error('音色或认证设置已更改，请重新复制');
             }
             await copyText(url);
             notify('订阅链接已复制', 'success');
@@ -1262,7 +1311,7 @@
             setFeedback('integration-feedback', `复制订阅链接失败：${error.message}`, 'error');
         } finally {
             setButtonBusy(button, false);
-            button.disabled = !hasUsableCurrentVoice();
+            button.disabled = !hasUsableCurrentVoice() || !legadoSubscriptionAllowed();
         }
     }
 
@@ -1596,14 +1645,21 @@
             setLiveState('error', '需要管理令牌');
             return;
         }
-        setLiveState('connecting', '正在连接');
-        const query = token ? `?token=${encodeURIComponent(token)}` : '';
-        const source = new EventSource(`/api/events${query}`);
+        // Native EventSource cannot send an Authorization header. Use fetch
+        // instead so the long-lived admin credential never enters a URL/log.
+        const controller = new AbortController();
+        const source = {
+            timer: null,
+            close() {
+                controller.abort();
+                if (this.timer) window.clearTimeout(this.timer);
+            },
+        };
         state.activitySource = source;
-        source.onopen = () => setLiveState('live', '实时连接');
-        source.onmessage = event => {
+
+        function receive(dataText) {
             try {
-                const data = JSON.parse(event.data);
+                const data = JSON.parse(dataText);
                 if (data.type === 'connected') setLiveState('live', '实时连接');
                 if (data.type === 'tts_request') appendActivity(data);
                 if (data.type === 'tts_request_update') {
@@ -1613,10 +1669,61 @@
                     appendActivity(data);
                 }
             } catch (_) {}
-        };
-        source.onerror = () => {
-            if (state.activitySource === source) setLiveState('connecting', '连接中断，重试中');
-        };
+        }
+
+        async function connect() {
+            let reader = null;
+            let retry = true;
+            try {
+                setLiveState('connecting', '正在连接');
+                const response = await api('/api/events', {
+                    signal: controller.signal,
+                    headers: {'Accept': 'text/event-stream'},
+                    cache: 'no-store',
+                });
+                if (!response.ok) {
+                    retry = ![401, 403].includes(response.status);
+                    throw new Error(await errorText(response));
+                }
+                if (!response.body) throw new Error('浏览器不支持流式响应');
+                reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let pending = '';
+                let dataLines = [];
+                setLiveState('live', '实时连接');
+                while (!controller.signal.aborted) {
+                    const {value, done} = await reader.read();
+                    if (done) break;
+                    pending += decoder.decode(value, {stream: true});
+                    let newline;
+                    while ((newline = pending.indexOf('\n')) !== -1) {
+                        const line = pending.slice(0, newline).replace(/\r$/, '');
+                        pending = pending.slice(newline + 1);
+                        if (!line) {
+                            if (dataLines.length) receive(dataLines.join('\n'));
+                            dataLines = [];
+                        } else if (line.startsWith('data:')) {
+                            dataLines.push(line.slice(5).replace(/^ /, ''));
+                        }
+                    }
+                }
+            } catch (error) {
+                if (!controller.signal.aborted) {
+                    setLiveState(retry ? 'connecting' : 'error',
+                        retry ? '连接中断，重试中' : error.message);
+                }
+            } finally {
+                if (reader) {
+                    try { await reader.cancel(); } catch (_) {}
+                    reader.releaseLock();
+                }
+                if (!controller.signal.aborted && state.activitySource === source && retry) {
+                    setLiveState('connecting', '连接中断，重试中');
+                    source.timer = window.setTimeout(connect, 3000);
+                }
+            }
+        }
+        connect();
     }
 
     function stopActivityStream() {
@@ -1896,6 +2003,7 @@
         $('all-voices-button').addEventListener('click', openVoiceDialog);
         $('copy-config-button').addEventListener('click', copyConfig);
         $('copy-subscribe-button').addEventListener('click', copySubscribeUrl);
+        $('legado-api-key').addEventListener('input', updateLegadoConfig);
         $('save-button').addEventListener('click', saveConfig);
         $('test-config-button').addEventListener('click', testConfig);
         $('test-tts-button').addEventListener('click', testTTS);
@@ -1934,9 +2042,12 @@
             event.returnValue = '';
         });
         window.addEventListener('pagehide', () => {
-            stopActivityStream();
+            stopMonitoring();
             stopModalAudio();
             $$('audio[data-blob-url]').forEach(audio => URL.revokeObjectURL(audio.dataset.blobUrl));
+        });
+        window.addEventListener('pageshow', event => {
+            if (event.persisted && state.initialized && isMonitoringVisible()) startMonitoring();
         });
     }
 
@@ -1988,7 +2099,7 @@
             setFeedback('settings-feedback', `无法读取服务器设置：${configLoadError}`, 'warning');
         }
         state.initialized = true;
-        if ($('sub-panel-logs') || isSectionOpen('monitoring')) startMonitoring();
+        if (isMonitoringVisible()) startMonitoring();
     }
 
     initialize().catch(error => {

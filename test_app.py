@@ -237,7 +237,7 @@ class TestStatsPersistenceFailure:
         with app_module._metrics_lock:
             assert app_module._metrics['chars_total'] == before + 42
 
-    def test_fatal_path_errors_are_not_retried(self, monkeypatch):
+    def test_fatal_path_errors_are_not_retried(self, monkeypatch, tmp_path):
         """Retrying a permission/ENOENT failure only adds latency."""
         import app as app_module
         calls = []
@@ -246,6 +246,7 @@ class TestStatsPersistenceFailure:
             calls.append(1)
             raise PermissionError(13, 'Permission denied')
 
+        monkeypatch.setattr(app_module, 'STATS_FILE', str(tmp_path / 'stats.json'))
         monkeypatch.setattr(app_module, 'load_stats', boom)
         with pytest.raises(PermissionError):
             app_module._update_stats_with_retry(1, 'edge')
@@ -1380,26 +1381,23 @@ class TestAPIEndpoints:
                 page.set_content(html)
                 page.evaluate("""
                     () => {
-                        window.__testEventSources = [];
-                        window.EventSource = class {
-                            constructor(url) {
-                                this.url = url;
-                                this.closed = false;
-                                window.__testEventSources.push(this);
-                                queueMicrotask(() => this.onopen?.());
-                            }
-
-                            close() {
-                                this.closed = true;
-                            }
+                        window.__testActivityStreams = [];
+                        const originalFetch = window.fetch;
+                        window.fetch = (url, options = {}) => {
+                            if (url !== '/api/events') return originalFetch(url, options);
+                            const item = {url, signal: options.signal};
+                            const stream = new ReadableStream({
+                                start(controller) { item.controller = controller; },
+                            });
+                            window.__testActivityStreams.push(item);
+                            return Promise.resolve(new Response(stream));
                         };
                     }
                 """)
                 page.add_script_tag(content=javascript)
 
-                page.wait_for_function(
-                    '() => window.__testEventSources.length === 1')
                 expect(page.locator('#save-chip-text')).to_have_text('已保存')
+                assert page.evaluate('() => window.__testActivityStreams.length') == 0
                 page.locator('[data-provider="doubao"]').click()
                 expect(page.locator('#save-chip-text')).to_have_text('有未保存更改')
                 assert page.locator('#save-chip').evaluate(
@@ -1431,13 +1429,13 @@ class TestAPIEndpoints:
                 expect(page.locator('#save-chip-text')).to_have_text('已保存')
 
                 page.locator('#btn-sub-logs').click()
+                page.wait_for_function('() => window.__testActivityStreams.length === 1')
                 page.locator('#clear-logs-btn').click()
                 expect(page.locator('#activity-empty')).to_have_text(
                     '日志已清空，等待新的合成请求…')
                 page.evaluate("""
-                    eventData => window.__testEventSources.at(-1).onmessage({
-                        data: JSON.stringify(eventData),
-                    })
+                    eventData => window.__testActivityStreams.at(-1).controller.enqueue(
+                        new TextEncoder().encode('data: ' + JSON.stringify(eventData) + '\\n\\n'))
                 """, {
                     'type': 'tts_request',
                     'request_id': 'browser-regression-1',
@@ -1455,12 +1453,22 @@ class TestAPIEndpoints:
 
                 page.locator('#console-maintenance-tab').click()
                 assert page.evaluate(
-                    '() => window.__testEventSources[0].closed') is True
+                    '() => window.__testActivityStreams[0].signal.aborted') is True
                 page.locator('#console-main-tab').click()
                 page.wait_for_function(
-                    '() => window.__testEventSources.length === 2')
+                    '() => window.__testActivityStreams.length === 2')
                 assert page.evaluate(
-                    '() => window.__testEventSources[1].closed') is False
+                    '() => window.__testActivityStreams[1].signal.aborted') is False
+                page.locator('#btn-sub-test').click()
+                assert page.evaluate(
+                    '() => window.__testActivityStreams[1].signal.aborted') is True
+                page.locator('#btn-sub-logs').click()
+                page.wait_for_function('() => window.__testActivityStreams.length === 3')
+                page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}))")
+                assert page.evaluate(
+                    '() => window.__testActivityStreams[2].signal.aborted') is True
+                page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+                page.wait_for_function('() => window.__testActivityStreams.length === 4')
                 assert page_errors == []
             finally:
                 browser.close()
@@ -2237,10 +2245,10 @@ class TestAdminAuth:
         r = self.client.get('/api/config?token=test-secret-token')
         assert r.status_code == 401
 
-    def test_query_token_is_limited_to_event_source(self):
+    def test_query_token_is_not_accepted_on_event_stream(self):
         import app as app_module
         with self.app.test_request_context('/api/events?token=test-secret-token'):
-            assert app_module._extract_bearer_token() == 'test-secret-token'
+            assert app_module._extract_bearer_token() == ''
 
     def test_custom_voice_api_and_catalog_require_admin_for_private_entries(self):
         import app as app_module
@@ -3373,10 +3381,13 @@ class TestAPIKeys:
         import app as app_module
         assert app_module.API_KEYS_REQUIRED is False
 
-    def test_rate_limit_whitelist_bypass(self):
+    def test_rate_limit_whitelist_bypass(self, monkeypatch):
         """Whitelisted IPs should bypass rate limiting."""
         import app as app_module
-        assert '127.0.0.1' in app_module.RATE_LIMIT_WHITELIST
+        monkeypatch.setattr(app_module, 'RATE_LIMIT_WHITELIST', {'127.0.0.1'})
+        with self.app.test_request_context('/'):
+            assert app_module._check_rate_limit('127.0.0.1') is False
+            assert app_module.request._rate_limit_info['limit'] == 0
 
 
 class TestVoiceFavorites:

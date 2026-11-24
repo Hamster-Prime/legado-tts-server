@@ -34,6 +34,8 @@ keepalive = 5
 
 # Logging
 accesslog = '-'
+# Do not log query strings: older clients may still send API credentials there.
+access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(m)s %(U)s %(H)s" %(s)s %(b)s "%(a)s"'
 errorlog = '-'
 loglevel = os.environ.get('LOG_LEVEL', 'info').lower()
 
@@ -47,6 +49,16 @@ max_requests_jitter = 1000
 
 # Process naming
 proc_name = 'legado-tts'
+
+
+def post_worker_init(worker):
+    """Bound long-lived SSE streams after Gunicorn applies CLI overrides."""
+    import app as app_module
+    # In a sync worker a stream monopolizes the only request slot. Disable
+    # monitoring streams there; gthread always keeps ordinary request slots.
+    worker_class_name = worker.__class__.__name__
+    capacity = worker.cfg.threads if worker_class_name == 'ThreadWorker' else 1
+    app_module._configure_sse_capacity(capacity)
 
 
 def on_starting(server):

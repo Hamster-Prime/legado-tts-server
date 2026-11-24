@@ -6,6 +6,7 @@
 """
 
 import os
+import errno
 import json
 import copy
 import base64
@@ -24,6 +25,7 @@ import threading
 import subprocess
 import queue
 import platform
+import ipaddress
 import shutil
 import contextlib
 from collections import OrderedDict, deque
@@ -212,6 +214,24 @@ def handle_500(e):
 
 @app.before_request
 def _before_request():
+    # Only trust forwarding headers from explicitly configured proxy networks.
+    peer = request.environ.get('REMOTE_ADDR', '')
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+        if any(peer_ip in network for network in TRUSTED_PROXIES):
+            forwarded = request.headers.get('X-Forwarded-For', '')
+            if forwarded:
+                chain = [ipaddress.ip_address(part.strip())
+                         for part in forwarded.split(',')]
+                chain.append(peer_ip)
+                while len(chain) > 1 and any(
+                        chain[-1] in network for network in TRUSTED_PROXIES):
+                    chain.pop()
+                request.remote_addr = str(chain[-1])
+                request.environ['REMOTE_ADDR'] = request.remote_addr
+    except ValueError:
+        # A malformed chain must not grant control over the client address.
+        pass
     request._start_time = time.time()
     request._request_id = request.headers.get('X-Request-ID', uuid.uuid4().hex[:12])
     request._rate_limit_info = {'limit': RATE_LIMIT_RPM, 'remaining': -1, 'reset': -1}
@@ -286,7 +306,10 @@ AUDIO_CACHE_SIZE = int(os.environ.get('AUDIO_CACHE_SIZE', '100'))  # max cached 
 AUDIO_CACHE_MAX_MB = int(os.environ.get('AUDIO_CACHE_MAX_MB', '200'))  # max cache memory MB
 CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', '500'))  # chars per chunk for long text
 RATE_LIMIT_RPM = int(os.environ.get('RATE_LIMIT_RPM', '120'))  # requests per minute, 0=unlimited
-RATE_LIMIT_WHITELIST = set(filter(None, os.environ.get('RATE_LIMIT_WHITELIST', '127.0.0.1,::1').split(',')))
+RATE_LIMIT_WHITELIST = set(filter(None, (ip.strip() for ip in os.environ.get('RATE_LIMIT_WHITELIST', '').split(','))))
+TRUSTED_PROXIES = tuple(ipaddress.ip_network(value.strip(), strict=False)
+                        for value in os.environ.get('TRUSTED_PROXIES', '').split(',')
+                        if value.strip())
 DAILY_CHAR_QUOTA = int(os.environ.get('DAILY_CHAR_QUOTA', '0'))  # daily char limit per IP, 0=unlimited
 ADMIN_TOKEN = os.environ.get('ADMIN_TOKEN', '')  # protect config/stats/cache endpoints
 API_KEYS = set(filter(None, os.environ.get('API_KEYS', '').split(',')))  # optional: restrict TTS access
@@ -635,13 +658,15 @@ def _send_webhook(event_type, data):
 
 def _check_api_key():
     """Check if request has a valid API key. Returns error Response or None."""
-    if not API_KEYS_REQUIRED or not API_KEYS:
+    # Required authentication must fail closed even when an operator forgot to
+    # configure API_KEYS. ADMIN_TOKEN can still be used as a synthesis key.
+    if not API_KEYS_REQUIRED:
         return None
     auth = request.headers.get('Authorization', '')
     token = request.args.get('api_key', '') or request.args.get('token', '')
     key = None
-    if auth.startswith('Bearer '):
-        key = auth[7:]
+    if auth[:7].lower() == 'bearer ':
+        key = auth[7:].strip()
     elif token:
         key = token
     if not key or key not in API_KEYS:
@@ -673,12 +698,17 @@ def _check_daily_quota(ip, chars):
             # Clean old dates
             for d in [d for d in usage if d != today]:
                 del usage[d]
-            # Periodically evict stale IPs (every 100 checks)
-            _daily_cleanup_counter += 1
-            if _daily_cleanup_counter >= 100:
-                _daily_cleanup_counter = 0
-                for k in [k for k, v in _daily_char_usage.items() if not v]:
-                    del _daily_char_usage[k]
+        # Also expire records belonging to IPs that never return. Looking only
+        # for empty dictionaries leaves yesterday's nonempty records forever.
+        # Run on rejected checks as well so exhausted clients don't postpone GC.
+        _daily_cleanup_counter += 1
+        if _daily_cleanup_counter >= 100:
+            _daily_cleanup_counter = 0
+            for address, recorded in list(_daily_char_usage.items()):
+                for day in [day for day in recorded if day != today]:
+                    del recorded[day]
+                if not recorded:
+                    del _daily_char_usage[address]
     if exceeded:
         return _error_response(
             f'Daily quota exceeded ({DAILY_CHAR_QUOTA} chars/day)', 429, 'quota_exceeded',
@@ -727,17 +757,13 @@ def _error_response(message, status=400, error_type='invalid_request_error',
 
 
 def _extract_bearer_token():
-    """Extract bearer auth; query tokens are limited to browser EventSource."""
+    """Extract header auth; never accept credentials in logged request URLs."""
     auth = request.headers.get('Authorization', '')
     if auth[:7].lower() == 'bearer ':
         token = auth[7:].strip()
     else:
         token = auth.strip()
-    if token:
-        return token
-    if request.path == '/api/events':
-        return request.args.get('token', '')
-    return ''
+    return token
 
 
 def _is_admin():
@@ -1505,6 +1531,33 @@ def save_config(config):
 # ──────────────────────────────────────────────
 
 _empty_provider_stats = {'total_chars': 0, 'total_requests': 0, 'history': []}
+_stats_update_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _stats_transaction():
+    """Lock a stable path across atomic replacements of the statistics file."""
+    with _stats_update_lock:
+        handle = None
+        try:
+            if fcntl is not None:
+                lock_path = STATS_FILE + '.lock'
+                parent = os.path.dirname(lock_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                flags = os.O_RDWR | os.O_CREAT
+                if hasattr(os, 'O_NOFOLLOW'):
+                    flags |= os.O_NOFOLLOW
+                fd = os.open(lock_path, flags, 0o600)
+                handle = os.fdopen(fd, 'a+')
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+        finally:
+            if handle is not None:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+                finally:
+                    handle.close()
 
 
 def _new_provider_stats():
@@ -1513,6 +1566,7 @@ def _new_provider_stats():
 
 
 def load_stats():
+    # Writers use atomic replacement, so a reader sees either complete version.
     data = _read_json(STATS_FILE, {})
     if not isinstance(data, dict):
         data = {}
@@ -1570,13 +1624,14 @@ _STATS_FATAL_ERRORS = (PermissionError, FileNotFoundError, NotADirectoryError,
 def _update_stats_with_retry(chars, provider, voice=None, retries=3, delay=0.1):
     for attempt in range(1, retries + 1):
         try:
-            stats = load_stats()
-            _write_json(STATS_FILE, _apply_stats_update(stats, chars, provider, voice=voice))
+            with _stats_transaction():
+                stats = load_stats()
+                _write_json(STATS_FILE, _apply_stats_update(stats, chars, provider, voice=voice))
             return
         except _STATS_FATAL_ERRORS:
             raise           # retrying an unfixable path problem just adds latency
         except OSError as e:
-            if attempt == retries:
+            if e.errno == errno.EROFS or attempt == retries:
                 raise
             log.warning("Stats update retry %d/%d after error: %s", attempt, retries, e)
             time.sleep(delay * attempt)
@@ -1599,35 +1654,15 @@ def update_stats(chars, provider, voice=None):
     if _stats_readonly:
         return
     try:
-        parent = os.path.dirname(STATS_FILE)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        if fcntl is None:
-            _update_stats_with_retry(chars, provider, voice=voice)
-            return
-        with open(STATS_FILE, 'a+', encoding='utf-8') as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                try:
-                    f.seek(0)
-                    raw = f.read()
-                    stats = json.loads(raw) if raw.strip() else {}
-                except (json.JSONDecodeError, ValueError):
-                    stats = {}
-                stats = _apply_stats_update(stats, chars, provider, voice=voice)
-                f.seek(0)
-                f.truncate()
-                json.dump(stats, f, indent=2, ensure_ascii=False)
-            finally:
-                try:
-                    fcntl.flock(f, fcntl.LOCK_UN)
-                except OSError:
-                    pass
-    except _STATS_FATAL_ERRORS as e:
-        _stats_readonly = True
-        log.error("Stats path unusable (%s); persistence disabled for this "
-                  "process. Set STATS_FILE to a writable path or fix ownership. "
-                  "In-memory counters and /metrics are unaffected.", e)
+        _update_stats_with_retry(chars, provider, voice=voice)
+    except OSError as e:
+        if isinstance(e, _STATS_FATAL_ERRORS) or e.errno == errno.EROFS:
+            _stats_readonly = True
+            log.error("Stats path unusable (%s); persistence disabled for this "
+                      "process. Set STATS_FILE to a writable path or fix ownership. "
+                      "In-memory counters and /metrics are unaffected.", e)
+        else:
+            log.error("Failed to update stats: %s", e)
     except Exception as e:
         log.error("Failed to update stats: %s", e)
 
@@ -1982,6 +2017,8 @@ def synthesize_edge(text, voice, rate='+0%', style=None, volume='+0%', pitch='+0
             if chunk["type"] == "audio":
                 buf.write(chunk["data"])
         return buf.getvalue()
+    async def _timed_synth():
+        return await asyncio.wait_for(_synth(), timeout=REQUEST_TIMEOUT)
     try:
         try:
             asyncio.get_running_loop()
@@ -1994,9 +2031,15 @@ def synthesize_edge(text, voice, rate='+0%', style=None, volume='+0%', pitch='+0
                 return None, 'Edge TTS executor is shut down'
             # The coroutine is created inside the branch that consumes it, so it
             # is never left un-awaited (which would emit a RuntimeWarning).
-            fut = executor.submit(asyncio.run, _synth())
-            return fut.result(timeout=REQUEST_TIMEOUT), None
-        return asyncio.run(_synth()), None
+            fut = executor.submit(lambda: asyncio.run(_timed_synth()))
+            try:
+                return fut.result(timeout=REQUEST_TIMEOUT + 1), None
+            except TimeoutError:
+                fut.cancel()
+                raise
+        return asyncio.run(_timed_synth()), None
+    except TimeoutError:
+        return None, f'Edge TTS timed out after {REQUEST_TIMEOUT}s'
     except Exception as e:
         return None, str(e)
 
@@ -4171,11 +4214,35 @@ def api_openapi():
 
 
 # SSE event subscribers
-_sse_subscribers = []  # list of queue.Queue
+_sse_subscribers = []  # includes closing streams until their response closes
 _sse_lock = threading.Lock()
 # Each subscriber pins a worker thread for the life of the connection, so the
 # count has to be bounded or a handful of open connections starves the pool.
 SSE_MAX_SUBSCRIBERS = int(os.environ.get('SSE_MAX_SUBSCRIBERS', '20'))
+
+
+class _SSESubscriber:
+    def __init__(self):
+        self.queue = queue.Queue(maxsize=100)
+        self.closed = threading.Event()
+
+    def close(self):
+        """Wake a consumer without blocking, even when its queue is full."""
+        self.closed.set()
+        try:
+            self.queue.put_nowait(None)
+        except queue.Full:
+            # A full queue already wakes the consumer; it checks closed before
+            # emitting its next event. Keep counting it until it really exits.
+            pass
+
+
+def _configure_sse_capacity(worker_threads):
+    """Reserve request capacity using the WSGI server's actual thread count."""
+    global SSE_MAX_SUBSCRIBERS
+    threads = max(1, int(worker_threads))
+    reserve = max(1, min(4, threads // 2))
+    SSE_MAX_SUBSCRIBERS = max(0, min(SSE_MAX_SUBSCRIBERS, threads - reserve))
 
 
 def _sse_publish(event_type, data):
@@ -4184,14 +4251,13 @@ def _sse_publish(event_type, data):
         if not _sse_subscribers:
             return
         msg = json.dumps({'type': event_type, **data}, ensure_ascii=False)
-        dead = []
-        for q in _sse_subscribers:
+        for subscriber in _sse_subscribers:
+            if subscriber.closed.is_set():
+                continue
             try:
-                q.put_nowait(msg)
+                subscriber.queue.put_nowait(msg)
             except queue.Full:
-                dead.append(q)
-        for q in dead:
-            _sse_subscribers.remove(q)
+                subscriber.close()
 
 
 @app.route('/api/events')
@@ -4205,21 +4271,27 @@ def api_events():
     err = _check_admin()
     if err:
         return err
-    q = queue.Queue(maxsize=100)
+    subscriber = _SSESubscriber()
     with _sse_lock:
         if len(_sse_subscribers) >= SSE_MAX_SUBSCRIBERS:
             return _error_response(
                 f'Too many event subscribers (max {SSE_MAX_SUBSCRIBERS})',
                 503, 'server_error', headers={'Retry-After': '30'})
-        _sse_subscribers.append(q)
+        _sse_subscribers.append(subscriber)
+
+    def release():
+        subscriber.close()
+        with _sse_lock:
+            if subscriber in _sse_subscribers:
+                _sse_subscribers.remove(subscriber)
 
     def stream():
         try:
             yield 'data: {"type":"connected"}\n\n'
-            while True:
+            while not subscriber.closed.is_set():
                 try:
-                    msg = q.get(timeout=30)
-                    if msg is None:  # shutdown signal
+                    msg = subscriber.queue.get(timeout=30)
+                    if msg is None or subscriber.closed.is_set():
                         break
                     yield f'data: {msg}\n\n'
                 except queue.Empty:
@@ -4227,12 +4299,13 @@ def api_events():
         except GeneratorExit:
             pass
         finally:
-            with _sse_lock:
-                if q in _sse_subscribers:
-                    _sse_subscribers.remove(q)
+            release()
 
-    return Response(stream(), mimetype='text/event-stream',
-                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    response = Response(stream(), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    # A WSGI response may be closed before its generator is first advanced.
+    response.call_on_close(release)
+    return response
 
 
 @app.route('/api/pronunciation', methods=['GET', 'POST', 'DELETE'])
@@ -4429,7 +4502,8 @@ def api_stats():
         err = _check_admin()
         if err:
             return err
-        _write_json(STATS_FILE, {p: _new_provider_stats() for p in ALL_PROVIDERS})
+        with _stats_transaction():
+            _write_json(STATS_FILE, {p: _new_provider_stats() for p in ALL_PROVIDERS})
         log.info("Stats reset")
         return jsonify({'status': 'ok', 'message': '统计已重置'})
     return jsonify(_stats_for_request(load_stats()))
@@ -4555,6 +4629,9 @@ def api_tts_preview():
     request._tts_provider = provider
     request._tts_voice = voice
     request._tts_chars = len(preview_text)
+    quota_err = _check_daily_quota(client_ip, len(preview_text))
+    if quota_err:
+        return quota_err
     audio, error, actual_provider, actual_voice = dispatch(provider, preview_text, voice, 0)
     if audio:
         final_provider = actual_provider or provider
@@ -4998,6 +5075,11 @@ def api_legado_subscribe():
 
     Usage: Import this URL directly into Legado as a speech engine.
     """
+    if API_KEYS_REQUIRED:
+        return _error_response(
+            'API key authentication is enabled; use the Web UI to create a '
+            'Legado JSON configuration with your client API key. '
+            'Subscription URLs do not carry credentials.', 400)
     config = load_config()
     voice, provider, provider_error = _legado_voice_and_provider(config)
     if provider_error:
@@ -5072,6 +5154,7 @@ def index():
         'fallbackRetryCount': fallback['retry_count'],
         'fallbackRetryDelayMs': fallback['retry_delay_ms'],
         'adminProtected': bool(ADMIN_TOKEN),
+        'apiKeysRequired': bool(API_KEYS_REQUIRED),
     }
     return render_template(
         'index.html',
@@ -5224,12 +5307,8 @@ def _graceful_shutdown():
     # structure that /api/stats and load_stats() iterate over.
     # Close SSE subscribers
     with _sse_lock:
-        for q in _sse_subscribers:
-            try:
-                q.put(None)
-            except Exception:
-                pass
-        _sse_subscribers.clear()
+        for subscriber in _sse_subscribers:
+            subscriber.close()
     # Flush edge executor
     _shutdown_edge_executor()
     log.info("Shutdown complete.")

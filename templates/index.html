@@ -249,7 +249,13 @@
                 <span>开源阅读 (Legado) 一键接入</span>
                 <button class="btn-link" id="toggle-json-btn" type="button" style="font-size: 11px; color: var(--text-muted); background: none; border: none; cursor: pointer;">查看 JSON 内容</button>
               </div>
-              
+
+              <div class="field">
+                <label class="field-label" for="legado-api-key">Legado 客户端 API Key</label>
+                <input id="legado-api-key" type="password" class="input-control" autocomplete="off" spellcheck="false" placeholder="启用访问认证时，填写管理员分配的客户端密钥" aria-describedby="legado-api-key-help">
+                <p id="legado-api-key-help" class="field-hint">填写 API_KEYS 中的客户端密钥，不是服务商凭据或管理令牌。仅在本页生成的 JSON 请求头中使用，不保存到服务器或浏览器存储；含密钥的配置请勿分享。启用认证时请使用 JSON，不使用订阅链接。</p>
+              </div>
+
               <!-- 1. JSON Block (Top Priority) -->
               <div class="subscribe-bar">
                 <input type="text" class="subscribe-input" readonly value="JSON 引擎配置代码（包含完整请求头与参数）" />

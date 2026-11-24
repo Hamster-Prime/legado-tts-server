@@ -190,18 +190,34 @@
         }
     }
 
+    function createSvgIcon(symbolId, className = 'icon') {
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('class', className);
+        svg.setAttribute('aria-hidden', 'true');
+        const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+        use.setAttribute('href', `#${symbolId}`);
+        svg.appendChild(use);
+        return svg;
+    }
+
     function notify(message, type = 'info', duration = 3500) {
         const region = $('toast-region');
         if (!region) return;
         const toast = document.createElement('div');
-        const icons = {success: '✓', warning: '!', error: '×', info: 'i'};
+        const icons = {
+            success: 'icon-check',
+            warning: 'icon-alert',
+            error: 'icon-x-circle',
+            info: 'icon-info',
+        };
         toast.className = `toast is-${type}`;
+        toast.style.setProperty('--toast-duration', `${duration}ms`);
         toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
 
         const icon = document.createElement('span');
         icon.className = 'toast-icon';
         icon.setAttribute('aria-hidden', 'true');
-        icon.textContent = icons[type] || icons.info;
+        icon.appendChild(createSvgIcon(icons[type] || icons.info));
 
         const text = document.createElement('span');
         text.className = 'toast-message';
@@ -211,20 +227,129 @@
         close.className = 'toast-close';
         close.type = 'button';
         close.setAttribute('aria-label', '关闭通知');
-        close.textContent = '×';
+        close.appendChild(createSvgIcon('icon-close'));
 
         let timer = null;
+        let remaining = duration;
+        let startedAt = Date.now();
+        let closed = false;
+
         const remove = () => {
+            if (closed) return;
+            closed = true;
             if (timer) window.clearTimeout(timer);
             toast.classList.remove('is-visible');
-            window.setTimeout(() => toast.remove(), 240);
+            window.setTimeout(() => toast.remove(), 260);
         };
+        const scheduleClose = delay => {
+            if (timer) window.clearTimeout(timer);
+            startedAt = Date.now();
+            timer = window.setTimeout(remove, Math.max(250, delay));
+        };
+
+        toast.addEventListener('mouseenter', () => {
+            if (timer) {
+                window.clearTimeout(timer);
+                timer = null;
+                remaining = Math.max(400, remaining - (Date.now() - startedAt));
+            }
+        });
+        toast.addEventListener('mouseleave', () => {
+            if (!closed && !timer) scheduleClose(remaining);
+        });
         close.addEventListener('click', remove);
         toast.append(icon, text, close);
         region.appendChild(toast);
         requestAnimationFrame(() => toast.classList.add('is-visible'));
-        timer = window.setTimeout(remove, duration);
+        scheduleClose(duration);
         return toast;
+    }
+
+    let activeSynthCount = 0;
+    function setSynthesizing(delta) {
+        activeSynthCount = Math.max(0, activeSynthCount + delta);
+        if (document.body) document.body.classList.toggle('is-synthesizing', activeSynthCount > 0);
+    }
+
+    function formatDuration(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+        const total = Math.floor(seconds);
+        const mins = Math.floor(total / 60);
+        const secs = total % 60;
+        return `${mins}:${String(secs).padStart(2, '0')}`;
+    }
+
+    function pauseOtherAudio(exceptElement) {
+        $$('audio.audio-native').forEach(audio => {
+            if (audio !== exceptElement && !audio.paused) audio.pause();
+        });
+        if (state.modalAudio && state.modalAudio !== exceptElement && !state.modalAudio.paused) {
+            state.modalAudio.pause();
+        }
+    }
+
+    function syncPlayerUI(container, audio) {
+        if (!container || !audio) return;
+        const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+        const current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+        const ratio = duration > 0 ? Math.min(1, Math.max(0, current / duration)) : 0;
+        const seek = container.querySelector('.player-seek');
+        const fill = container.querySelector('[data-player-fill]');
+        const currentEl = container.querySelector('[data-player-current]');
+        const durationEl = container.querySelector('[data-player-duration]');
+        if (seek && document.activeElement !== seek) seek.value = String(Math.round(ratio * 1000));
+        if (fill) fill.style.setProperty('--progress', `${(ratio * 100).toFixed(2)}%`);
+        if (currentEl) currentEl.textContent = formatDuration(current);
+        if (durationEl) durationEl.textContent = formatDuration(duration);
+    }
+
+    function initStudioPlayers() {
+        $$('.studio-player[data-player-for]').forEach(container => {
+            const audio = $(container.dataset.playerFor);
+            if (!audio || container.dataset.bound === 'true') return;
+            container.dataset.bound = 'true';
+            const playBtn = container.querySelector('.player-play-btn');
+            const seek = container.querySelector('.player-seek');
+            const fill = container.querySelector('[data-player-fill]');
+
+            if (playBtn) {
+                playBtn.addEventListener('click', () => {
+                    if (!audio.src) return;
+                    if (audio.paused) {
+                        pauseOtherAudio(audio);
+                        audio.play().catch(() => {});
+                    } else {
+                        audio.pause();
+                    }
+                });
+            }
+            if (seek) {
+                seek.addEventListener('input', () => {
+                    const ratio = Number(seek.value) / 1000;
+                    if (fill) fill.style.setProperty('--progress', `${(ratio * 100).toFixed(2)}%`);
+                    if (Number.isFinite(audio.duration) && audio.duration > 0) {
+                        audio.currentTime = ratio * audio.duration;
+                    }
+                });
+            }
+            audio.addEventListener('play', () => {
+                pauseOtherAudio(audio);
+                container.classList.add('is-playing');
+                if (playBtn) playBtn.setAttribute('aria-label', '暂停音频');
+            });
+            audio.addEventListener('pause', () => {
+                container.classList.remove('is-playing');
+                if (playBtn) playBtn.setAttribute('aria-label', '播放音频');
+            });
+            audio.addEventListener('ended', () => {
+                container.classList.remove('is-playing');
+                if (playBtn) playBtn.setAttribute('aria-label', '重新播放音频');
+                syncPlayerUI(container, audio);
+            });
+            ['loadedmetadata', 'durationchange', 'timeupdate'].forEach(evt => {
+                audio.addEventListener(evt, () => syncPlayerUI(container, audio));
+            });
+        });
     }
 
     function setFeedback(idOrElement, message = '', type = 'info') {
@@ -250,13 +375,23 @@
         }
     }
 
-    function setAudioBlob(element, blob) {
+    function setAudioBlob(element, blob, title = '') {
         if (!element) return;
         if (element.dataset.blobUrl) URL.revokeObjectURL(element.dataset.blobUrl);
         const url = URL.createObjectURL(blob);
         element.dataset.blobUrl = url;
         element.src = url;
         element.hidden = false;
+        const container = typeof element.closest === 'function' ? element.closest('.studio-player') : null;
+        if (container) {
+            container.hidden = false;
+            container.classList.remove('is-playing');
+            const titleEl = container.querySelector('[data-player-title]');
+            if (titleEl && title) titleEl.textContent = title;
+            const downloadLink = container.querySelector('[data-player-download]');
+            if (downloadLink) downloadLink.href = url;
+            syncPlayerUI(container, element);
+        }
     }
 
     function resetAudioElement(element) {
@@ -267,6 +402,21 @@
         element.removeAttribute('src');
         element.load();
         element.hidden = true;
+        const container = typeof element.closest === 'function' ? element.closest('.studio-player') : null;
+        if (container) {
+            container.classList.remove('is-playing');
+            container.hidden = true;
+            const fill = container.querySelector('[data-player-fill]');
+            const seek = container.querySelector('.player-seek');
+            const currentEl = container.querySelector('[data-player-current]');
+            const durationEl = container.querySelector('[data-player-duration]');
+            const downloadLink = container.querySelector('[data-player-download]');
+            if (fill) fill.style.setProperty('--progress', '0%');
+            if (seek) seek.value = '0';
+            if (currentEl) currentEl.textContent = '0:00';
+            if (durationEl) durationEl.textContent = '0:00';
+            if (downloadLink) downloadLink.removeAttribute('href');
+        }
     }
 
     function clearSynthesisOutputs() {
@@ -283,6 +433,7 @@
 
     async function playAudio(element, feedbackId) {
         try {
+            pauseOtherAudio(element);
             await element.play();
             return true;
         } catch (_) {
@@ -333,13 +484,87 @@
         document.documentElement.setAttribute('data-theme', next);
         try { localStorage.setItem('tts-theme', next); } catch (_) {}
         updateThemeButton();
+        const btn = $('theme-button');
+        if (btn) {
+            btn.classList.remove('is-spinning');
+            void btn.offsetWidth;
+            btn.classList.add('is-spinning');
+            window.setTimeout(() => btn.classList.remove('is-spinning'), 460);
+        }
     }
 
-    async function setAdminToken() {
-        const current = getToken();
-        const value = window.prompt('请输入管理令牌（留空将移除当前浏览器中的令牌）', current);
-        if (value === null) return;
-        const token = value.trim();
+    function openDialogElement(dialog) {
+        if (!dialog) return;
+        if (typeof dialog.showModal === 'function') {
+            if (!dialog.open) dialog.showModal();
+        } else {
+            dialog.setAttribute('open', '');
+        }
+    }
+
+    function closeDialogElement(dialog) {
+        if (!dialog) return;
+        if (dialog.open && typeof dialog.close === 'function') dialog.close();
+        else dialog.removeAttribute('open');
+    }
+
+    function confirmAction({
+        title = '请确认操作',
+        message = '确定继续吗？',
+        confirmText = '确认',
+        cancelText = '取消',
+        tone = 'danger',
+    } = {}) {
+        const dialog = $('confirm-dialog');
+        if (!dialog) return Promise.resolve(window.confirm(message));
+        $('confirm-dialog-title').textContent = title;
+        $('confirm-dialog-message').textContent = message;
+        const okBtn = $('confirm-dialog-ok');
+        const cancelBtn = $('confirm-dialog-cancel');
+        const closeBtn = $('confirm-dialog-close');
+        const iconWrap = $('confirm-dialog-icon');
+        okBtn.textContent = confirmText;
+        okBtn.className = `btn ${tone === 'danger' ? 'btn-danger' : 'btn-primary'}`;
+        cancelBtn.textContent = cancelText;
+        if (iconWrap) {
+            iconWrap.className = `confirm-icon${tone === 'warning' ? ' is-warning' : (tone === 'primary' ? ' is-accent' : '')}`;
+        }
+        return new Promise(resolve => {
+            let settled = false;
+            const finish = result => {
+                if (settled) return;
+                settled = true;
+                okBtn.removeEventListener('click', onOk);
+                cancelBtn.removeEventListener('click', onCancel);
+                closeBtn.removeEventListener('click', onCancel);
+                dialog.removeEventListener('cancel', onCancel);
+                dialog.removeEventListener('click', onBackdrop);
+                closeDialogElement(dialog);
+                resolve(result);
+            };
+            const onOk = () => finish(true);
+            const onCancel = event => {
+                if (event && event.type === 'cancel') event.preventDefault();
+                finish(false);
+            };
+            const onBackdrop = event => {
+                const rect = dialog.getBoundingClientRect();
+                const outside = event.clientX < rect.left || event.clientX > rect.right
+                    || event.clientY < rect.top || event.clientY > rect.bottom;
+                if (outside) finish(false);
+            };
+            okBtn.addEventListener('click', onOk);
+            cancelBtn.addEventListener('click', onCancel);
+            closeBtn.addEventListener('click', onCancel);
+            dialog.addEventListener('cancel', onCancel);
+            dialog.addEventListener('click', onBackdrop);
+            openDialogElement(dialog);
+            window.setTimeout(() => okBtn.focus(), 20);
+        });
+    }
+
+    function saveAdminTokenValue(rawValue) {
+        const token = String(rawValue || '').trim();
         try {
             if (token) localStorage.setItem('tts-admin-token', token);
             else localStorage.removeItem('tts-admin-token');
@@ -349,7 +574,55 @@
         }
         state.authPrompted = false;
         notify(token ? '管理令牌已更新' : '管理令牌已移除', 'success');
-        window.setTimeout(() => window.location.reload(), 250);
+        window.setTimeout(() => window.location.reload(), 280);
+    }
+
+    async function setAdminToken() {
+        const dialog = $('token-dialog');
+        const input = $('token-dialog-input');
+        const current = getToken();
+        if (!dialog || !input) {
+            const value = window.prompt('请输入管理令牌（留空将移除当前浏览器中的令牌）', current);
+            if (value === null) return;
+            saveAdminTokenValue(value);
+            return;
+        }
+        input.value = current;
+        input.type = 'password';
+        const toggle = dialog.querySelector('[data-toggle-secret="token-dialog-input"]');
+        if (toggle) {
+            toggle.setAttribute('aria-pressed', 'false');
+            const use = toggle.querySelector('use');
+            if (use) use.setAttribute('href', '#icon-eye');
+        }
+        const clearBtn = $('token-dialog-clear');
+        if (clearBtn) clearBtn.hidden = !current;
+        openDialogElement(dialog);
+        window.setTimeout(() => {
+            input.focus();
+            input.select();
+        }, 30);
+    }
+
+    function syncTabIndicator(container, activeTab) {
+        if (!container || !activeTab) return;
+        const indicator = container.querySelector('.tab-indicator');
+        if (!indicator) return;
+        const width = activeTab.offsetWidth;
+        const left = activeTab.offsetLeft;
+        if (!width) return;
+        indicator.style.width = `${width}px`;
+        indicator.style.transform = `translateX(${left}px)`;
+        container.classList.add('has-indicator');
+    }
+
+    function syncAllTabIndicators() {
+        const navContainer = $('console-nav-tabs');
+        const activeNav = navContainer && navContainer.querySelector('.nav-tab-btn.is-active');
+        if (navContainer && activeNav) syncTabIndicator(navContainer, activeNav);
+        const subContainer = $('studio-sub-tabs');
+        const activeSub = subContainer && subContainer.querySelector('.sub-tab-btn.is-active');
+        if (subContainer && activeSub) syncTabIndicator(subContainer, activeSub);
     }
 
     function readSectionPreferences() {
@@ -439,6 +712,7 @@
         else if (state.initialized && isMonitoringVisible()) {
             startMonitoring();
         }
+        requestAnimationFrame(syncAllTabIndicators);
     }
 
     function initConsoleNavigation() {
@@ -480,6 +754,7 @@
                 btn.tabIndex = isActive ? 0 : -1;
             }
         });
+        requestAnimationFrame(syncAllTabIndicators);
         if (sub === 'logs') startMonitoring();
         else stopMonitoring();
     }
@@ -612,8 +887,13 @@
         const fields = $('fallback-fields');
         if (!enabledInput || !fields) return;
         const enabled = Boolean(enabledInput.checked);
+        fields.classList.toggle('is-disabled', !enabled);
         const voiceInput = $('fallback-voice');
         if (voiceInput) voiceInput.disabled = state.fallbackVoiceLoading || !enabled;
+        const retryInput = $('fallback-retry-count');
+        const delayInput = $('fallback-retry-delay-ms');
+        if (retryInput) retryInput.disabled = !enabled;
+        if (delayInput) delayInput.disabled = !enabled;
     }
 
     async function loadFallbackVoices() {
@@ -738,6 +1018,7 @@
         const waitingForVoiceCatalog = waitingForPrimaryCatalog || waitingForFallbackCatalog;
         const saveButton = $('save-button');
         if (!saveButton.hasAttribute('aria-busy')) saveButton.disabled = !state.dirty || waitingForVoiceCatalog;
+        saveButton.classList.toggle('is-dirty-pulse', state.dirty && !waitingForVoiceCatalog);
         const testButton = $('test-config-button');
         if (!testButton.hasAttribute('aria-busy')) testButton.disabled = waitingForVoiceCatalog;
         const testTtsButton = $('test-tts-button');
@@ -813,13 +1094,21 @@
         else delete state.customVoiceDrafts[provider];
     }
 
+    function setCustomVoiceSaveLabel(text) {
+        const button = $('custom-voice-save');
+        if (!button) return;
+        const label = button.querySelector('.btn-label');
+        if (label) label.textContent = text;
+        else button.textContent = text;
+    }
+
     function restoreCustomVoiceForm(provider = state.provider) {
         const draft = state.customVoiceDrafts[provider] || {};
         $('custom-voice-name').value = draft.name || '';
         $('custom-voice-id').value = draft.id || '';
         if (draft.editingId) $('custom-voice-save').dataset.editingId = draft.editingId;
         else delete $('custom-voice-save').dataset.editingId;
-        $('custom-voice-save').textContent = draft.editingId ? '保存音色' : '添加音色';
+        setCustomVoiceSaveLabel(draft.editingId ? '保存音色' : '添加音色');
         setFeedback('custom-voice-feedback');
     }
 
@@ -830,7 +1119,7 @@
         $('custom-voice-id').value = '';
         $('custom-voice-id').disabled = false;
         delete $('custom-voice-save').dataset.editingId;
-        $('custom-voice-save').textContent = '添加音色';
+        setCustomVoiceSaveLabel('添加音色');
         setFeedback('custom-voice-feedback');
     }
 
@@ -839,7 +1128,7 @@
         $('custom-voice-id').value = voice.id;
         $('custom-voice-id').disabled = true;
         $('custom-voice-save').dataset.editingId = voice.id;
-        $('custom-voice-save').textContent = '保存音色';
+        setCustomVoiceSaveLabel('保存音色');
         setFeedback('custom-voice-feedback', `正在编辑“${voice.name}”。`, 'info');
         renderCustomVoiceManager();
         $('custom-voice-name').focus();
@@ -896,7 +1185,7 @@
             const edit = document.createElement('button');
             edit.className = 'custom-voice-icon';
             edit.type = 'button';
-            edit.textContent = '✎';
+            edit.appendChild(createSvgIcon('icon-edit'));
             edit.title = `编辑 ${voice.name}`;
             edit.setAttribute('aria-label', `编辑音色 ${voice.name}`);
             edit.disabled = state.customVoiceBusy;
@@ -905,7 +1194,7 @@
             const remove = document.createElement('button');
             remove.className = 'custom-voice-icon is-danger';
             remove.type = 'button';
-            remove.textContent = '×';
+            remove.appendChild(createSvgIcon('icon-trash'));
             remove.title = `删除 ${voice.name}`;
             remove.setAttribute('aria-label', `删除音色 ${voice.name}`);
             remove.disabled = state.customVoiceBusy;
@@ -1014,7 +1303,7 @@
             state.customVoiceBusy = false;
             setButtonBusy(button, false);
             delete button.dataset.idleText;
-            button.textContent = button.dataset.editingId ? '保存音色' : '添加音色';
+            setCustomVoiceSaveLabel(button.dataset.editingId ? '保存音色' : '添加音色');
             renderCustomVoiceManager();
         }
     }
@@ -1026,7 +1315,13 @@
             setFeedback('custom-voice-feedback', '请先选择并保存另一个音色，再删除当前音色。', 'warning');
             return;
         }
-        if (!window.confirm(`确定删除自定义音色“${voice.name}”吗？`)) return;
+        const confirmed = await confirmAction({
+            title: '删除自定义音色',
+            message: `确定删除自定义音色“${voice.name}”吗？删除后将从服务器列表中移除。`,
+            confirmText: '确认删除',
+            tone: 'danger',
+        });
+        if (!confirmed) return;
         state.customVoiceBusy = true;
         renderCustomVoiceManager();
         setFeedback('custom-voice-feedback', '正在从服务器删除音色…', 'info');
@@ -1288,6 +1583,12 @@
         setButtonBusy(button, true, '复制中');
         try {
             await copyText(state.legadoConfigText);
+            if (button && button.classList) {
+                button.classList.add('is-copied');
+                if (typeof window.setTimeout === 'function') {
+                    window.setTimeout(() => button.classList.remove('is-copied'), 1600);
+                }
+            }
             notify('JSON 配置已复制', 'success');
             setFeedback('integration-feedback', 'JSON 配置已复制到剪贴板。', 'success');
         } catch (error) {
@@ -1317,6 +1618,12 @@
                 throw new Error('音色或认证设置已更改，请重新复制');
             }
             await copyText(url);
+            if (button && button.classList) {
+                button.classList.add('is-copied');
+                if (typeof window.setTimeout === 'function') {
+                    window.setTimeout(() => button.classList.remove('is-copied'), 1600);
+                }
+            }
             notify('订阅链接已复制', 'success');
             setFeedback('integration-feedback', '订阅链接已复制，可直接导入开源阅读。', 'success');
         } catch (error) {
@@ -1327,13 +1634,40 @@
         }
     }
 
-    async function synthesize(text, voice) {
-        const response = await expectOk(await api('/speech/stream', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({text, voice, provider: state.provider, rate: '0%'}),
-        }));
-        return {response, blob: await response.blob()};
+    async function synthesize(text, voice, rate = '0%') {
+        setSynthesizing(1);
+        try {
+            const response = await expectOk(await api('/speech/stream', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({text, voice, provider: state.provider, rate}),
+            }));
+            return {response, blob: await response.blob()};
+        } finally {
+            setSynthesizing(-1);
+        }
+    }
+
+    function getTestRate() {
+        const input = $('test-rate');
+        const value = input ? Number(input.value) : 0;
+        if (!Number.isFinite(value) || value === 0) return '0%';
+        return `${value > 0 ? '+' : ''}${value}%`;
+    }
+
+    function updateRateDisplay() {
+        const input = $('test-rate');
+        const readout = $('test-rate-value');
+        const resetBtn = $('test-rate-reset');
+        if (!input) return;
+        const min = Number(input.min || -50);
+        const max = Number(input.max || 100);
+        const val = Number(input.value || 0);
+        const pct = ((val - min) / (max - min)) * 100;
+        input.style.setProperty('--range-pct', `${pct.toFixed(1)}%`);
+        const formatted = val > 0 ? `+${val}%` : `${val}%`;
+        if (readout) readout.textContent = formatted;
+        if (resetBtn) resetBtn.classList.toggle('is-modified', val !== 0);
     }
 
     function synthesisFeedback(result, successMessage) {
@@ -1351,13 +1685,13 @@
         const requestId = ++state.previewRequestId;
         const button = $('preview-button');
         resetAudioElement($('preview-player'));
-        setButtonBusy(button, true, '正在生成');
+        setButtonBusy(button, true, '生成中');
         setFeedback('voice-feedback', '正在生成试听音频…', 'info');
         try {
             const result = await synthesize('你好，我是您的朗读助手，很高兴认识您。', voice);
             if (requestId !== state.previewRequestId) return;
             const player = $('preview-player');
-            setAudioBlob(player, result.blob);
+            setAudioBlob(player, result.blob, `快速试听 · ${voiceName(voice)}`);
             const feedback = synthesisFeedback(result, '试听音频已生成。');
             setFeedback('voice-feedback', feedback.message, feedback.type);
             await playAudio(player, 'voice-feedback');
@@ -1386,14 +1720,16 @@
         }
         const requestId = ++state.testRequestId;
         const button = $('test-tts-button');
+        const rate = getTestRate();
         resetAudioElement($('test-audio-player'));
-        setButtonBusy(button, true, '生成中');
+        setButtonBusy(button, true, '正在合成…');
         setFeedback('test-feedback', '正在生成音频…', 'info');
         try {
-            const result = await synthesize(text, voice);
+            const result = await synthesize(text, voice, rate);
             if (requestId !== state.testRequestId) return;
             const player = $('test-audio-player');
-            setAudioBlob(player, result.blob);
+            const rateTag = rate !== '0%' ? ` (${rate})` : '';
+            setAudioBlob(player, result.blob, `${providerMeta().short} · ${voiceName(voice)}${rateTag}`);
             const feedback = synthesisFeedback(result, '测试音频已生成。');
             setFeedback('test-feedback', feedback.message, feedback.type);
             await playAudio(player, 'test-feedback');
@@ -1417,17 +1753,17 @@
         const button = $('compare-button');
         resetAudioElement($('audio-a'));
         resetAudioElement($('audio-b'));
-        setButtonBusy(button, true, '生成中');
+        setButtonBusy(button, true, '并行合成中…');
         setFeedback('compare-feedback', '正在同时生成两个音频…', 'info');
         try {
             const [resultA, resultB] = await Promise.all([synthesize(text, voiceA), synthesize(text, voiceB)]);
             if (requestId !== state.compareRequestId) return;
-            setAudioBlob($('audio-a'), resultA.blob);
-            setAudioBlob($('audio-b'), resultB.blob);
+            setAudioBlob($('audio-a'), resultA.blob, `音色 A · ${voiceName(voiceA)}`);
+            setAudioBlob($('audio-b'), resultB.blob, `音色 B · ${voiceName(voiceB)}`);
             const fallback = [resultA, resultB].some(result => result.response.headers.get('X-TTS-Fallback') === 'true');
             setFeedback('compare-feedback', fallback
                 ? '对比音频已生成，但至少一个音色触发了 Edge 回退，请结合连接测试判断配置。'
-                : '两个对比音频均已生成。', fallback ? 'warning' : 'success');
+                : '两个对比音频均已生成，可点击播放器切换聆听。', fallback ? 'warning' : 'success');
         } catch (error) {
             if (requestId !== state.compareRequestId) return;
             setFeedback('compare-feedback', `对比失败：${error.message}`, 'error');
@@ -1563,10 +1899,16 @@
         const cache = health.cache || {};
         $('cache-count').textContent = Number(cache.count || cache.size || 0).toLocaleString();
         $('cache-memory').textContent = `${(Number(cache.bytes || 0) / (1024 * 1024)).toFixed(1)} MB`;
-        $('ffmpeg-status').textContent = health.ffmpeg_available ? '可用' : '不可用';
-        $('ffmpeg-status').style.color = health.ffmpeg_available ? 'var(--green)' : 'var(--yellow)';
-        $('admin-status').textContent = health.admin_protected ? '已启用' : '未启用';
-        $('admin-status').style.color = health.admin_protected ? 'var(--green)' : 'var(--text-secondary)';
+        const ffmpegEl = $('ffmpeg-status');
+        ffmpegEl.textContent = health.ffmpeg_available ? '可用' : '不可用';
+        ffmpegEl.style.color = health.ffmpeg_available ? 'var(--green)' : 'var(--yellow)';
+        ffmpegEl.style.background = health.ffmpeg_available ? 'var(--green-soft)' : 'var(--yellow-soft)';
+        ffmpegEl.style.borderColor = 'transparent';
+        const adminEl = $('admin-status');
+        adminEl.textContent = health.admin_protected ? '已启用' : '未启用';
+        adminEl.style.color = health.admin_protected ? 'var(--green)' : 'var(--text-secondary)';
+        adminEl.style.background = health.admin_protected ? 'var(--green-soft)' : 'var(--bg-subtle)';
+        adminEl.style.borderColor = health.admin_protected ? 'transparent' : 'var(--border)';
         if (metrics) {
             $('total-chars-all').textContent = Number(metrics.totalChars || 0).toLocaleString();
             $('total-requests-all').textContent = Number(metrics.totalRequests || 0).toLocaleString();
@@ -1793,7 +2135,13 @@
             const warning = state.dirty
                 ? '导入会覆盖服务器配置，并丢弃页面中尚未保存的草稿，确定继续吗？'
                 : '导入会用文件内容覆盖当前配置，确定继续吗？';
-            if (!window.confirm(warning)) return;
+            const confirmed = await confirmAction({
+                title: '导入配置文件',
+                message: warning,
+                confirmText: '确认覆盖导入',
+                tone: 'warning',
+            });
+            if (!confirmed) return;
             const result = await jsonRequest('/api/config/import', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -1815,8 +2163,37 @@
         }
     }
 
+    async function clearAudioCache() {
+        const confirmed = await confirmAction({
+            title: '清空音频缓存',
+            message: '确定清空当前内存中的所有合成音频缓存吗？后续相同文本将重新合成。',
+            confirmText: '确认清空',
+            tone: 'warning',
+        });
+        if (!confirmed) return;
+        const button = $('clear-cache-button');
+        setButtonBusy(button, true, '清空中');
+        setFeedback('maintenance-feedback');
+        try {
+            await jsonRequest('/api/cache/clear', {method: 'DELETE'});
+            await loadHealthOnly();
+            setFeedback('maintenance-feedback', '音频缓存已清空。', 'success');
+            notify('音频缓存已清空', 'success');
+        } catch (error) {
+            setFeedback('maintenance-feedback', `清空缓存失败：${error.message}`, 'error');
+        } finally {
+            setButtonBusy(button, false);
+        }
+    }
+
     async function resetStats() {
-        if (!window.confirm('确定重置全部服务商的累计统计吗？此操作无法撤销。')) return;
+        const confirmed = await confirmAction({
+            title: '重置全部统计',
+            message: '确定重置全部服务商的累计字符与请求统计吗？此操作无法撤销。',
+            confirmText: '确认重置',
+            tone: 'danger',
+        });
+        if (!confirmed) return;
         const button = $('reset-stats-button');
         setButtonBusy(button, true, '重置中');
         setFeedback('maintenance-feedback');
@@ -1870,6 +2247,7 @@
             const audio = new Audio(url);
             state.modalAudio = audio;
             state.modalAudioUrl = url;
+            pauseOtherAudio(audio);
             await audio.play();
             const fallback = result.response.headers.get('X-TTS-Fallback') === 'true';
             if (fallback) notify('试听已回退到 Edge，当前服务商可能未配置成功', 'warning', 5000);
@@ -1909,7 +2287,11 @@
             const preview = document.createElement('button');
             preview.className = 'btn btn-secondary btn-sm';
             preview.type = 'button';
-            preview.textContent = '试听';
+            preview.appendChild(createSvgIcon('icon-play'));
+            const previewLabel = document.createElement('span');
+            previewLabel.className = 'btn-label';
+            previewLabel.textContent = '试听';
+            preview.appendChild(previewLabel);
             preview.addEventListener('click', () => previewLibraryVoice(voice, preview));
             const use = document.createElement('button');
             use.className = 'btn btn-primary btn-sm';
@@ -2043,7 +2425,96 @@
         $('export-button').addEventListener('click', exportConfig);
         $('import-button').addEventListener('click', () => $('import-file').click());
         $('import-file').addEventListener('change', importConfig);
+        if ($('clear-cache-button')) $('clear-cache-button').addEventListener('click', clearAudioCache);
         $('reset-stats-button').addEventListener('click', resetStats);
+
+        // Password visibility eye toggles
+        $$('[data-toggle-secret]').forEach(toggle => {
+            toggle.addEventListener('click', () => {
+                const target = $(toggle.dataset.toggleSecret);
+                if (!target) return;
+                const showing = target.type === 'text';
+                target.type = showing ? 'password' : 'text';
+                toggle.setAttribute('aria-pressed', String(!showing));
+                const use = toggle.querySelector('use');
+                if (use) use.setAttribute('href', showing ? '#icon-eye' : '#icon-eye-off');
+                target.focus();
+            });
+        });
+
+        // Studio speech rate slider & sample text presets
+        if ($('test-rate')) {
+            $('test-rate').addEventListener('input', updateRateDisplay);
+            updateRateDisplay();
+        }
+        if ($('test-rate-reset')) {
+            $('test-rate-reset').addEventListener('click', () => {
+                if ($('test-rate')) {
+                    $('test-rate').value = '0';
+                    updateRateDisplay();
+                }
+            });
+        }
+        $$('[data-sample-text]').forEach(chip => {
+            chip.addEventListener('click', () => {
+                const area = $('test-text');
+                if (!area) return;
+                area.value = chip.dataset.sampleText || '';
+                updateTextCount();
+                area.focus();
+            });
+        });
+
+        // Fallback advanced retry parameters toggle
+        if ($('fallback-advanced-btn') && $('fallback-advanced-panel')) {
+            $('fallback-advanced-btn').addEventListener('click', () => {
+                const panel = $('fallback-advanced-panel');
+                const willOpen = panel.hidden;
+                panel.hidden = !willOpen;
+                $('fallback-advanced-btn').setAttribute('aria-expanded', String(willOpen));
+            });
+        }
+
+        // Custom Admin Token modal
+        const tokenDialog = $('token-dialog');
+        if (tokenDialog) {
+            const closeTokenDialog = () => closeDialogElement(tokenDialog);
+            if ($('token-dialog-close')) $('token-dialog-close').addEventListener('click', closeTokenDialog);
+            if ($('token-dialog-cancel')) $('token-dialog-cancel').addEventListener('click', closeTokenDialog);
+            if ($('token-dialog-clear')) {
+                $('token-dialog-clear').addEventListener('click', () => {
+                    closeTokenDialog();
+                    saveAdminTokenValue('');
+                });
+            }
+            if ($('token-dialog-form')) {
+                $('token-dialog-form').addEventListener('submit', event => {
+                    event.preventDefault();
+                    const value = $('token-dialog-input') ? $('token-dialog-input').value : '';
+                    closeTokenDialog();
+                    saveAdminTokenValue(value);
+                });
+            }
+            tokenDialog.addEventListener('click', event => {
+                const rect = tokenDialog.getBoundingClientRect();
+                const outside = event.clientX < rect.left || event.clientX > rect.right
+                    || event.clientY < rect.top || event.clientY > rect.bottom;
+                if (outside) closeTokenDialog();
+            });
+        }
+
+        // Keep sliding tab indicators aligned on resize
+        window.addEventListener('resize', syncAllTabIndicators);
+        if (typeof ResizeObserver !== 'undefined') {
+            const ro = new ResizeObserver(syncAllTabIndicators);
+            if ($('console-nav-tabs')) ro.observe($('console-nav-tabs'));
+            if ($('studio-sub-tabs')) ro.observe($('studio-sub-tabs'));
+        }
+
+        const authBadge = $('legado-auth-badge');
+        if (authBadge) authBadge.classList.toggle('is-required', Boolean(INITIAL.apiKeysRequired));
+
+        initStudioPlayers();
 
         $$('[data-credential-field], [data-config-field]').forEach(element => {
             const handleConfigInput = () => {
@@ -2131,6 +2602,7 @@
             setFeedback('settings-feedback', `无法读取服务器设置：${configLoadError}`, 'warning');
         }
         state.initialized = true;
+        requestAnimationFrame(syncAllTabIndicators);
         if (isMonitoringVisible()) startMonitoring();
     }
 

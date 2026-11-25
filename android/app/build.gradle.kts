@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.legadotts.client"
         minSdk = 28
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
         testInstrumentationRunner = "io.github.legadotts.client.ContractRunner"
     }
     signingConfigs {

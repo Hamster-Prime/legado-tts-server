@@ -58,15 +58,15 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        if: steps.filter.outputs.run == 'true'
-        uses: android-actions/setup-android@v3
-
       - name: Install Android SDK Platform 37.0 & Build Tools
         if: steps.filter.outputs.run == 'true'
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER=$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | sort -V | tail -n 1)
+          echo "Using sdkmanager: $SDKMANAGER (SDK_ROOT=$SDK_ROOT)"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install "platforms;android-37.0" "build-tools;37.0.0"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
 
       - name: Set up Gradle
         if: steps.filter.outputs.run == 'true'

@@ -41,11 +41,11 @@ internal object ContractChecks {
         check(cancelled == 2 && runCatching { token.check() }.exceptionOrNull() is InterruptedIOException)
 
         val text = "𠀀甲乙。短句！".repeat(120)
-        val chunks = speechSegments(text, 77).map { it.text }.toList()
+        val chunks = speechSegments(text, 77).toList()
         check(chunks.size > 2 && chunks.joinToString("") == text)
         check(chunks.first().codePointCount(0, chunks.first().length) <= 48)
         check(chunks.all { it.codePointCount(0, it.length) in 1..77 })
-        check(speechSegments("🚲a", 1).map { it.text }.toList() == listOf("🚲", "a"))
+        check(speechSegments("🚲a", 1).toList() == listOf("🚲", "a"))
 
         fixture({ path, _, socket ->
             check(path == "/prefix/speech/stream/chunked")
@@ -106,7 +106,7 @@ internal object ContractChecks {
             var frameCount = 0
             for (part in speechSegments(sample, max)) {
                 segmentCount++
-                api.synthesis(part.text, edge, 1f).use { input ->
+                api.synthesis(part, edge, 1f).use { input ->
                     val frames = Mp3Frames(input)
                     var count = 0
                     while (frames.next() != null) {

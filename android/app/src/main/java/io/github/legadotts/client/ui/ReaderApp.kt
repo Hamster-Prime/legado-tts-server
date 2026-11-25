@@ -2,6 +2,7 @@ package io.github.legadotts.client.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -23,8 +24,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -32,9 +35,12 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.theme.*
@@ -59,34 +65,26 @@ internal val eyeIcon = glyph("Show", "M2,12 C5,7 9,5 12,5 C15,5 19,7 22,12 C19,1
 internal val eyeOffIcon = glyph("Hide", "M3,3 L21,21 M10.5,5.2 C11,5.1 11.5,5.1 12,5 C15,5 19,7 22,12 C21,13.7 19.7,15.2 18.2,16.3 M6.2,7.4 C4.5,8.6 3.1,10.2 2,12 C5,17 9,19 12,19 C13.5,19 15,18.6 16.4,17.8")
 internal val serverIcon = glyph("Server", "M4,5 H20 V10 H4 Z M4,14 H20 V19 H4 Z M7.5,7.5 H7.6 M7.5,16.5 H7.6")
 
-/** Shared motion timings for consistent HyperOS / Miuix feel across all screens. */
+/** Shared motion timings tuned for smooth 60/120 fps performance with minimal relayout. */
 internal object AppMotion {
-    const val FAST_MS = 180
-    const val STANDARD_MS = 260
+    const val FAST_MS = 160
+    const val STANDARD_MS = 220
     fun <T> colorSpec() = tween<T>(durationMillis = FAST_MS, easing = FastOutSlowInEasing)
-    fun sizeSpec() = spring<IntSize>(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)
+    fun sizeSpec() = spring<IntSize>(dampingRatio = 0.9f, stiffness = Spring.StiffnessMedium)
     fun slideSpec() = tween<IntOffset>(durationMillis = STANDARD_MS, easing = FastOutSlowInEasing)
-    fun popSpec() = spring<Float>(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium)
 
     fun iconSwap(): ContentTransform =
-        (fadeIn(tween(170, easing = FastOutSlowInEasing)) +
-            scaleIn(initialScale = 0.82f, animationSpec = tween(180, easing = FastOutSlowInEasing)))
-            .togetherWith(
-                fadeOut(tween(120, easing = FastOutSlowInEasing)) +
-                    scaleOut(targetScale = 0.82f, animationSpec = tween(120, easing = FastOutSlowInEasing))
-            )
+        (fadeIn(tween(150, easing = FastOutSlowInEasing)) +
+            scaleIn(initialScale = 0.85f, animationSpec = tween(150, easing = FastOutSlowInEasing)))
+            .togetherWith(fadeOut(tween(100, easing = FastOutSlowInEasing)))
 
+    /** Single-pass fade + subtle scale + SizeTransform avoids triple relayout fighting. */
     fun panelSwap(): ContentTransform = ContentTransform(
-        targetContentEnter = fadeIn(tween(230, easing = FastOutSlowInEasing)) +
-            expandVertically(animationSpec = sizeSpec(), expandFrom = Alignment.Top),
-        initialContentExit = fadeOut(tween(160, easing = FastOutSlowInEasing)) +
-            shrinkVertically(animationSpec = sizeSpec(), shrinkTowards = Alignment.Top),
+        targetContentEnter = fadeIn(tween(200, easing = FastOutSlowInEasing)) +
+            scaleIn(initialScale = 0.98f, animationSpec = tween(200, easing = FastOutSlowInEasing)),
+        initialContentExit = fadeOut(tween(120, easing = FastOutSlowInEasing)),
         sizeTransform = SizeTransform(clip = false) { _, _ -> sizeSpec() },
     )
-
-    fun textFade(): ContentTransform =
-        fadeIn(tween(180, easing = FastOutSlowInEasing))
-            .togetherWith(fadeOut(tween(120, easing = FastOutSlowInEasing)))
 }
 
 private enum class RootScreen { LOADING, ONBOARDING, MAIN }
@@ -107,20 +105,27 @@ private fun glyph(name: String, path: String, filled: Boolean = false): ImageVec
 fun ReaderApp(state: ReaderState, actions: ReaderActions) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val focus = LocalFocusManager.current
-    val navigate: (Int) -> Unit = { target ->
-        if (target != tab) {
-            focus.clearFocus()
-            tab = target
+    val navigate = remember(focus) {
+        { target: Int ->
+            if (target != tab) {
+                focus.clearFocus()
+                tab = target
+            }
         }
     }
+    val openCatalog = remember(navigate) { { navigate(1) } }
+    val openSettings = remember(navigate) { { navigate(2) } }
     BackHandler(state.configured && tab != 0) { navigate(0) }
 
     val dark = isSystemInDarkTheme()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-    val showMessage: (String) -> Unit = { msg ->
-        scope.launch {
-            snackbarHostState.showSnackbar(msg, duration = SnackbarDuration.Short)
+    val showMessage = remember(scope, snackbarHostState) {
+        { msg: String ->
+            scope.launch {
+                snackbarHostState.showSnackbar(msg, duration = SnackbarDuration.Short)
+            }
+            Unit
         }
     }
 
@@ -130,13 +135,19 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
         actions.dismissNotice()
     }
 
+    // Derived boolean so IME animation frames do not recompose the whole screen tree.
+    val imeInsets = WindowInsets.ime
+    val density = LocalDensity.current
+    val keyboardVisible by remember(imeInsets, density) {
+        derivedStateOf { imeInsets.getBottom(density) > 0 }
+    }
+
     MiuixTheme(colors = remember(dark) { if (dark) darkColorScheme() else lightColorScheme() }) {
         val rootScreen = when {
             state.initializing -> RootScreen.LOADING
             !state.configured -> RootScreen.ONBOARDING
             else -> RootScreen.MAIN
         }
-        val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
         val showMiniPlayer = rootScreen == RootScreen.MAIN && state.transport != Transport.IDLE &&
             (tab != 0 || state.playingPreview)
 
@@ -149,20 +160,23 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
                 AnimatedVisibility(
                     visible = rootScreen == RootScreen.MAIN && !keyboardVisible,
                     enter = slideInVertically(animationSpec = AppMotion.slideSpec()) { it } +
-                        fadeIn(tween(200, easing = FastOutSlowInEasing)),
-                    exit = slideOutVertically(animationSpec = tween(180, easing = FastOutSlowInEasing)) { it } +
-                        fadeOut(tween(140, easing = FastOutSlowInEasing)),
+                        fadeIn(tween(180, easing = FastOutSlowInEasing)),
+                    exit = slideOutVertically(animationSpec = tween(160, easing = FastOutSlowInEasing)) { it } +
+                        fadeOut(tween(120, easing = FastOutSlowInEasing)),
                 ) {
                     Column(Modifier.fillMaxWidth()) {
                         AnimatedVisibility(
                             visible = showMiniPlayer,
-                            enter = fadeIn(tween(220, easing = FastOutSlowInEasing)) +
+                            enter = fadeIn(tween(180, easing = FastOutSlowInEasing)) +
                                 expandVertically(animationSpec = AppMotion.sizeSpec(), expandFrom = Alignment.Bottom),
-                            exit = fadeOut(tween(160, easing = FastOutSlowInEasing)) +
+                            exit = fadeOut(tween(140, easing = FastOutSlowInEasing)) +
                                 shrinkVertically(animationSpec = AppMotion.sizeSpec(), shrinkTowards = Alignment.Bottom),
                         ) {
                             MiniPlayerBar(
-                                state = state,
+                                transport = state.transport,
+                                playingVoiceName = state.playingVoiceName,
+                                playingPreview = state.playingPreview,
+                                playProgress = state.playProgress,
                                 actions = actions,
                                 onOpenReader = { if (!state.playingPreview) navigate(0) },
                             )
@@ -174,19 +188,13 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
                                     onClick = { navigate(index) },
                                     icon = navIcons[index],
                                     label = label,
-                                    badge = if (index == 2) {
+                                    badge = if (index == 2 && state.connectionStatus == ConnectionStatus.ERROR) {
                                         {
-                                            AnimatedVisibility(
-                                                visible = state.connectionStatus == ConnectionStatus.ERROR,
-                                                enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.4f),
-                                                exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.4f),
-                                            ) {
-                                                Box(
-                                                    Modifier.size(7.dp)
-                                                        .clip(CircleShape)
-                                                        .background(MiuixTheme.colorScheme.error)
-                                                )
-                                            }
+                                            Box(
+                                                Modifier.size(7.dp)
+                                                    .clip(CircleShape)
+                                                    .background(MiuixTheme.colorScheme.error)
+                                            )
                                         }
                                     } else null,
                                 )
@@ -196,6 +204,9 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
                 }
             },
         ) { innerPadding ->
+            val providerCount = remember(state.voices) {
+                state.voices.asSequence().map { it.provider }.distinct().count()
+            }
             Box(
                 Modifier.fillMaxSize()
                     .padding(bottom = innerPadding.calculateBottomPadding())
@@ -206,8 +217,7 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
                     AnimatedContent(
                         targetState = rootScreen,
                         transitionSpec = {
-                            (fadeIn(tween(AppMotion.STANDARD_MS, easing = FastOutSlowInEasing)) +
-                                scaleIn(initialScale = 0.97f, animationSpec = tween(AppMotion.STANDARD_MS, easing = FastOutSlowInEasing)))
+                            fadeIn(tween(AppMotion.STANDARD_MS, easing = FastOutSlowInEasing))
                                 .togetherWith(fadeOut(tween(AppMotion.FAST_MS, easing = FastOutSlowInEasing)))
                         },
                         label = "root-screen",
@@ -224,44 +234,74 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
                                 }
                             }
                             RootScreen.ONBOARDING -> ConnectionPage(
-                                state = state,
+                                configured = false,
+                                connectionStatus = state.connectionStatus,
+                                connectionError = state.connectionError,
+                                formError = state.formError,
+                                address = state.address,
+                                hasKey = state.hasKey,
+                                connecting = state.connecting,
+                                refreshing = state.refreshing,
+                                voiceCount = state.voices.size,
+                                providerCount = providerCount,
+                                activeVoice = state.activeVoice,
+                                speed = state.speed,
                                 actions = actions,
-                                openCatalog = { navigate(1) },
+                                openCatalog = openCatalog,
                             )
-                            RootScreen.MAIN -> AnimatedContent(
-                                targetState = tab,
-                                transitionSpec = {
-                                    val forward = targetState > initialState
-                                    val enterOffset: (Int) -> Int = { width ->
-                                        val delta = (width * 0.08f).toInt().coerceAtLeast(24)
-                                        if (forward) delta else -delta
-                                    }
-                                    val exitOffset: (Int) -> Int = { width ->
-                                        val delta = (width * 0.05f).toInt().coerceAtLeast(16)
-                                        if (forward) -delta else delta
-                                    }
-                                    (slideInHorizontally(animationSpec = AppMotion.slideSpec(), initialOffsetX = enterOffset) +
-                                        fadeIn(tween(240, easing = FastOutSlowInEasing)))
-                                        .togetherWith(
-                                            slideOutHorizontally(animationSpec = tween(200, easing = FastOutSlowInEasing), targetOffsetX = exitOffset) +
-                                                fadeOut(tween(150, easing = FastOutSlowInEasing))
-                                        )
-                                },
-                                label = "bottom-tab",
-                            ) { currentTab ->
-                                when (currentTab) {
+                            RootScreen.MAIN -> KeepAliveTabHost(
+                                currentTab = tab,
+                                tabCount = 3,
+                                modifier = Modifier.fillMaxSize(),
+                            ) { slot ->
+                                when (slot) {
                                     0 -> ReadingPage(
-                                        state = state,
+                                        activeVoice = state.activeVoice,
+                                        text = state.text,
+                                        speed = state.speed,
+                                        connectionStatus = state.connectionStatus,
+                                        connecting = state.connecting,
+                                        transport = state.transport,
+                                        playingPreview = state.playingPreview,
+                                        playingVoiceName = state.playingVoiceName,
+                                        playProgress = state.playProgress,
+                                        playSegment = state.playSegment,
+                                        playError = state.playError,
                                         actions = actions,
-                                        openCatalog = { navigate(1) },
-                                        openSettings = { navigate(2) },
+                                        openCatalog = openCatalog,
+                                        openSettings = openSettings,
                                         showMessage = showMessage,
                                     )
-                                    1 -> CatalogPage(state = state, actions = actions)
-                                    else -> ConnectionPage(
-                                        state = state,
+                                    1 -> CatalogPage(
+                                        voices = state.voices,
+                                        favorites = state.favorites,
+                                        selected = state.selected,
+                                        activeVoice = state.activeVoice,
+                                        busy = state.busy,
+                                        refreshing = state.refreshing,
+                                        connecting = state.connecting,
+                                        connectionError = state.connectionError,
+                                        playError = state.playError,
+                                        playingPreview = state.playingPreview,
+                                        playingVoice = state.playingVoice,
+                                        transport = state.transport,
                                         actions = actions,
-                                        openCatalog = { navigate(1) },
+                                    )
+                                    else -> ConnectionPage(
+                                        configured = true,
+                                        connectionStatus = state.connectionStatus,
+                                        connectionError = state.connectionError,
+                                        formError = state.formError,
+                                        address = state.address,
+                                        hasKey = state.hasKey,
+                                        connecting = state.connecting,
+                                        refreshing = state.refreshing,
+                                        voiceCount = state.voices.size,
+                                        providerCount = providerCount,
+                                        activeVoice = state.activeVoice,
+                                        speed = state.speed,
+                                        actions = actions,
+                                        openCatalog = openCatalog,
                                     )
                                 }
                             }
@@ -273,24 +313,123 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
     }
 }
 
+/**
+ * Keeps visited tabs alive in composition (preserving LazyColumn/ScrollState) and animates
+ * tab switches exclusively inside GPU `graphicsLayer` with zero recomposition or relayout per frame.
+ */
+@Composable
+private fun KeepAliveTabHost(
+    currentTab: Int,
+    tabCount: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable (tab: Int) -> Unit,
+) {
+    var activeTab by remember { mutableIntStateOf(currentTab) }
+    var previousTab by remember { mutableIntStateOf(currentTab) }
+    val visited = remember { mutableStateListOf<Boolean>().apply { repeat(tabCount) { add(it == currentTab) } } }
+    if (!visited[currentTab]) visited[currentTab] = true
+
+    // Warm sibling tabs quietly after the first frame settles so even the very first tap is jank-free.
+    LaunchedEffect(Unit) {
+        delay(220)
+        for (i in 0 until tabCount) {
+            if (!visited[i]) {
+                visited[i] = true
+                delay(40)
+            }
+        }
+    }
+
+    val progress = remember { Animatable(1f) }
+    LaunchedEffect(currentTab) {
+        if (currentTab != activeTab) {
+            previousTab = activeTab
+            activeTab = currentTab
+            progress.snapTo(0f)
+            progress.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(durationMillis = AppMotion.STANDARD_MS, easing = FastOutSlowInEasing),
+            )
+        }
+    }
+
+    val isTransitioning by remember { derivedStateOf { progress.value < 0.999f } }
+    val forward = activeTab > previousTab
+
+    Layout(
+        modifier = modifier,
+        content = {
+            for (index in 0 until tabCount) {
+                key(index) {
+                    val isActive = index == activeTab
+                    val isOutgoing = isTransitioning && index == previousTab
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .zIndex(if (isActive) 1f else 0f)
+                            .graphicsLayer {
+                                val p = progress.value
+                                when {
+                                    isActive && p < 0.999f -> {
+                                        val delta = (size.width * 0.06f).coerceAtLeast(20f)
+                                        translationX = (if (forward) delta else -delta) * (1f - p)
+                                        alpha = p
+                                    }
+                                    isOutgoing -> {
+                                        val delta = (size.width * 0.04f).coerceAtLeast(14f)
+                                        translationX = (if (forward) -delta else delta) * p
+                                        alpha = 1f - p
+                                    }
+                                    isActive -> {
+                                        translationX = 0f
+                                        alpha = 1f
+                                    }
+                                    else -> {
+                                        alpha = 0f
+                                    }
+                                }
+                            },
+                    ) {
+                        if (visited[index]) content(index)
+                    }
+                }
+            }
+        },
+    ) { measurables, constraints ->
+        val zero = Constraints.fixed(0, 0)
+        val placeables = measurables.mapIndexed { index, measurable ->
+            val shouldPlace = index == activeTab || (isTransitioning && index == previousTab)
+            val measured = measurable.measure(if (visited[index]) constraints else zero)
+            if (shouldPlace) measured else null
+        }
+        layout(constraints.maxWidth, constraints.maxHeight) {
+            for (p in placeables) {
+                p?.placeRelative(0, 0)
+            }
+        }
+    }
+}
+
 @Composable
 private fun MiniPlayerBar(
-    state: ReaderState,
+    transport: Transport,
+    playingVoiceName: String,
+    playingPreview: Boolean,
+    playProgress: Float?,
     actions: ReaderActions,
     onOpenReader: () -> Unit,
 ) {
     val colors = MiuixTheme.colorScheme
     val dark = isSystemInDarkTheme()
     val animatedProgress by animateFloatAsState(
-        targetValue = (state.playProgress ?: 0f).coerceIn(0f, 1f),
-        animationSpec = tween(320, easing = FastOutSlowInEasing),
+        targetValue = (playProgress ?: 0f).coerceIn(0f, 1f),
+        animationSpec = tween(260, easing = FastOutSlowInEasing),
         label = "mini-progress",
     )
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .animateContentSize(AppMotion.sizeSpec()),
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         shape = RoundedCornerShape(16.dp),
         color = if (dark) colors.surfaceContainerHighest else colors.surfaceContainer,
         border = BorderStroke(0.5.dp, colors.dividerLine),
@@ -299,7 +438,7 @@ private fun MiniPlayerBar(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(enabled = !state.playingPreview, onClick = onOpenReader)
+                    .clickable(enabled = !playingPreview, onClick = onOpenReader)
                     .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -310,67 +449,45 @@ private fun MiniPlayerBar(
                         .background(colors.primary.copy(alpha = 0.14f)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    AnimatedContent(
-                        targetState = state.transport,
-                        transitionSpec = { AppMotion.iconSwap() },
-                        label = "mini-icon",
-                    ) { tr ->
-                        when (tr) {
-                            Transport.BUFFERING -> InfiniteProgressIndicator(size = 18.dp, strokeWidth = 2.dp)
-                            Transport.PAUSED -> Icon(pauseIcon, null, Modifier.size(16.dp), tint = colors.primary)
-                            else -> Icon(soundWaveIcon, null, Modifier.size(18.dp), tint = colors.primary)
-                        }
+                    when (transport) {
+                        Transport.BUFFERING -> InfiniteProgressIndicator(size = 18.dp, strokeWidth = 2.dp)
+                        Transport.PAUSED -> Icon(pauseIcon, null, Modifier.size(16.dp), tint = colors.primary)
+                        else -> Icon(soundWaveIcon, null, Modifier.size(18.dp), tint = colors.primary)
                     }
                 }
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    val label = when (state.transport) {
-                        Transport.BUFFERING -> if (state.playingPreview) "正在准备试听" else "正在合成"
+                    val label = when (transport) {
+                        Transport.BUFFERING -> if (playingPreview) "正在准备试听" else "正在合成"
                         Transport.PAUSED -> "已暂停"
-                        else -> if (state.playingPreview) "正在试听" else "正在朗读"
+                        else -> if (playingPreview) "正在试听" else "正在朗读"
                     }
                     Text(
-                        text = state.playingVoiceName.substringBefore(" - ").ifBlank { "语音播放" },
+                        text = playingVoiceName.substringBefore(" - ").ifBlank { "语音播放" },
                         style = MiuixTheme.textStyles.body2,
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    AnimatedContent(
-                        targetState = label,
-                        transitionSpec = { AppMotion.textFade() },
-                        label = "mini-status",
-                    ) { statusText ->
-                        Text(
-                            text = statusText,
-                            style = MiuixTheme.textStyles.footnote2,
-                            color = colors.onSurfaceVariantSummary,
-                            maxLines = 1,
-                        )
-                    }
+                    Text(
+                        text = label,
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = colors.onSurfaceVariantSummary,
+                        maxLines = 1,
+                    )
                 }
-                AnimatedVisibility(
-                    visible = !state.playingPreview && state.transport != Transport.BUFFERING,
-                    enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.8f),
-                    exit = fadeOut(tween(130)) + scaleOut(targetScale = 0.8f),
-                ) {
-                    val paused = state.transport == Transport.PAUSED
+                if (!playingPreview && transport != Transport.BUFFERING) {
+                    val paused = transport == Transport.PAUSED
                     IconButton(
                         onClick = if (paused) actions::resume else actions::pause,
                         minWidth = 40.dp, minHeight = 40.dp,
                     ) {
-                        AnimatedContent(
-                            targetState = paused,
-                            transitionSpec = { AppMotion.iconSwap() },
-                            label = "mini-play-pause",
-                        ) { isPaused ->
-                            Icon(
-                                if (isPaused) playIcon else pauseIcon,
-                                contentDescription = if (isPaused) "继续朗读" else "暂停朗读",
-                                modifier = Modifier.size(18.dp),
-                                tint = colors.primary,
-                            )
-                        }
+                        Icon(
+                            if (paused) playIcon else pauseIcon,
+                            contentDescription = if (paused) "继续朗读" else "暂停朗读",
+                            modifier = Modifier.size(18.dp),
+                            tint = colors.primary,
+                        )
                     }
                 }
                 IconButton(onClick = actions::stop, minWidth = 40.dp, minHeight = 40.dp) {
@@ -382,19 +499,13 @@ private fun MiniPlayerBar(
                     )
                 }
             }
-            AnimatedVisibility(
-                visible = !state.playingPreview && (state.playProgress != null || state.transport == Transport.BUFFERING),
-                enter = fadeIn(tween(180)) + expandVertically(),
-                exit = fadeOut(tween(140)) + shrinkVertically(),
-            ) {
-                Column(Modifier.fillMaxWidth()) {
-                    LinearProgressIndicator(
-                        progress = if (state.transport == Transport.BUFFERING) null else animatedProgress,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                        height = 2.5.dp,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                }
+            if (!playingPreview && (playProgress != null || transport == Transport.BUFFERING)) {
+                LinearProgressIndicator(
+                    progress = if (transport == Transport.BUFFERING) null else animatedProgress,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    height = 2.5.dp,
+                )
+                Spacer(Modifier.height(4.dp))
             }
         }
     }
@@ -429,40 +540,27 @@ internal fun StatusPill(
 ) {
     val bg by animateColorAsState(containerColor, AppMotion.colorSpec(), label = "pill-bg")
     val fg by animateColorAsState(contentColor, AppMotion.colorSpec(), label = "pill-fg")
-    val dot by animateColorAsState(dotColor ?: Color.Transparent, AppMotion.colorSpec(), label = "pill-dot")
 
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(100))
             .background(bg)
-            .animateContentSize(AppMotion.sizeSpec())
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        AnimatedContent(
-            targetState = loading to (dotColor != null),
-            transitionSpec = { AppMotion.iconSwap() },
-            label = "pill-indicator",
-        ) { (isLoading, hasDot) ->
-            when {
-                isLoading -> InfiniteProgressIndicator(size = 12.dp, strokeWidth = 1.6.dp, color = fg)
-                hasDot -> Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
-            }
+        if (loading) {
+            InfiniteProgressIndicator(size = 12.dp, strokeWidth = 1.6.dp, color = fg)
+        } else if (dotColor != null) {
+            Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
         }
-        AnimatedContent(
-            targetState = text,
-            transitionSpec = { AppMotion.textFade() },
-            label = "pill-text",
-        ) { label ->
-            Text(
-                text = label,
-                style = MiuixTheme.textStyles.footnote1,
-                fontWeight = FontWeight.Medium,
-                color = fg,
-                maxLines = 1,
-            )
-        }
+        Text(
+            text = text,
+            style = MiuixTheme.textStyles.footnote1,
+            fontWeight = FontWeight.Medium,
+            color = fg,
+            maxLines = 1,
+        )
     }
 }
 
@@ -478,9 +576,9 @@ internal fun ErrorBanner(
     AnimatedVisibility(
         visible = message.isNotBlank(),
         modifier = modifier,
-        enter = fadeIn(tween(200, easing = FastOutSlowInEasing)) +
+        enter = fadeIn(tween(180, easing = FastOutSlowInEasing)) +
             expandVertically(animationSpec = AppMotion.sizeSpec()),
-        exit = fadeOut(tween(150, easing = FastOutSlowInEasing)) +
+        exit = fadeOut(tween(130, easing = FastOutSlowInEasing)) +
             shrinkVertically(animationSpec = AppMotion.sizeSpec()),
     ) {
         val colors = MiuixTheme.colorScheme

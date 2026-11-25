@@ -19,8 +19,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -38,7 +41,21 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 private enum class PreviewVisual { IDLE, BUFFERING, PLAYING }
 
 @Composable
-internal fun CatalogPage(state: ReaderState, actions: ReaderActions) {
+internal fun CatalogPage(
+    voices: List<VoiceItem>,
+    favorites: Set<Pair<String, String>>,
+    selected: Pair<String, String>?,
+    activeVoice: VoiceItem?,
+    busy: Boolean,
+    refreshing: Boolean,
+    connecting: Boolean,
+    connectionError: String,
+    playError: String,
+    playingPreview: Boolean,
+    playingVoice: Pair<String, String>?,
+    transport: Transport,
+    actions: ReaderActions,
+) {
     var query by rememberSaveable { mutableStateOf("") }
     var favoritesOnly by rememberSaveable { mutableStateOf(false) }
     var providerFilter by rememberSaveable { mutableStateOf<String?>(null) }
@@ -46,20 +63,19 @@ internal fun CatalogPage(state: ReaderState, actions: ReaderActions) {
     val colors = MiuixTheme.colorScheme
     val scrollBehavior = MiuixScrollBehavior()
 
-    val providerCounts = remember(state.voices, state.favorites, favoritesOnly) {
-        state.voices.asSequence()
-            .filter { !favoritesOnly || it.key in state.favorites }
+    val providerCounts = remember(voices, favorites, favoritesOnly) {
+        voices.asSequence()
+            .filter { !favoritesOnly || it.key in favorites }
             .groupingBy { it.provider }
             .eachCount()
     }
 
-    // Clear stale provider filter if switching to favorites where that provider has no items.
     val activeProvider = providerFilter?.takeIf { it in providerCounts }
 
-    val groups = remember(state.voices, state.favorites, favoritesOnly, activeProvider, query) {
+    val groups = remember(voices, favorites, favoritesOnly, activeProvider, query) {
         val term = query.trim()
-        state.voices.asSequence()
-            .filter { !favoritesOnly || it.key in state.favorites }
+        voices.asSequence()
+            .filter { !favoritesOnly || it.key in favorites }
             .filter { activeProvider == null || it.provider == activeProvider }
             .filter {
                 term.isEmpty() || listOf(it.name, it.id, it.detail, it.provider, providerName(it.provider))
@@ -68,32 +84,26 @@ internal fun CatalogPage(state: ReaderState, actions: ReaderActions) {
             .groupBy { it.provider }
     }
 
-    val favCount = remember(state.voices, state.favorites) {
-        state.voices.count { it.key in state.favorites }
+    val favCount = remember(voices, favorites) {
+        voices.count { it.key in favorites }
     }
 
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
             title = "音色",
-            subtitle = state.activeVoice?.let { "当前默认：${it.displayName} · ${providerName(it.provider)}" }
-                ?: "${state.voices.size} 个服务端音色",
+            subtitle = activeVoice?.let { "当前默认：${it.displayName} · ${providerName(it.provider)}" }
+                ?: "${voices.size} 个服务端音色",
             scrollBehavior = scrollBehavior,
             actions = {
                 IconButton(
                     onClick = actions::refresh,
-                    enabled = !state.busy,
+                    enabled = !busy,
                     modifier = Modifier.padding(end = 8.dp),
                 ) {
-                    AnimatedContent(
-                        targetState = state.refreshing,
-                        transitionSpec = { AppMotion.iconSwap() },
-                        label = "catalog-refresh",
-                    ) { refreshing ->
-                        if (refreshing) {
-                            InfiniteProgressIndicator(size = 18.dp, strokeWidth = 2.dp)
-                        } else {
-                            Icon(refreshIcon, "刷新音色目录", Modifier.size(20.dp), tint = colors.onSurface)
-                        }
+                    if (refreshing) {
+                        InfiniteProgressIndicator(size = 18.dp, strokeWidth = 2.dp)
+                    } else {
+                        Icon(refreshIcon, "刷新音色目录", Modifier.size(20.dp), tint = colors.onSurface)
                     }
                 }
             },
@@ -123,12 +133,8 @@ internal fun CatalogPage(state: ReaderState, actions: ReaderActions) {
                             tint = colors.onSurfaceVariantActions,
                         )
                     },
-                    trailingIcon = {
-                        AnimatedVisibility(
-                            visible = query.isNotEmpty(),
-                            enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.75f),
-                            exit = fadeOut(tween(120)) + scaleOut(targetScale = 0.75f),
-                        ) {
+                    trailingIcon = if (query.isNotEmpty()) {
+                        {
                             IconButton(onClick = { query = "" }, minWidth = 36.dp, minHeight = 36.dp) {
                                 Icon(
                                     MiuixIcons.Basic.Close,
@@ -138,7 +144,7 @@ internal fun CatalogPage(state: ReaderState, actions: ReaderActions) {
                                 )
                             }
                         }
-                    },
+                    } else null,
                 )
                 Spacer(Modifier.height(10.dp))
             }
@@ -154,65 +160,54 @@ internal fun CatalogPage(state: ReaderState, actions: ReaderActions) {
                 Spacer(Modifier.height(10.dp))
             }
 
-            item(key = "providers") {
-                AnimatedVisibility(
-                    visible = providerCounts.size > 1,
-                    enter = fadeIn(tween(200)) + expandVertically(AppMotion.sizeSpec()),
-                    exit = fadeOut(tween(140)) + shrinkVertically(AppMotion.sizeSpec()),
-                ) {
-                    Column {
-                        LazyRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            item(key = "all") {
-                                FilterChip(
-                                    label = "全部",
-                                    selected = activeProvider == null,
-                                    onClick = { providerFilter = null },
-                                )
-                            }
-                            items(providerCounts.entries.toList(), key = { it.key }) { (id, count) ->
-                                FilterChip(
-                                    label = "${providerName(id)} $count",
-                                    selected = activeProvider == id,
-                                    onClick = { providerFilter = if (activeProvider == id) null else id },
-                                    modifier = Modifier.animateItem(),
-                                )
-                            }
+            if (providerCounts.size > 1) {
+                item(key = "providers") {
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        item(key = "all") {
+                            FilterChip(
+                                label = "全部",
+                                selected = activeProvider == null,
+                                onClick = { providerFilter = null },
+                            )
                         }
-                        Spacer(Modifier.height(10.dp))
+                        items(providerCounts.entries.toList(), key = { it.key }) { (id, count) ->
+                            FilterChip(
+                                label = "${providerName(id)} $count",
+                                selected = activeProvider == id,
+                                onClick = { providerFilter = if (activeProvider == id) null else id },
+                            )
+                        }
                     }
+                    Spacer(Modifier.height(10.dp))
                 }
             }
 
-            item(key = "play-error") {
-                Column {
-                    ErrorBanner(state.playError, onDismiss = actions::dismissPlayError)
-                    if (state.playError.isNotBlank()) Spacer(Modifier.height(10.dp))
+            if (playError.isNotBlank()) {
+                item(key = "play-error") {
+                    ErrorBanner(playError, onDismiss = actions::dismissPlayError)
+                    Spacer(Modifier.height(10.dp))
                 }
             }
 
-            item(key = "conn-error") {
-                val showConnErr = state.connectionError.isNotBlank() && state.voices.isEmpty()
-                Column {
-                    ErrorBanner(if (showConnErr) state.connectionError else "", onRetry = actions::refresh)
-                    if (showConnErr) Spacer(Modifier.height(10.dp))
+            if (connectionError.isNotBlank() && voices.isEmpty()) {
+                item(key = "conn-error") {
+                    ErrorBanner(connectionError, onRetry = actions::refresh)
+                    Spacer(Modifier.height(10.dp))
                 }
             }
 
             if (groups.isEmpty()) {
                 item(key = "empty") {
-                    Card(
-                        Modifier.fillMaxWidth().animateItem(),
-                        insideMargin = PaddingValues(24.dp),
-                    ) {
+                    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(24.dp)) {
                         Column(
                             Modifier.fillMaxWidth(),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            if (state.busy) {
+                            if (busy) {
                                 InfiniteProgressIndicator()
                                 Caption("正在获取服务端音色目录…")
                             } else {
@@ -253,26 +248,26 @@ internal fun CatalogPage(state: ReaderState, actions: ReaderActions) {
                 }
             }
 
-            groups.forEach { (providerId, voices) ->
+            groups.forEach { (providerId, list) ->
                 item(key = "header/$providerId") {
                     SmallTitle(
-                        text = "${providerName(providerId)} · ${voices.size}",
+                        text = "${providerName(providerId)} · ${list.size}",
                         modifier = Modifier.animateItem(),
                         insideMargin = PaddingValues(start = 6.dp, top = 8.dp, bottom = 6.dp),
                     )
                 }
                 itemsIndexed(
-                    items = voices,
+                    items = list,
                     key = { _, v -> "voice/${providerId.length}/$providerId/${v.id}" },
                 ) { index, voice ->
                     val isFirst = index == 0
-                    val isLast = index == voices.lastIndex
-                    val isSelected = voice.key == state.selected
-                    val isFav = voice.key in state.favorites
-                    val isThisPreview = state.playingPreview && state.playingVoice == voice.key && state.transport != Transport.IDLE
+                    val isLast = index == list.lastIndex
+                    val isSelected = voice.key == selected
+                    val isFav = voice.key in favorites
+                    val isThisPreview = playingPreview && playingVoice == voice.key && transport != Transport.IDLE
                     val previewState = when {
                         !isThisPreview -> PreviewVisual.IDLE
-                        state.transport == Transport.BUFFERING -> PreviewVisual.BUFFERING
+                        transport == Transport.BUFFERING -> PreviewVisual.BUFFERING
                         else -> PreviewVisual.PLAYING
                     }
                     VoiceRow(
@@ -280,7 +275,7 @@ internal fun CatalogPage(state: ReaderState, actions: ReaderActions) {
                         chosen = isSelected,
                         favorite = isFav,
                         previewState = previewState,
-                        enabled = !state.connecting,
+                        enabled = !connecting,
                         first = isFirst,
                         last = isLast,
                         accent = providerAccent(providerId, dark),
@@ -312,14 +307,8 @@ private fun FilterChip(
         AppMotion.colorSpec(),
         label = "chip-fg",
     )
-    val scale by animateFloatAsState(
-        if (selected) 1f else 0.97f,
-        AppMotion.popSpec(),
-        label = "chip-scale",
-    )
     Box(
         modifier = modifier
-            .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(100))
             .background(bg)
             .clickable(onClick = onClick)
@@ -336,6 +325,10 @@ private fun FilterChip(
     }
 }
 
+/**
+ * High-FPS grouped voice row: avoids nested AnimatedContent/AnimatedVisibility subcompositions
+ * inside LazyColumn and drives selection/favorite transitions in draw-phase (`drawBehind` / `graphicsLayer`).
+ */
 @Composable
 private fun VoiceRow(
     voice: VoiceItem,
@@ -345,7 +338,7 @@ private fun VoiceRow(
     enabled: Boolean,
     first: Boolean,
     last: Boolean,
-    accent: androidx.compose.ui.graphics.Color,
+    accent: Color,
     actions: ReaderActions,
     modifier: Modifier = Modifier,
 ) {
@@ -356,41 +349,31 @@ private fun VoiceRow(
         last -> RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp)
         else -> RectangleShape
     }
-    val rowBg by animateColorAsState(
-        if (chosen) colors.tertiaryContainer.copy(alpha = 0.65f) else colors.surfaceContainer,
-        AppMotion.colorSpec(),
-        label = "row-bg",
+
+    // Just two lightweight float animations per row, evaluated in draw phase to skip relayout.
+    val selectProgress = animateFloatAsState(
+        targetValue = if (chosen) 1f else 0f,
+        animationSpec = tween(AppMotion.FAST_MS, easing = FastOutSlowInEasing),
+        label = "sel",
     )
-    val avatarBg by animateColorAsState(
-        if (chosen) colors.primary else accent.copy(alpha = 0.14f),
-        AppMotion.colorSpec(),
-        label = "avatar-bg",
-    )
-    val titleColor by animateColorAsState(
-        if (chosen) colors.primary else colors.onSurface,
-        AppMotion.colorSpec(),
-        label = "row-title",
-    )
-    val heartTint by animateColorAsState(
-        if (favorite) colors.primary else colors.onSurfaceVariantActions,
-        AppMotion.colorSpec(),
-        label = "heart-tint",
-    )
-    val heartScale by animateFloatAsState(
-        if (favorite) 1.08f else 1.0f,
-        AppMotion.popSpec(),
-        label = "heart-scale",
-    )
-    val previewBg by animateColorAsState(
-        if (previewState != PreviewVisual.IDLE) colors.primary else colors.secondaryContainer,
-        AppMotion.colorSpec(),
-        label = "preview-bg",
+    val favScale = animateFloatAsState(
+        targetValue = if (favorite) 1.08f else 1f,
+        animationSpec = tween(AppMotion.FAST_MS, easing = FastOutSlowInEasing),
+        label = "fav",
     )
 
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = shape,
-        color = rowBg,
+    val idleBg = colors.surfaceContainer
+    val selectedBg = colors.tertiaryContainer.copy(alpha = 0.65f)
+    val avatarIdle = accent.copy(alpha = 0.14f)
+    val avatarSelected = colors.primary
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .drawBehind {
+                drawRect(lerp(idleBg, selectedBg, selectProgress.value))
+            },
     ) {
         Column(Modifier.fillMaxWidth()) {
             Row(
@@ -405,25 +388,38 @@ private fun VoiceRow(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .background(avatarBg),
+                        .drawBehind {
+                            drawCircle(lerp(avatarIdle, avatarSelected, selectProgress.value))
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
-                    AnimatedContent(
-                        targetState = chosen,
-                        transitionSpec = { AppMotion.iconSwap() },
-                        label = "voice-check",
-                    ) { isChosen ->
-                        if (isChosen) {
-                            Icon(MiuixIcons.Basic.Check, null, Modifier.size(18.dp), tint = colors.onPrimary)
-                        } else {
-                            Text(
-                                text = voice.displayName.take(1),
-                                style = MiuixTheme.textStyles.body2,
-                                fontWeight = FontWeight.SemiBold,
-                                color = accent,
-                            )
-                        }
-                    }
+                    Text(
+                        text = voice.displayName.take(1),
+                        style = MiuixTheme.textStyles.body2,
+                        fontWeight = FontWeight.SemiBold,
+                        color = accent,
+                        modifier = Modifier.graphicsLayer {
+                            val a = 1f - selectProgress.value
+                            alpha = a
+                            val s = 0.85f + 0.15f * a
+                            scaleX = s
+                            scaleY = s
+                        },
+                    )
+                    Icon(
+                        MiuixIcons.Basic.Check,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(18.dp)
+                            .graphicsLayer {
+                                val a = selectProgress.value
+                                alpha = a
+                                val s = 0.75f + 0.25f * a
+                                scaleX = s
+                                scaleY = s
+                            },
+                        tint = colors.onPrimary,
+                    )
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
@@ -435,18 +431,12 @@ private fun VoiceRow(
                             text = voice.displayName,
                             style = MiuixTheme.textStyles.body1,
                             fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
-                            color = titleColor,
+                            color = if (chosen) colors.primary else colors.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false),
                         )
-                        AnimatedVisibility(
-                            visible = chosen,
-                            enter = fadeIn(tween(180, easing = FastOutSlowInEasing)) +
-                                expandHorizontally(AppMotion.sizeSpec()),
-                            exit = fadeOut(tween(120, easing = FastOutSlowInEasing)) +
-                                shrinkHorizontally(AppMotion.sizeSpec()),
-                        ) {
+                        if (chosen) {
                             Box(
                                 Modifier
                                     .clip(RoundedCornerShape(6.dp))
@@ -482,20 +472,18 @@ private fun VoiceRow(
                     minWidth = 42.dp,
                     minHeight = 42.dp,
                 ) {
-                    AnimatedContent(
-                        targetState = favorite,
-                        transitionSpec = { AppMotion.iconSwap() },
-                        label = "favorite-icon",
-                    ) { fav ->
-                        Icon(
-                            if (fav) heartFilledIcon else heartIcon,
-                            contentDescription = (if (fav) "取消收藏：" else "收藏：") + voice.displayName,
-                            modifier = Modifier
-                                .size(19.dp)
-                                .graphicsLayer { scaleX = heartScale; scaleY = heartScale },
-                            tint = heartTint,
-                        )
-                    }
+                    Icon(
+                        if (favorite) heartFilledIcon else heartIcon,
+                        contentDescription = (if (favorite) "取消收藏：" else "收藏：") + voice.displayName,
+                        modifier = Modifier
+                            .size(19.dp)
+                            .graphicsLayer {
+                                val s = favScale.value
+                                scaleX = s
+                                scaleY = s
+                            },
+                        tint = if (favorite) colors.primary else colors.onSurfaceVariantActions,
+                    )
                 }
                 IconButton(
                     onClick = { actions.preview(voice) },
@@ -503,37 +491,32 @@ private fun VoiceRow(
                     minWidth = 42.dp,
                     minHeight = 42.dp,
                 ) {
+                    val activePreview = previewState != PreviewVisual.IDLE
                     Box(
                         modifier = Modifier
                             .size(32.dp)
                             .clip(CircleShape)
-                            .background(previewBg),
+                            .background(if (activePreview) colors.primary else colors.secondaryContainer),
                         contentAlignment = Alignment.Center,
                     ) {
-                        AnimatedContent(
-                            targetState = previewState,
-                            transitionSpec = { AppMotion.iconSwap() },
-                            label = "preview-icon",
-                        ) { pv ->
-                            when (pv) {
-                                PreviewVisual.BUFFERING -> InfiniteProgressIndicator(
-                                    size = 15.dp,
-                                    strokeWidth = 1.8.dp,
-                                    color = colors.onPrimary,
-                                )
-                                PreviewVisual.PLAYING -> Icon(
-                                    stopIcon,
-                                    contentDescription = "停止试听：" + voice.displayName,
-                                    modifier = Modifier.size(13.dp),
-                                    tint = colors.onPrimary,
-                                )
-                                PreviewVisual.IDLE -> Icon(
-                                    playIcon,
-                                    contentDescription = "试听：" + voice.displayName,
-                                    modifier = Modifier.size(14.dp),
-                                    tint = colors.primary,
-                                )
-                            }
+                        when (previewState) {
+                            PreviewVisual.BUFFERING -> InfiniteProgressIndicator(
+                                size = 15.dp,
+                                strokeWidth = 1.8.dp,
+                                color = colors.onPrimary,
+                            )
+                            PreviewVisual.PLAYING -> Icon(
+                                stopIcon,
+                                contentDescription = "停止试听：" + voice.displayName,
+                                modifier = Modifier.size(13.dp),
+                                tint = colors.onPrimary,
+                            )
+                            PreviewVisual.IDLE -> Icon(
+                                playIcon,
+                                contentDescription = "试听：" + voice.displayName,
+                                modifier = Modifier.size(14.dp),
+                                tint = colors.primary,
+                            )
                         }
                     }
                 }

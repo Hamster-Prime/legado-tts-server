@@ -18,9 +18,6 @@ import kotlin.concurrent.withLock
 
 internal data class PcmFormat(val rate: Int, val channels: Int)
 
-private val STREAMING_PROVIDERS = setOf("edge", "doubao")
-private val MULTI_BLANK_LINES = Regex("\n{2,}")
-
 private sealed interface Event<out T> {
     data class Data<T>(val item: T) : Event<T>
     data class Failure(val error: Exception) : Event<Nothing>
@@ -42,13 +39,12 @@ private fun <T> ArrayBlockingQueue<Event<T>>.next(token: CancellationToken): T? 
 /**
  * Byte-bounded compressed-audio pipe for one segment.
  *
- * Unlike a small packet-count queue (which stalls on streaming providers that emit 500-1400 byte
- * chunks), a 2 MB byte budget holds several minutes of MP3 so the network producer completes the
- * current request and starts prefetching the next segment well before playback reaches the boundary.
+ * Unlike a small packet-count queue (which stalls on streaming providers that emit small TCP
+ * chunks), a 2 MB byte budget holds several minutes of compressed MP3 so the network producer
+ * finishes the current segment and prefetches the next well before playback reaches the boundary.
  */
 private class SegmentPipe(
     private val token: CancellationToken,
-    val pauseMs: Int,
     val charCount: Int,
 ) : InputStream() {
     private val lock = ReentrantLock()
@@ -144,22 +140,17 @@ internal fun streamSpeech(
 ) {
     // Up to 2 prefetched segments ahead of the segment currently being decoded.
     val segments = ArrayBlockingQueue<Event<SegmentPipe>>(2)
-    val streaming = voice.provider in STREAMING_PROVIDERS
-    // Fish Audio ignores server-side `rate` and scales playback via output sample rate instead.
-    val pauseSpeed = if (voice.provider == "fishaudio") 1f else speed.coerceIn(.25f, 4f)
     val producer = thread(name = "speech-network", isDaemon = true) {
         var current: SegmentPipe? = null
         try {
-            val requests = if (preview) sequenceOf(SpeechSegment("", 0))
-            else speechSegments(text, api.maxTextLength(token), streaming = streaming, singleUtterance = singleUtterance)
+            val requests = if (preview) sequenceOf("")
+            else speechSegments(text, api.maxTextLength(token), provider = voice.provider, singleUtterance = singleUtterance)
             for (part in requests) {
                 token.check()
-                val pipe = SegmentPipe(token, (part.pauseMs / pauseSpeed).toInt(), part.text.length)
+                val pipe = SegmentPipe(token, part.length)
                 segments.put(Event.Data(pipe))
                 current = pipe
-                // Collapse multi-blank-line runs so upstream engines don't emit double paragraph dead air.
-                val sendText = if (preview) "" else MULTI_BLANK_LINES.replace(part.text, "\n")
-                api.synthesis(sendText, voice, speed, preview, token).use { stream ->
+                api.synthesis(part, voice, speed, preview, token).use { stream ->
                     val scratch = ByteArray(16384)
                     while (true) {
                         token.check()
@@ -182,8 +173,6 @@ internal fun streamSpeech(
     }
     val hook = token.onCancel { producer.interrupt() }
     try {
-        val maxInnerMs = (SpeechJoiner.DEFAULT_MAX_INNER_SILENCE_MS / pauseSpeed).toInt().coerceIn(220, 720)
-        val joiner = SpeechJoiner(maxInnerSilenceMs = maxInnerMs, sink = sink)
         val totalChars = text.trim().length
         var spokenChars = 0
         var segmentIndex = 0
@@ -191,13 +180,11 @@ internal fun streamSpeech(
             val pipe = segments.next(token) ?: break
             segmentIndex++
             if (!preview) onProgress(spokenChars, totalChars, segmentIndex)
-            joiner.beginSegment()
-            decodeMp3(pipe, token, joiner::write)
-            joiner.endSegment(pipe.pauseMs)
+            // Pass decoded PCM verbatim to preserve natural vocoder onset, breath, and sibilants.
+            decodeMp3(pipe, token, sink)
             spokenChars = minOf(totalChars, spokenChars + pipe.charCount)
             if (!preview) onProgress(spokenChars, totalChars, segmentIndex)
         }
-        joiner.finish()
     } catch (e: Exception) {
         producer.interrupt()
         throw e

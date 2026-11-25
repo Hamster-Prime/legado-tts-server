@@ -1,6 +1,10 @@
 package io.github.legadotts.client.ui
 
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.Stable
+
 /** Display models only. In particular, saved credentials must never be passed into Compose. */
+@Immutable
 data class VoiceItem(
     val provider: String,
     val id: String,
@@ -18,8 +22,10 @@ enum class Transport { IDLE, BUFFERING, PLAYING, PAUSED }
 
 enum class ConnectionStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
+@Immutable
 data class Notice(val id: Long, val text: String)
 
+@Immutable
 data class ReaderState(
     val initializing: Boolean = true,
     val configured: Boolean = false,
@@ -50,6 +56,7 @@ data class ReaderState(
     val activeVoice: VoiceItem? get() = voices.find { it.key == selected } ?: selectedVoiceFallback
 }
 
+@Stable
 interface ReaderActions {
     /** null = keep the stored key, only valid for the exact saved address. Empty = no key. */
     fun connect(address: String, key: String?)

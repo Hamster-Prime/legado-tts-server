@@ -3,8 +3,8 @@ package io.github.legadotts.client.ui
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.widget.Toast
-import androidx.compose.animation.*
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
@@ -36,7 +36,18 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 @Composable
 internal fun ConnectionPage(
-    state: ReaderState,
+    configured: Boolean,
+    connectionStatus: ConnectionStatus,
+    connectionError: String,
+    formError: String,
+    address: String,
+    hasKey: Boolean,
+    connecting: Boolean,
+    refreshing: Boolean,
+    voiceCount: Int,
+    providerCount: Int,
+    activeVoice: VoiceItem?,
+    speed: Float,
     actions: ReaderActions,
     openCatalog: () -> Unit,
 ) {
@@ -44,23 +55,36 @@ internal fun ConnectionPage(
     var editing by rememberSaveable { mutableStateOf(false) }
     var awaitingSave by remember { mutableStateOf(false) }
 
-    LaunchedEffect(state.connecting, state.formError, state.connectionStatus) {
-        if (awaitingSave && !state.connecting) {
+    LaunchedEffect(connecting, formError, connectionStatus) {
+        if (awaitingSave && !connecting) {
             awaitingSave = false
-            if (state.formError.isEmpty() && state.connectionStatus == ConnectionStatus.CONNECTED) {
+            if (formError.isEmpty() && connectionStatus == ConnectionStatus.CONNECTED) {
                 editing = false
             }
         }
     }
 
-    if (!state.configured) {
+    if (!configured) {
         OnboardingConnectionView(
-            state = state,
+            address = address,
+            hasKey = hasKey,
+            connecting = connecting,
+            connectionError = connectionError,
             onSubmit = { addr, key -> actions.connect(addr, key) },
         )
     } else {
         ConfiguredSettingsView(
-            state = state,
+            connectionStatus = connectionStatus,
+            connectionError = connectionError,
+            formError = formError,
+            address = address,
+            hasKey = hasKey,
+            connecting = connecting,
+            refreshing = refreshing,
+            voiceCount = voiceCount,
+            providerCount = providerCount,
+            activeVoice = activeVoice,
+            speed = speed,
             actions = actions,
             editing = editing,
             onStartEdit = {
@@ -83,7 +107,10 @@ internal fun ConnectionPage(
 
 @Composable
 private fun OnboardingConnectionView(
-    state: ReaderState,
+    address: String,
+    hasKey: Boolean,
+    connecting: Boolean,
+    connectionError: String,
     onSubmit: (String, String?) -> Unit,
 ) {
     Column(
@@ -104,22 +131,32 @@ private fun OnboardingConnectionView(
         }
 
         ConnectionFormCard(
-            savedAddress = state.address,
-            savedHasKey = state.hasKey,
-            connecting = state.connecting,
-            submitLabel = if (state.connecting) "正在验证…" else "验证并连接",
+            savedAddress = address,
+            savedHasKey = hasKey,
+            connecting = connecting,
+            submitLabel = if (connecting) "正在验证…" else "验证并连接",
             onCancel = null,
             onSubmit = onSubmit,
         )
 
-        ErrorBanner(state.connectionError)
+        ErrorBanner(connectionError)
         Spacer(Modifier.height(12.dp))
     }
 }
 
 @Composable
 private fun ConfiguredSettingsView(
-    state: ReaderState,
+    connectionStatus: ConnectionStatus,
+    connectionError: String,
+    formError: String,
+    address: String,
+    hasKey: Boolean,
+    connecting: Boolean,
+    refreshing: Boolean,
+    voiceCount: Int,
+    providerCount: Int,
+    activeVoice: VoiceItem?,
+    speed: Float,
     actions: ReaderActions,
     editing: Boolean,
     onStartEdit: () -> Unit,
@@ -131,13 +168,13 @@ private fun ConfiguredSettingsView(
     val dark = isSystemInDarkTheme()
     val colors = MiuixTheme.colorScheme
     val scrollBehavior = MiuixScrollBehavior()
-    val providerCount = remember(state.voices) { state.voices.map { it.provider }.distinct().size }
-    val isHttps = state.address.startsWith("https://", ignoreCase = true)
+    val isHttps = address.startsWith("https://", ignoreCase = true)
+    val busy = connecting || refreshing
 
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
             title = "设置",
-            subtitle = when (state.connectionStatus) {
+            subtitle = when (connectionStatus) {
                 ConnectionStatus.CONNECTED -> "服务已连接"
                 ConnectionStatus.CONNECTING -> "正在同步服务端…"
                 ConnectionStatus.ERROR -> "服务连接异常"
@@ -167,18 +204,14 @@ private fun ConfiguredSettingsView(
                 label = "connection-mode-swap",
             ) { isEditing ->
                 if (!isEditing) {
-                    Card(
-                        Modifier.fillMaxWidth().animateContentSize(AppMotion.sizeSpec()),
-                        insideMargin = PaddingValues(16.dp),
-                    ) {
-                        // Status header row
+                    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             val green = connectedGreen(dark)
-                            when (state.connectionStatus) {
+                            when (connectionStatus) {
                                 ConnectionStatus.CONNECTED -> StatusPill(
                                     text = "已连接",
                                     containerColor = green.copy(alpha = 0.14f),
@@ -206,23 +239,13 @@ private fun ConfiguredSettingsView(
                             }
 
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                MiniBadge(
-                                    text = if (isHttps) "HTTPS" else "HTTP",
-                                    accent = isHttps,
-                                )
-                                AnimatedVisibility(
-                                    visible = state.hasKey,
-                                    enter = fadeIn(tween(180)) + expandHorizontally(AppMotion.sizeSpec()),
-                                    exit = fadeOut(tween(130)) + shrinkHorizontally(AppMotion.sizeSpec()),
-                                ) {
-                                    MiniBadge(text = "已设密钥", accent = true)
-                                }
+                                MiniBadge(text = if (isHttps) "HTTPS" else "HTTP", accent = isHttps)
+                                if (hasKey) MiniBadge(text = "已设密钥", accent = true)
                             }
                         }
 
                         Spacer(Modifier.height(14.dp))
 
-                        // Server address display
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -239,7 +262,7 @@ private fun ConfiguredSettingsView(
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(
-                                    text = state.address,
+                                    text = address,
                                     style = MiuixTheme.textStyles.body1,
                                     fontWeight = FontWeight.Medium,
                                     maxLines = 2,
@@ -247,17 +270,17 @@ private fun ConfiguredSettingsView(
                                 )
                                 Caption(
                                     buildString {
-                                        append("${state.voices.size} 个可用音色")
+                                        append("$voiceCount 个可用音色")
                                         if (providerCount > 0) append(" · $providerCount 个服务商")
-                                        state.activeVoice?.let { append(" · ${it.displayName}") }
+                                        activeVoice?.let { append(" · ${it.displayName}") }
                                     },
                                 )
                             }
                         }
 
                         ErrorBanner(
-                            message = state.connectionError,
-                            modifier = Modifier.padding(top = if (state.connectionError.isNotBlank()) 12.dp else 0.dp),
+                            message = connectionError,
+                            modifier = Modifier.padding(top = if (connectionError.isNotBlank()) 12.dp else 0.dp),
                         )
 
                         Spacer(Modifier.height(14.dp))
@@ -268,49 +291,36 @@ private fun ConfiguredSettingsView(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            val isError = state.connectionStatus == ConnectionStatus.ERROR
-                            val syncFg by animateColorAsState(
-                                if (isError) colors.onPrimary else colors.onSurface,
-                                AppMotion.colorSpec(),
-                                label = "sync-btn-fg",
-                            )
+                            val isError = connectionStatus == ConnectionStatus.ERROR
                             Button(
                                 onClick = actions::refresh,
-                                enabled = !state.busy,
+                                enabled = !busy,
                                 modifier = Modifier.weight(1f).heightIn(min = 44.dp),
                                 cornerRadius = 12.dp,
                                 colors = if (isError) ButtonDefaults.buttonColorsPrimary() else ButtonDefaults.buttonColors(),
                             ) {
-                                AnimatedContent(
-                                    targetState = state.refreshing to isError,
-                                    transitionSpec = { AppMotion.textFade() },
-                                    label = "sync-btn-content",
-                                ) { (refreshing, err) ->
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (refreshing) {
-                                            InfiniteProgressIndicator(
-                                                size = 15.dp,
-                                                strokeWidth = 1.8.dp,
-                                                color = if (err) colors.onPrimary else colors.primary,
-                                            )
-                                            Spacer(Modifier.width(6.dp))
-                                        }
-                                        Text(
-                                            text = when {
-                                                refreshing -> "同步中…"
-                                                err -> "重新连接"
-                                                else -> "刷新目录"
-                                            },
-                                            style = MiuixTheme.textStyles.body2,
-                                            fontWeight = FontWeight.Medium,
-                                            color = syncFg,
-                                        )
-                                    }
+                                if (refreshing) {
+                                    InfiniteProgressIndicator(
+                                        size = 15.dp,
+                                        strokeWidth = 1.8.dp,
+                                        color = if (isError) colors.onPrimary else colors.primary,
+                                    )
+                                    Spacer(Modifier.width(6.dp))
                                 }
+                                Text(
+                                    text = when {
+                                        refreshing -> "同步中…"
+                                        isError -> "重新连接"
+                                        else -> "刷新目录"
+                                    },
+                                    style = MiuixTheme.textStyles.body2,
+                                    fontWeight = FontWeight.Medium,
+                                    color = if (isError) colors.onPrimary else colors.onSurface,
+                                )
                             }
                             Button(
                                 onClick = onStartEdit,
-                                enabled = !state.busy,
+                                enabled = !busy,
                                 modifier = Modifier.weight(1f).heightIn(min = 44.dp),
                                 cornerRadius = 12.dp,
                             ) {
@@ -325,14 +335,14 @@ private fun ConfiguredSettingsView(
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         ConnectionFormCard(
-                            savedAddress = state.address,
-                            savedHasKey = state.hasKey,
-                            connecting = state.connecting,
-                            submitLabel = if (state.connecting) "正在验证…" else "验证并保存",
+                            savedAddress = address,
+                            savedHasKey = hasKey,
+                            connecting = connecting,
+                            submitLabel = if (connecting) "正在验证…" else "验证并保存",
                             onCancel = onCancelEdit,
                             onSubmit = onSaveEdit,
                         )
-                        ErrorBanner(state.formError)
+                        ErrorBanner(formError)
                     }
                 }
             }
@@ -366,8 +376,8 @@ private fun ConfiguredSettingsView(
                 HorizontalDivider(Modifier.padding(horizontal = 16.dp))
                 BasicComponent(
                     title = "系统引擎默认音色",
-                    summary = state.activeVoice?.let {
-                        "${providerName(it.provider)} · ${it.displayName} · 基准语速 ${formatSpeed(state.speed)}×"
+                    summary = activeVoice?.let {
+                        "${providerName(it.provider)} · ${it.displayName} · 基准语速 ${formatSpeed(speed)}×"
                     } ?: "尚未选择音色",
                     endActions = {
                         Text("更换", style = MiuixTheme.textStyles.body2, color = colors.primary)
@@ -413,10 +423,7 @@ private fun ConnectionFormCard(
     val focus = LocalFocusManager.current
     val colors = MiuixTheme.colorScheme
 
-    Card(
-        Modifier.fillMaxWidth().animateContentSize(AppMotion.sizeSpec()),
-        insideMargin = PaddingValues(16.dp),
-    ) {
+    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
         // No saved-instance-state or Compose saveable state for either field; an
         // accidentally pasted URL with credentials must not enter the system Bundle.
         CompositionLocalProvider(LocalSaveableStateRegistry provides null) {
@@ -473,28 +480,18 @@ private fun ConnectionFormCard(
                             autoCorrectEnabled = false,
                         ),
                         visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            AnimatedVisibility(
-                                visible = key.isNotEmpty(),
-                                enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.75f),
-                                exit = fadeOut(tween(120)) + scaleOut(targetScale = 0.75f),
-                            ) {
+                        trailingIcon = if (key.isNotEmpty()) {
+                            {
                                 IconButton(onClick = { showKey = !showKey }, minWidth = 36.dp, minHeight = 36.dp) {
-                                    AnimatedContent(
-                                        targetState = showKey,
-                                        transitionSpec = { AppMotion.iconSwap() },
-                                        label = "eye-toggle",
-                                    ) { visible ->
-                                        Icon(
-                                            if (visible) eyeOffIcon else eyeIcon,
-                                            contentDescription = if (visible) "隐藏密钥" else "显示密钥",
-                                            modifier = Modifier.size(18.dp),
-                                            tint = colors.onSurfaceVariantActions,
-                                        )
-                                    }
+                                    Icon(
+                                        if (showKey) eyeOffIcon else eyeIcon,
+                                        contentDescription = if (showKey) "隐藏密钥" else "显示密钥",
+                                        modifier = Modifier.size(18.dp),
+                                        tint = colors.onSurfaceVariantActions,
+                                    )
                                 }
                             }
-                        },
+                        } else null,
                     )
                 }
             }
@@ -537,19 +534,11 @@ private fun ConnectionFormCard(
                 cornerRadius = 14.dp,
                 colors = ButtonDefaults.buttonColorsPrimary(),
             ) {
-                AnimatedContent(
-                    targetState = connecting to submitLabel,
-                    transitionSpec = { AppMotion.textFade() },
-                    label = "submit-content",
-                ) { (busy, label) ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (busy) {
-                            InfiniteProgressIndicator(size = 16.dp, strokeWidth = 1.8.dp, color = submitFg)
-                            Spacer(Modifier.width(8.dp))
-                        }
-                        Text(label, style = MiuixTheme.textStyles.button, color = submitFg)
-                    }
+                if (connecting) {
+                    InfiniteProgressIndicator(size = 16.dp, strokeWidth = 1.8.dp, color = submitFg)
+                    Spacer(Modifier.width(8.dp))
                 }
+                Text(submitLabel, style = MiuixTheme.textStyles.button, color = submitFg)
             }
         }
     }
@@ -558,27 +547,17 @@ private fun ConnectionFormCard(
 @Composable
 private fun MiniBadge(text: String, accent: Boolean) {
     val colors = MiuixTheme.colorScheme
-    val bg by animateColorAsState(
-        if (accent) colors.tertiaryContainer else colors.secondaryContainer,
-        AppMotion.colorSpec(),
-        label = "mini-badge-bg",
-    )
-    val fg by animateColorAsState(
-        if (accent) colors.onTertiaryContainer else colors.onSurfaceVariantSummary,
-        AppMotion.colorSpec(),
-        label = "mini-badge-fg",
-    )
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(bg)
+            .background(if (accent) colors.tertiaryContainer else colors.secondaryContainer)
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
         Text(
             text = text,
             style = MiuixTheme.textStyles.footnote2,
             fontWeight = FontWeight.Medium,
-            color = fg,
+            color = if (accent) colors.onTertiaryContainer else colors.onSurfaceVariantSummary,
         )
     }
 }

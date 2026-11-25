@@ -94,25 +94,29 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/release-assets"
 
-          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$RELEASE_STORE_PASSWORD" ] && [ -n "$RELEASE_KEY_ALIAS" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
-            export RELEASE_STORE_FILE="$RUNNER_TEMP/release.keystore"
-            SIGN_NOTE="Release 模式 + R8 性能优化，使用仓库 Release 密钥签名"
-          else
-            SIGN_NOTE="Release 模式 + R8 性能优化，使用 Debug 证书签名（可直接安装；配置 ANDROID_KEYSTORE_* Secrets 后自动切换为正式 Release 密钥）"
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$RELEASE_STORE_PASSWORD" ] || [ -z "$RELEASE_KEY_ALIAS" ] || [ -z "$RELEASE_KEY_PASSWORD" ]; then
+            echo "::error::Missing ANDROID_KEYSTORE_* Actions secrets. Refusing to publish a Release APK with an ephemeral debug key (which breaks in-place upgrades)."
+            exit 1
           fi
 
-          ./gradlew :app:assembleRelease
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          export RELEASE_STORE_FILE="$RUNNER_TEMP/release.keystore"
+          SIGN_NOTE="Release 模式 + R8 性能优化，使用固定 Release 密钥签名（支持后续版本直接覆盖升级）"
+
+          ./gradlew :app:assembleRelease -PrequireReleaseSigning=true
           SRC_APK="app/build/outputs/apk/release/app-release.apk"
           OUT_NAME="Legado-TTS-Reader-${VERSION}.apk"
 
-          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify "$SRC_APK"
+          VERIFY_OUT=$("$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$SRC_APK")
+          echo "$VERIFY_OUT"
+          CERT_SHA256=$(printf '%s\n' "$VERIFY_OUT" | grep -m1 'certificate SHA-256 digest:' | awk '{print $NF}')
           cp "$SRC_APK" "$RUNNER_TEMP/release-assets/${OUT_NAME}"
           (cd "$RUNNER_TEMP/release-assets" && sha256sum "${OUT_NAME}" > "${OUT_NAME}.sha256")
           SHA256=$(cut -d' ' -f1 "$RUNNER_TEMP/release-assets/${OUT_NAME}.sha256")
 
           echo "apk_name=${OUT_NAME}" >> "$GITHUB_OUTPUT"
           echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "cert_sha256=${CERT_SHA256}" >> "$GITHUB_OUTPUT"
           echo "sign_note=${SIGN_NOTE}" >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifact
@@ -131,6 +135,7 @@ jobs:
           VERSION: ${{ steps.build.outputs.version }}
           APK_NAME: ${{ steps.build.outputs.apk_name }}
           SHA256: ${{ steps.build.outputs.sha256 }}
+          CERT_SHA256: ${{ steps.build.outputs.cert_sha256 }}
           SIGN_NOTE: ${{ steps.build.outputs.sign_note }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
@@ -155,16 +160,23 @@ jobs:
           - **构建提交**：\`${SHORT_SHA}\`
           - **产物文件**：\`${APK_NAME}\`
           - **SHA-256**：\`${SHA256}\`
+          - **签名证书 SHA-256**：\`${CERT_SHA256}\`
           - **构建说明**：${SIGN_NOTE}
           - **最低系统**：Android 9 (API 28)+
 
-          > 如需切换为长期发布密钥签名，请在仓库 **Settings → Secrets and variables → Actions** 中配置 \`ANDROID_KEYSTORE_BASE64\`、\`ANDROID_KEYSTORE_PASSWORD\`、\`ANDROID_KEY_ALIAS\`、\`ANDROID_KEY_PASSWORD\`。
+          > 从 \`v1.2\` 起统一使用仓库固定 Release 证书签名。若设备此前安装的是早期使用临时 Debug 证书构建的 \`v1.0\` / \`v1.1\`，请先卸载旧版再安装；此后所有新版本均可直接覆盖更新。
           EOF
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             if [ "$IS_ROLLING" = "true" ]; then
               git tag -f "$TAG" "$GITHUB_SHA"
               git push --force origin "refs/tags/${TAG}"
+              EXISTING_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' || true)
+              for ASSET in $EXISTING_ASSETS; do
+                if [ "$ASSET" != "$APK_NAME" ] && [ "$ASSET" != "${APK_NAME}.sha256" ]; then
+                  gh release delete-asset "$TAG" "$ASSET" --yes || true
+                fi
+              done
             fi
             gh release upload "$TAG" \
               "$RUNNER_TEMP/release-assets/${APK_NAME}" \

@@ -115,7 +115,7 @@ internal fun CatalogPage(
                 .fillMaxWidth()
                 .nestedScroll(scrollBehavior.nestedScrollConnection)
                 .overScrollVertical(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 20.dp),
         ) {
             item(key = "search") {
                 TextField(
@@ -146,7 +146,7 @@ internal fun CatalogPage(
                         }
                     } else null,
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
             }
 
             item(key = "tabs") {
@@ -157,7 +157,7 @@ internal fun CatalogPage(
                     onTabSelected = { favoritesOnly = it == 1 },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
             }
 
             if (providerCounts.size > 1) {
@@ -181,7 +181,7 @@ internal fun CatalogPage(
                             )
                         }
                     }
-                    Spacer(Modifier.height(10.dp))
+                    Spacer(Modifier.height(8.dp))
                 }
             }
 
@@ -312,7 +312,7 @@ private fun FilterChip(
             .clip(RoundedCornerShape(100))
             .background(bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 13.dp, vertical = 7.dp),
+            .padding(horizontal = 11.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -381,12 +381,12 @@ private fun VoiceRow(
                     .fillMaxWidth()
                     .semantics { selected = chosen }
                     .clickable(enabled = enabled) { actions.select(voice) }
-                    .padding(start = 14.dp, end = 6.dp, top = 11.dp, bottom = 11.dp),
+                    .padding(start = 12.dp, end = 6.dp, top = 9.dp, bottom = 9.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(34.dp)
                         .clip(CircleShape)
                         .drawBehind {
                             drawCircle(lerp(avatarIdle, avatarSelected, selectProgress.value))
@@ -421,7 +421,7 @@ private fun VoiceRow(
                         tint = colors.onPrimary,
                     )
                 }
-                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -469,14 +469,14 @@ private fun VoiceRow(
                 IconButton(
                     onClick = { actions.favorite(voice) },
                     enabled = enabled,
-                    minWidth = 42.dp,
-                    minHeight = 42.dp,
+                    minWidth = 38.dp,
+                    minHeight = 38.dp,
                 ) {
                     Icon(
                         if (favorite) heartFilledIcon else heartIcon,
                         contentDescription = (if (favorite) "取消收藏：" else "收藏：") + voice.displayName,
                         modifier = Modifier
-                            .size(19.dp)
+                            .size(18.dp)
                             .graphicsLayer {
                                 val s = favScale.value
                                 scaleX = s
@@ -488,13 +488,13 @@ private fun VoiceRow(
                 IconButton(
                     onClick = { actions.preview(voice) },
                     enabled = enabled,
-                    minWidth = 42.dp,
-                    minHeight = 42.dp,
+                    minWidth = 38.dp,
+                    minHeight = 38.dp,
                 ) {
                     val activePreview = previewState != PreviewVisual.IDLE
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(30.dp)
                             .clip(CircleShape)
                             .background(if (activePreview) colors.primary else colors.secondaryContainer),
                         contentAlignment = Alignment.Center,
@@ -522,7 +522,7 @@ private fun VoiceRow(
                 }
             }
             if (!last) {
-                HorizontalDivider(Modifier.padding(start = 62.dp, end = 16.dp))
+                HorizontalDivider(Modifier.padding(start = 56.dp, end = 14.dp))
             }
         }
     }

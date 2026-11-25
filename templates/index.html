@@ -304,41 +304,47 @@
                     </button>
                   </div>
 
-                  <div class="voice-picker">
-                    <label class="search-control" for="voice-search">
-                      <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
-                      <input id="voice-search" type="search" placeholder="筛选音色名称…" autocomplete="off" aria-label="搜索当前服务商音色">
-                    </label>
-                    <div class="select-wrap">
-                      <select id="voice-select" class="select-control" disabled><option>正在加载音色…</option></select>
-                      <svg class="icon select-chevron" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+                  <div class="collapse-group">
+                    <div class="voice-picker">
+                      <label class="search-control" for="voice-search">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                        <input id="voice-search" type="search" placeholder="筛选音色名称…" autocomplete="off" aria-label="搜索当前服务商音色">
+                      </label>
+                      <div class="select-wrap">
+                        <select id="voice-select" class="select-control" disabled><option>正在加载音色…</option></select>
+                        <svg class="icon select-chevron" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+                      </div>
+                      <button class="btn btn-secondary voice-preview-btn" id="preview-button" type="button" disabled title="快速试听当前选中音色">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+                        <span class="btn-label">试听</span>
+                      </button>
                     </div>
-                    <button class="btn btn-secondary voice-preview-btn" id="preview-button" type="button" disabled title="快速试听当前选中音色">
-                      <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
-                      <span class="btn-label">试听</span>
-                    </button>
-                  </div>
 
-                  <div class="studio-player studio-player-compact" data-player-for="preview-player" hidden>
-                    <audio class="audio-native" id="preview-player" preload="metadata" hidden></audio>
-                    <button class="player-play-btn" type="button" aria-label="播放试听音频">
-                      <svg class="icon icon-play-state" aria-hidden="true"><use href="#icon-play"/></svg>
-                      <svg class="icon icon-pause-state" aria-hidden="true"><use href="#icon-pause"/></svg>
-                    </button>
-                    <div class="player-main">
-                      <div class="player-top">
-                        <span class="player-title" data-player-title>音色快速试听</span>
-                        <span class="player-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-                        <span class="player-time"><span data-player-current>0:00</span> / <span data-player-duration>0:00</span></span>
-                      </div>
-                      <div class="player-track-wrap">
-                        <input class="player-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="试听播放进度">
-                        <div class="player-track-fill" data-player-fill></div>
+                    <div class="collapse-shell" data-collapse-for="preview-player" aria-hidden="true" inert>
+                      <div class="collapse-inner">
+                        <div class="studio-player studio-player-compact" data-player-for="preview-player">
+                          <audio class="audio-native" id="preview-player" preload="metadata" hidden></audio>
+                          <button class="player-play-btn" type="button" aria-label="播放试听音频">
+                            <svg class="icon icon-play-state" aria-hidden="true"><use href="#icon-play"/></svg>
+                            <svg class="icon icon-pause-state" aria-hidden="true"><use href="#icon-pause"/></svg>
+                          </button>
+                          <div class="player-main">
+                            <div class="player-top">
+                              <span class="player-title" data-player-title>音色快速试听</span>
+                              <span class="player-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                              <span class="player-time"><span data-player-current>0:00</span> / <span data-player-duration>0:00</span></span>
+                            </div>
+                            <div class="player-track-wrap">
+                              <input class="player-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="试听播放进度">
+                              <div class="player-track-fill" data-player-fill></div>
+                            </div>
+                          </div>
+                          <a class="player-download-btn" data-player-download download="voice-preview.mp3" title="下载试听音频" aria-label="下载试听音频">
+                            <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                          </a>
+                        </div>
                       </div>
                     </div>
-                    <a class="player-download-btn" data-player-download download="voice-preview.mp3" title="下载试听音频" aria-label="下载试听音频">
-                      <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
-                    </a>
                   </div>
                 </div>
 
@@ -372,58 +378,80 @@
                   </div>
                   <div class="custom-voice-list" id="custom-voice-list"></div>
                   <p class="custom-voice-empty" id="custom-voice-empty">还没有保存自定义音色，可在上方添加。</p>
-                  <div class="inline-feedback" id="custom-voice-feedback" role="status" aria-live="polite" hidden></div>
+                  <div class="collapse-shell collapse-feedback collapse-tight" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="inline-feedback" id="custom-voice-feedback" role="status" aria-live="polite"></div>
+                    </div>
+                  </div>
                 </section>
 
-                <div class="fallback-field" id="fallback-card">
-                  <div class="fallback-heading">
-                    <div class="fallback-copy">
-                      <span class="fallback-icon" aria-hidden="true"><svg class="icon"><use href="#icon-shield"/></svg></span>
-                      <div>
-                        <label for="fallback-enabled">智能故障转移</label>
-                        <p>主服务超时或失败时，自动平滑回退到 Edge 备用音色</p>
+                <div class="collapse-group">
+                  <div class="fallback-field" id="fallback-card">
+                    <div class="fallback-heading">
+                      <div class="fallback-copy">
+                        <span class="fallback-icon" aria-hidden="true"><svg class="icon"><use href="#icon-shield"/></svg></span>
+                        <div>
+                          <label for="fallback-enabled">智能故障转移</label>
+                          <p>主服务超时或失败时，自动平滑回退到 Edge 备用音色</p>
+                        </div>
+                      </div>
+                      <label class="toggle-switch" for="fallback-enabled">
+                        <input class="toggle-input" id="fallback-enabled" data-config-field="fallback_enabled" type="checkbox" role="switch" checked>
+                        <span class="toggle-slider"></span>
+                        <span class="sr-only">启用智能故障转移</span>
+                      </label>
+                    </div>
+
+                    <div class="fallback-layout" id="fallback-fields">
+                      <div class="fallback-primary-row">
+                        <div class="select-wrap">
+                          <select id="fallback-voice" data-config-field="fallback_voice" class="select-control" aria-label="Edge 备用音色">
+                            <option value="zh-CN-XiaoxiaoNeural">Edge · 晓晓（备用）</option>
+                          </select>
+                          <svg class="icon select-chevron" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+                        </div>
+                        <button class="btn btn-ghost btn-sm fallback-advanced-toggle" id="fallback-advanced-btn" type="button" aria-expanded="false" aria-controls="fallback-advanced-panel">
+                          <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+                          <span>重试参数</span>
+                          <svg class="icon toggle-caret" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+                        </button>
+                      </div>
+
+                      <div class="collapse-shell" data-collapse-for="fallback-advanced-panel" aria-hidden="true" inert>
+                        <div class="collapse-inner">
+                          <div class="fallback-advanced" id="fallback-advanced-panel">
+                            <div class="form-row">
+                              <div class="field">
+                                <label class="field-label" for="fallback-retry-count">失败重试次数 <span class="label-unit">0 – 3 次</span></label>
+                                <input id="fallback-retry-count" data-config-field="fallback_retry_count" type="number" min="0" max="3" step="1" inputmode="numeric" value="1" class="input-control">
+                              </div>
+                              <div class="field">
+                                <label class="field-label" for="fallback-retry-delay-ms">重试等待间隔 <span class="label-unit">0 – 5000 ms</span></label>
+                                <input id="fallback-retry-delay-ms" data-config-field="fallback_retry_delay_ms" type="number" min="0" max="5000" step="50" inputmode="numeric" value="500" class="input-control">
+                              </div>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                    <label class="toggle-switch" for="fallback-enabled">
-                      <input class="toggle-input" id="fallback-enabled" data-config-field="fallback_enabled" type="checkbox" role="switch" checked>
-                      <span class="toggle-slider"></span>
-                      <span class="sr-only">启用智能故障转移</span>
-                    </label>
                   </div>
 
-                  <div class="fallback-layout" id="fallback-fields">
-                    <div class="fallback-primary-row">
-                      <div class="select-wrap">
-                        <select id="fallback-voice" data-config-field="fallback_voice" class="select-control" aria-label="Edge 备用音色">
-                          <option value="zh-CN-XiaoxiaoNeural">Edge · 晓晓（备用）</option>
-                        </select>
-                        <svg class="icon select-chevron" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
-                      </div>
-                      <button class="btn btn-ghost btn-sm fallback-advanced-toggle" id="fallback-advanced-btn" type="button" aria-expanded="false" aria-controls="fallback-advanced-panel">
-                        <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
-                        <span>重试参数</span>
-                        <svg class="icon toggle-caret" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
-                      </button>
+                  <div class="collapse-shell collapse-feedback" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="inline-feedback" id="settings-feedback" role="status" aria-live="polite"></div>
                     </div>
-
-                    <div class="fallback-advanced" id="fallback-advanced-panel" hidden>
-                      <div class="form-row">
-                        <div class="field">
-                          <label class="field-label" for="fallback-retry-count">失败重试次数 <span class="label-unit">0 – 3 次</span></label>
-                          <input id="fallback-retry-count" data-config-field="fallback_retry_count" type="number" min="0" max="3" step="1" inputmode="numeric" value="1" class="input-control">
-                        </div>
-                        <div class="field">
-                          <label class="field-label" for="fallback-retry-delay-ms">重试等待间隔 <span class="label-unit">0 – 5000 ms</span></label>
-                          <input id="fallback-retry-delay-ms" data-config-field="fallback_retry_delay_ms" type="number" min="0" max="5000" step="50" inputmode="numeric" value="500" class="input-control">
-                        </div>
-                      </div>
+                  </div>
+                  <div class="collapse-shell collapse-feedback" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="inline-feedback" id="voice-feedback" role="status" aria-live="polite"></div>
+                    </div>
+                  </div>
+                  <div class="collapse-shell collapse-feedback" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="inline-feedback" id="fallback-feedback" role="status" aria-live="polite"></div>
                     </div>
                   </div>
                 </div>
-
-                <div class="inline-feedback" id="settings-feedback" role="status" aria-live="polite" hidden></div>
-                <div class="inline-feedback" id="voice-feedback" role="status" aria-live="polite" hidden></div>
-                <div class="inline-feedback" id="fallback-feedback" role="status" aria-live="polite" hidden></div>
               </form>
             </div>
 
@@ -524,35 +552,45 @@
                   </div>
                 </div>
 
-                <button class="btn btn-primary btn-generate" id="test-tts-button" type="button">
-                  <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
-                  <span class="btn-label">生成并播放</span>
-                  <kbd aria-hidden="true">Ctrl ↵</kbd>
-                </button>
-
-                <div class="studio-player" data-player-for="test-audio-player" hidden>
-                  <audio class="audio-native" id="test-audio-player" preload="metadata" hidden></audio>
-                  <button class="player-play-btn" type="button" aria-label="播放试听音频">
-                    <svg class="icon icon-play-state" aria-hidden="true"><use href="#icon-play"/></svg>
-                    <svg class="icon icon-pause-state" aria-hidden="true"><use href="#icon-pause"/></svg>
+                <div class="collapse-group">
+                  <button class="btn btn-primary btn-generate" id="test-tts-button" type="button">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+                    <span class="btn-label">生成并播放</span>
+                    <kbd aria-hidden="true">Ctrl ↵</kbd>
                   </button>
-                  <div class="player-main">
-                    <div class="player-top">
-                      <span class="player-title" data-player-title>试听音频</span>
-                      <span class="player-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-                      <span class="player-time"><span data-player-current>0:00</span> / <span data-player-duration>0:00</span></span>
-                    </div>
-                    <div class="player-track-wrap">
-                      <input class="player-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
-                      <div class="player-track-fill" data-player-fill></div>
+
+                  <div class="collapse-shell" data-collapse-for="test-audio-player" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="studio-player" data-player-for="test-audio-player">
+                        <audio class="audio-native" id="test-audio-player" preload="metadata" hidden></audio>
+                        <button class="player-play-btn" type="button" aria-label="播放试听音频">
+                          <svg class="icon icon-play-state" aria-hidden="true"><use href="#icon-play"/></svg>
+                          <svg class="icon icon-pause-state" aria-hidden="true"><use href="#icon-pause"/></svg>
+                        </button>
+                        <div class="player-main">
+                          <div class="player-top">
+                            <span class="player-title" data-player-title>试听音频</span>
+                            <span class="player-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                            <span class="player-time"><span data-player-current>0:00</span> / <span data-player-duration>0:00</span></span>
+                          </div>
+                          <div class="player-track-wrap">
+                            <input class="player-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+                            <div class="player-track-fill" data-player-fill></div>
+                          </div>
+                        </div>
+                        <a class="player-download-btn" data-player-download download="legado-tts-test.mp3" title="下载 MP3" aria-label="下载音频">
+                          <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                        </a>
+                      </div>
                     </div>
                   </div>
-                  <a class="player-download-btn" data-player-download download="legado-tts-test.mp3" title="下载 MP3" aria-label="下载音频">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
-                  </a>
-                </div>
 
-                <div class="inline-feedback" id="test-feedback" role="status" aria-live="polite" hidden></div>
+                  <div class="collapse-shell collapse-feedback" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="inline-feedback" id="test-feedback" role="status" aria-live="polite"></div>
+                    </div>
+                  </div>
+                </div>
 
                 <p class="studio-hint">
                   <span id="play-voice-label">使用当前草稿试听</span>
@@ -589,58 +627,70 @@
                   </div>
                 </div>
 
-                <button class="btn btn-primary btn-generate" id="compare-button" type="button" disabled>
-                  <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
-                  <span class="btn-label">同时生成对比音频</span>
-                </button>
+                <div class="collapse-group">
+                  <button class="btn btn-primary btn-generate" id="compare-button" type="button" disabled>
+                    <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+                    <span class="btn-label">同时生成对比音频</span>
+                  </button>
 
-                <div class="compare-audio-grid">
-                  <div class="studio-player studio-player-a" data-player-for="audio-a" hidden>
-                    <audio class="audio-native" id="audio-a" preload="metadata" hidden></audio>
-                    <button class="player-play-btn" type="button" aria-label="播放音色 A">
-                      <svg class="icon icon-play-state" aria-hidden="true"><use href="#icon-play"/></svg>
-                      <svg class="icon icon-pause-state" aria-hidden="true"><use href="#icon-pause"/></svg>
-                    </button>
-                    <div class="player-main">
-                      <div class="player-top">
-                        <span class="player-title" data-player-title>音色 A</span>
-                        <span class="player-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-                        <span class="player-time"><span data-player-current>0:00</span> / <span data-player-duration>0:00</span></span>
-                      </div>
-                      <div class="player-track-wrap">
-                        <input class="player-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="音色 A 播放进度">
-                        <div class="player-track-fill" data-player-fill></div>
+                  <div class="collapse-shell" data-collapse-for="audio-a" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="studio-player studio-player-a" data-player-for="audio-a">
+                        <audio class="audio-native" id="audio-a" preload="metadata" hidden></audio>
+                        <button class="player-play-btn" type="button" aria-label="播放音色 A">
+                          <svg class="icon icon-play-state" aria-hidden="true"><use href="#icon-play"/></svg>
+                          <svg class="icon icon-pause-state" aria-hidden="true"><use href="#icon-pause"/></svg>
+                        </button>
+                        <div class="player-main">
+                          <div class="player-top">
+                            <span class="player-title" data-player-title>音色 A</span>
+                            <span class="player-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                            <span class="player-time"><span data-player-current>0:00</span> / <span data-player-duration>0:00</span></span>
+                          </div>
+                          <div class="player-track-wrap">
+                            <input class="player-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="音色 A 播放进度">
+                            <div class="player-track-fill" data-player-fill></div>
+                          </div>
+                        </div>
+                        <a class="player-download-btn" data-player-download download="compare-a.mp3" title="下载音色 A" aria-label="下载音色 A">
+                          <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                        </a>
                       </div>
                     </div>
-                    <a class="player-download-btn" data-player-download download="compare-a.mp3" title="下载音色 A" aria-label="下载音色 A">
-                      <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
-                    </a>
                   </div>
 
-                  <div class="studio-player studio-player-b" data-player-for="audio-b" hidden>
-                    <audio class="audio-native" id="audio-b" preload="metadata" hidden></audio>
-                    <button class="player-play-btn" type="button" aria-label="播放音色 B">
-                      <svg class="icon icon-play-state" aria-hidden="true"><use href="#icon-play"/></svg>
-                      <svg class="icon icon-pause-state" aria-hidden="true"><use href="#icon-pause"/></svg>
-                    </button>
-                    <div class="player-main">
-                      <div class="player-top">
-                        <span class="player-title" data-player-title>音色 B</span>
-                        <span class="player-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-                        <span class="player-time"><span data-player-current>0:00</span> / <span data-player-duration>0:00</span></span>
-                      </div>
-                      <div class="player-track-wrap">
-                        <input class="player-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="音色 B 播放进度">
-                        <div class="player-track-fill" data-player-fill></div>
+                  <div class="collapse-shell collapse-stagger" data-collapse-for="audio-b" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="studio-player studio-player-b" data-player-for="audio-b">
+                        <audio class="audio-native" id="audio-b" preload="metadata" hidden></audio>
+                        <button class="player-play-btn" type="button" aria-label="播放音色 B">
+                          <svg class="icon icon-play-state" aria-hidden="true"><use href="#icon-play"/></svg>
+                          <svg class="icon icon-pause-state" aria-hidden="true"><use href="#icon-pause"/></svg>
+                        </button>
+                        <div class="player-main">
+                          <div class="player-top">
+                            <span class="player-title" data-player-title>音色 B</span>
+                            <span class="player-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                            <span class="player-time"><span data-player-current>0:00</span> / <span data-player-duration>0:00</span></span>
+                          </div>
+                          <div class="player-track-wrap">
+                            <input class="player-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="音色 B 播放进度">
+                            <div class="player-track-fill" data-player-fill></div>
+                          </div>
+                        </div>
+                        <a class="player-download-btn" data-player-download download="compare-b.mp3" title="下载音色 B" aria-label="下载音色 B">
+                          <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                        </a>
                       </div>
                     </div>
-                    <a class="player-download-btn" data-player-download download="compare-b.mp3" title="下载音色 B" aria-label="下载音色 B">
-                      <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
-                    </a>
+                  </div>
+
+                  <div class="collapse-shell collapse-feedback" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="inline-feedback" id="compare-feedback" role="status" aria-live="polite"></div>
+                    </div>
                   </div>
                 </div>
-
-                <div class="inline-feedback" id="compare-feedback" role="status" aria-live="polite" hidden></div>
               </div>
 
               <!-- Sub-tab 3: Live Logs -->
@@ -670,11 +720,17 @@
                   <p class="empty-state" id="activity-empty">等待新的合成请求…</p>
                 </div>
 
-                <div class="monitor-meta-row">
-                  <span id="monitor-updated-at" class="monitor-updated"></span>
-                  <span id="monitor-summary" hidden></span>
+                <div class="collapse-group">
+                  <div class="monitor-meta-row">
+                    <span id="monitor-updated-at" class="monitor-updated"></span>
+                    <span id="monitor-summary" hidden></span>
+                  </div>
+                  <div class="collapse-shell collapse-feedback" aria-hidden="true" inert>
+                    <div class="collapse-inner">
+                      <div class="inline-feedback" id="monitor-feedback" role="status" aria-live="polite"></div>
+                    </div>
+                  </div>
                 </div>
-                <div class="inline-feedback" id="monitor-feedback" role="status" aria-live="polite" hidden></div>
               </div>
             </div>
           </section>
@@ -743,8 +799,18 @@
               </div>
             </div>
 
-            <pre class="config-preview" id="legado-config" tabindex="0" aria-label="开源阅读配置" hidden>正在生成配置…</pre>
-            <div class="inline-feedback" id="integration-feedback" role="status" aria-live="polite" hidden></div>
+            <div class="integration-extras">
+              <div class="collapse-shell" data-collapse-for="legado-config" aria-hidden="true" inert>
+                <div class="collapse-inner">
+                  <pre class="config-preview" id="legado-config" tabindex="0" aria-label="开源阅读配置">正在生成配置…</pre>
+                </div>
+              </div>
+              <div class="collapse-shell collapse-feedback" aria-hidden="true" inert>
+                <div class="collapse-inner">
+                  <div class="inline-feedback" id="integration-feedback" role="status" aria-live="polite"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -832,7 +898,11 @@
           </section>
         </div>
 
-        <div class="inline-feedback" id="maintenance-feedback" role="status" aria-live="polite" hidden></div>
+        <div class="collapse-shell collapse-feedback" aria-hidden="true" inert>
+          <div class="collapse-inner">
+            <div class="inline-feedback" id="maintenance-feedback" role="status" aria-live="polite"></div>
+          </div>
+        </div>
       </div>
     </main>
 

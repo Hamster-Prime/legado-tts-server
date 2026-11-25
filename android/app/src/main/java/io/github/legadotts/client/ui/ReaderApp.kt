@@ -36,6 +36,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -89,6 +90,9 @@ internal object AppMotion {
 
 private enum class RootScreen { LOADING, ONBOARDING, MAIN }
 
+/** Subtle uniform UI scale so Miuix components feel crisp and well-proportioned on Pixel/standard displays. */
+private const val UI_DENSITY_SCALE = 0.88f
+
 private fun glyph(name: String, path: String, filled: Boolean = false): ImageVector =
     ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f).apply {
         addPath(
@@ -137,12 +141,19 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
 
     // Derived boolean so IME animation frames do not recompose the whole screen tree.
     val imeInsets = WindowInsets.ime
-    val density = LocalDensity.current
-    val keyboardVisible by remember(imeInsets, density) {
-        derivedStateOf { imeInsets.getBottom(density) > 0 }
+    val baseDensity = LocalDensity.current
+    val compactDensity = remember(baseDensity) {
+        Density(
+            density = baseDensity.density * UI_DENSITY_SCALE,
+            fontScale = baseDensity.fontScale,
+        )
+    }
+    val keyboardVisible by remember(imeInsets, compactDensity) {
+        derivedStateOf { imeInsets.getBottom(compactDensity) > 0 }
     }
 
-    MiuixTheme(colors = remember(dark) { if (dark) darkColorScheme() else lightColorScheme() }) {
+    CompositionLocalProvider(LocalDensity provides compactDensity) {
+        MiuixTheme(colors = remember(dark) { if (dark) darkColorScheme() else lightColorScheme() }) {
         val rootScreen = when {
             state.initializing -> RootScreen.LOADING
             !state.configured -> RootScreen.ONBOARDING
@@ -228,8 +239,8 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    AppMark(size = 56)
-                                    Spacer(Modifier.height(16.dp))
+                                    AppMark(size = 50)
+                                    Spacer(Modifier.height(14.dp))
                                     InfiniteProgressIndicator()
                                 }
                             }
@@ -309,6 +320,7 @@ fun ReaderApp(state: ReaderState, actions: ReaderActions) {
                     }
                 }
             }
+        }
         }
     }
 }
@@ -429,8 +441,8 @@ private fun MiniPlayerBar(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        shape = RoundedCornerShape(16.dp),
+            .padding(horizontal = 12.dp, vertical = 5.dp),
+        shape = RoundedCornerShape(14.dp),
         color = if (dark) colors.surfaceContainerHighest else colors.surfaceContainer,
         border = BorderStroke(0.5.dp, colors.dividerLine),
     ) {
@@ -439,23 +451,23 @@ private fun MiniPlayerBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(enabled = !playingPreview, onClick = onOpenReader)
-                    .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                    .padding(start = 11.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
                     Modifier
-                        .size(34.dp)
+                        .size(32.dp)
                         .clip(CircleShape)
                         .background(colors.primary.copy(alpha = 0.14f)),
                     contentAlignment = Alignment.Center,
                 ) {
                     when (transport) {
-                        Transport.BUFFERING -> InfiniteProgressIndicator(size = 18.dp, strokeWidth = 2.dp)
-                        Transport.PAUSED -> Icon(pauseIcon, null, Modifier.size(16.dp), tint = colors.primary)
-                        else -> Icon(soundWaveIcon, null, Modifier.size(18.dp), tint = colors.primary)
+                        Transport.BUFFERING -> InfiniteProgressIndicator(size = 16.dp, strokeWidth = 2.dp)
+                        Transport.PAUSED -> Icon(pauseIcon, null, Modifier.size(15.dp), tint = colors.primary)
+                        else -> Icon(soundWaveIcon, null, Modifier.size(16.dp), tint = colors.primary)
                     }
                 }
-                Spacer(Modifier.width(10.dp))
+                Spacer(Modifier.width(9.dp))
                 Column(Modifier.weight(1f)) {
                     val label = when (transport) {
                         Transport.BUFFERING -> if (playingPreview) "正在准备试听" else "正在合成"
@@ -480,21 +492,21 @@ private fun MiniPlayerBar(
                     val paused = transport == Transport.PAUSED
                     IconButton(
                         onClick = if (paused) actions::resume else actions::pause,
-                        minWidth = 40.dp, minHeight = 40.dp,
+                        minWidth = 38.dp, minHeight = 38.dp,
                     ) {
                         Icon(
                             if (paused) playIcon else pauseIcon,
                             contentDescription = if (paused) "继续朗读" else "暂停朗读",
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(17.dp),
                             tint = colors.primary,
                         )
                     }
                 }
-                IconButton(onClick = actions::stop, minWidth = 40.dp, minHeight = 40.dp) {
+                IconButton(onClick = actions::stop, minWidth = 38.dp, minHeight = 38.dp) {
                     Icon(
                         stopIcon,
                         contentDescription = "停止播放",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(15.dp),
                         tint = colors.onSurfaceVariantActions,
                     )
                 }
@@ -512,7 +524,7 @@ private fun MiniPlayerBar(
 }
 
 @Composable
-internal fun AppMark(size: Int = 52) {
+internal fun AppMark(size: Int = 48) {
     Box(
         modifier = Modifier
             .size(size.dp)

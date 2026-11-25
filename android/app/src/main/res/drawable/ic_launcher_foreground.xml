@@ -1,0 +1,23 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Symmetrical open book + soundwave motif centered at (54, 54) within the 66dp adaptive safe zone -->
+    <path
+        android:fillColor="#22FFFFFF"
+        android:pathData="M33,40Q44.5,38.5 54,44.8V67.8Q44.5,61.8 33,63Z" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.6"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:pathData="M33,40Q44.5,38.5 54,44.8V67.8Q44.5,61.8 33,63ZM54,44.8Q63.5,38.5 75,40V63Q63.5,61.8 54,67.8" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:pathData="M61.4,49.0V56.0M67.6,46.5V56.5" />
+</vector>

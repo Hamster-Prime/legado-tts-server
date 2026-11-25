@@ -2,6 +2,8 @@ package io.github.legadotts.client.ui
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
@@ -120,12 +122,12 @@ private fun OnboardingConnectionView(
             .navigationBarsPadding()
             .overScrollVertical()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(horizontal = 16.dp, vertical = 22.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Spacer(Modifier.height(8.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            AppMark(size = 56)
+        Spacer(Modifier.height(6.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppMark(size = 50)
             Text("连接你的服务端", style = MiuixTheme.textStyles.title1, fontWeight = FontWeight.Bold)
             Caption("输入手机可访问的 Legado TTS 服务地址，验证通过后即可浏览音色、朗读文章或设为系统语音引擎。")
         }
@@ -190,8 +192,8 @@ private fun ConfiguredSettingsView(
                 .nestedScroll(scrollBehavior.nestedScrollConnection)
                 .overScrollVertical()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             SmallTitle(
                 text = "服务连接",
@@ -204,7 +206,7 @@ private fun ConfiguredSettingsView(
                 label = "connection-mode-swap",
             ) { isEditing ->
                 if (!isEditing) {
-                    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
+                    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(14.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -244,7 +246,7 @@ private fun ConfiguredSettingsView(
                             }
                         }
 
-                        Spacer(Modifier.height(14.dp))
+                        Spacer(Modifier.height(12.dp))
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -252,14 +254,14 @@ private fun ConfiguredSettingsView(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(38.dp)
+                                    .size(34.dp)
                                     .clip(CircleShape)
                                     .background(colors.primary.copy(alpha = 0.12f)),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Icon(serverIcon, null, Modifier.size(19.dp), tint = colors.primary)
+                                Icon(serverIcon, null, Modifier.size(17.dp), tint = colors.primary)
                             }
-                            Spacer(Modifier.width(12.dp))
+                            Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     text = address,
@@ -283,9 +285,9 @@ private fun ConfiguredSettingsView(
                             modifier = Modifier.padding(top = if (connectionError.isNotBlank()) 12.dp else 0.dp),
                         )
 
-                        Spacer(Modifier.height(14.dp))
-                        HorizontalDivider()
                         Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(10.dp))
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -295,7 +297,7 @@ private fun ConfiguredSettingsView(
                             Button(
                                 onClick = actions::refresh,
                                 enabled = !busy,
-                                modifier = Modifier.weight(1f).heightIn(min = 44.dp),
+                                modifier = Modifier.weight(1f).heightIn(min = 42.dp),
                                 cornerRadius = 12.dp,
                                 colors = if (isError) ButtonDefaults.buttonColorsPrimary() else ButtonDefaults.buttonColors(),
                             ) {
@@ -321,7 +323,7 @@ private fun ConfiguredSettingsView(
                             Button(
                                 onClick = onStartEdit,
                                 enabled = !busy,
-                                modifier = Modifier.weight(1f).heightIn(min = 44.dp),
+                                modifier = Modifier.weight(1f).heightIn(min = 42.dp),
                                 cornerRadius = 12.dp,
                             ) {
                                 Text(
@@ -373,7 +375,7 @@ private fun ConfiguredSettingsView(
                         }
                     },
                 )
-                HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                HorizontalDivider(Modifier.padding(horizontal = 14.dp))
                 BasicComponent(
                     title = "系统引擎默认音色",
                     summary = activeVoice?.let {
@@ -395,9 +397,21 @@ private fun ConfiguredSettingsView(
                 insideMargin = PaddingValues(start = 6.dp, top = 10.dp, bottom = 4.dp),
             )
             Card(Modifier.fillMaxWidth()) {
+                val appVersion = remember(context) {
+                    runCatching {
+                        val pm = context.packageManager
+                        val info = if (Build.VERSION.SDK_INT >= 33) {
+                            pm.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+                        } else {
+                            @Suppress("DEPRECATION")
+                            pm.getPackageInfo(context.packageName, 0)
+                        }
+                        info.versionName.orEmpty().ifBlank { "1.2" }
+                    }.getOrDefault("1.2")
+                }
                 BasicComponent(
                     title = "声读 · Legado TTS",
-                    summary = "版本 1.0 · 设置与密钥仅使用本机 Keystore 加密保存，不上传任何第三方",
+                    summary = "版本 $appVersion · 设置与密钥仅使用本机 Keystore 加密保存，不上传任何第三方",
                 )
             }
             Spacer(Modifier.height(16.dp))
@@ -423,7 +437,7 @@ private fun ConnectionFormCard(
     val focus = LocalFocusManager.current
     val colors = MiuixTheme.colorScheme
 
-    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
+    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(14.dp)) {
         // No saved-instance-state or Compose saveable state for either field; an
         // accidentally pasted URL with credentials must not enter the system Bundle.
         CompositionLocalProvider(LocalSaveableStateRegistry provides null) {
@@ -442,7 +456,7 @@ private fun ConnectionFormCard(
             Spacer(Modifier.height(6.dp))
             Caption("填写服务根地址（可含反代路径）。携带访问密钥时必须使用 HTTPS；局域网无密钥可使用 HTTP。")
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(14.dp))
             Text("访问密钥", style = MiuixTheme.textStyles.body2, fontWeight = FontWeight.Medium)
             Spacer(Modifier.height(6.dp))
             AnimatedContent(
@@ -499,7 +513,7 @@ private fun ConnectionFormCard(
             Caption("密钥仅通过系统 Keystore 加密留在本机，更换地址后需重新输入。")
         }
 
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(16.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -511,8 +525,8 @@ private fun ConnectionFormCard(
                         onCancel()
                     },
                     enabled = !connecting,
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    cornerRadius = 14.dp,
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp),
+                    cornerRadius = 12.dp,
                 ) {
                     Text("取消", style = MiuixTheme.textStyles.button)
                 }
@@ -530,8 +544,8 @@ private fun ConnectionFormCard(
                     onSubmit(address.trim(), submittedKey)
                 },
                 enabled = submitEnabled,
-                modifier = Modifier.weight(if (onCancel != null) 1.4f else 1f).heightIn(min = 48.dp),
-                cornerRadius = 14.dp,
+                modifier = Modifier.weight(if (onCancel != null) 1.4f else 1f).heightIn(min = 44.dp),
+                cornerRadius = 12.dp,
                 colors = ButtonDefaults.buttonColorsPrimary(),
             ) {
                 if (connecting) {

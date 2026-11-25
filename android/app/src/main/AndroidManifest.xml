@@ -10,7 +10,8 @@
     </queries>
     <application
         android:label="@string/app_name"
-        android:icon="@drawable/ic_reader"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/ReaderWindow"
         android:allowBackup="false"
         android:fullBackupContent="false"

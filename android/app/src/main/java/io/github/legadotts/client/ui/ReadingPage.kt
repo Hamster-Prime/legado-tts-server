@@ -96,8 +96,8 @@ internal fun ReadingPage(
                 .nestedScroll(scrollBehavior.nestedScrollConnection)
                 .overScrollVertical()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             TextEditorCard(
                 text = text,
@@ -109,7 +109,7 @@ internal fun ReadingPage(
             // Card 2: Voice selector + isolated SpeedControlSection (dragging slider won't recompose editor!)
             Card(Modifier.fillMaxWidth()) {
                 VoiceSelectorRow(voice = activeVoice, dark = dark, onClick = openCatalog)
-                HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                HorizontalDivider(Modifier.padding(horizontal = 14.dp))
                 SpeedControlSection(
                     savedSpeed = speed,
                     enabled = !connecting,
@@ -137,7 +137,7 @@ internal fun ReadingPage(
                 "长文本自动分段预取并无缝衔接，支持切至后台或锁屏继续收听。",
                 Modifier.padding(horizontal = 6.dp),
             )
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
         }
     }
 }
@@ -150,7 +150,7 @@ private fun TextEditorCard(
     showMessage: (String) -> Unit,
 ) {
     val context = LocalContext.current
-    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
+    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(14.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -192,7 +192,7 @@ private fun TextEditorCard(
                 }
             }
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         // The editor is owned by the host; never put book-length text in a Bundle.
         CompositionLocalProvider(LocalSaveableStateRegistry provides null) {
             TextField(
@@ -201,8 +201,8 @@ private fun TextEditorCard(
                 modifier = Modifier.fillMaxWidth(),
                 label = "在这里输入或粘贴要朗读的文章或段落…",
                 useLabelAsPlaceholder = true,
-                minLines = 5,
-                maxLines = 9,
+                minLines = 4,
+                maxLines = 8,
             )
         }
     }
@@ -223,8 +223,8 @@ private fun VoiceSelectorRow(voice: VoiceItem?, dark: Boolean, onClick: () -> Un
         startAction = {
             Box(
                 modifier = Modifier
-                    .padding(end = 12.dp)
-                    .size(40.dp)
+                    .padding(end = 10.dp)
+                    .size(36.dp)
                     .clip(CircleShape)
                     .background(accent.copy(alpha = 0.14f)),
                 contentAlignment = Alignment.Center,
@@ -232,12 +232,12 @@ private fun VoiceSelectorRow(voice: VoiceItem?, dark: Boolean, onClick: () -> Un
                 if (voice != null) {
                     Text(
                         text = voice.displayName.take(1),
-                        style = MiuixTheme.textStyles.subtitle,
+                        style = MiuixTheme.textStyles.body1,
                         fontWeight = FontWeight.SemiBold,
                         color = accent,
                     )
                 } else {
-                    Icon(soundWaveIcon, null, Modifier.size(20.dp), tint = accent)
+                    Icon(soundWaveIcon, null, Modifier.size(18.dp), tint = accent)
                 }
             }
         },
@@ -267,7 +267,7 @@ private fun SpeedControlSection(
 ) {
     val colors = MiuixTheme.colorScheme
     var sliderSpeed by remember(savedSpeed) { mutableFloatStateOf(savedSpeed.coerceIn(0.5f, 2f)) }
-    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+    Column(Modifier.fillMaxWidth().padding(14.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -288,7 +288,7 @@ private fun SpeedControlSection(
                 )
             }
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(8.dp))
         Slider(
             value = sliderSpeed,
             onValueChange = { sliderSpeed = (it * 10f).roundToInt() / 10f },
@@ -298,7 +298,7 @@ private fun SpeedControlSection(
             onValueChangeFinished = { onCommitSpeed(sliderSpeed) },
             modifier = Modifier.fillMaxWidth().semantics { contentDescription = "朗读语速" },
         )
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -324,7 +324,7 @@ private fun SpeedControlSection(
                             sliderSpeed = preset
                             onCommitSpeed(preset)
                         }
-                        .padding(vertical = 7.dp),
+                        .padding(vertical = 6.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
@@ -369,12 +369,12 @@ private fun PlaybackControlSection(
                     focus.clearFocus()
                     actions.play()
                 },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 enabled = canPlay,
-                cornerRadius = 16.dp,
+                cornerRadius = 14.dp,
                 colors = ButtonDefaults.buttonColorsPrimary(),
             ) {
-                Icon(playIcon, null, Modifier.size(18.dp), tint = btnContent)
+                Icon(playIcon, null, Modifier.size(17.dp), tint = btnContent)
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = "开始朗读",
@@ -388,7 +388,7 @@ private fun PlaybackControlSection(
                 animationSpec = tween(260, easing = FastOutSlowInEasing),
                 label = "reading-progress",
             )
-            Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
+            Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(14.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -430,18 +430,18 @@ private fun PlaybackControlSection(
                     }
                 }
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(10.dp))
                 LinearProgressIndicator(
                     progress = if (transport == Transport.BUFFERING) null else smoothProgress,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(12.dp))
 
                 if (transport == Transport.BUFFERING) {
                     Button(
                         onClick = actions::stop,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                        cornerRadius = 14.dp,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                        cornerRadius = 12.dp,
                     ) {
                         Icon(stopIcon, null, Modifier.size(16.dp), tint = colors.onSurface)
                         Spacer(Modifier.width(8.dp))
@@ -455,8 +455,8 @@ private fun PlaybackControlSection(
                     ) {
                         Button(
                             onClick = if (paused) actions::resume else actions::pause,
-                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                            cornerRadius = 14.dp,
+                            modifier = Modifier.weight(1f).heightIn(min = 44.dp),
+                            cornerRadius = 12.dp,
                             colors = ButtonDefaults.buttonColorsPrimary(),
                         ) {
                             Icon(
@@ -474,8 +474,8 @@ private fun PlaybackControlSection(
                         }
                         Button(
                             onClick = actions::stop,
-                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                            cornerRadius = 14.dp,
+                            modifier = Modifier.weight(1f).heightIn(min = 44.dp),
+                            cornerRadius = 12.dp,
                         ) {
                             Icon(stopIcon, null, Modifier.size(15.dp), tint = colors.onSurface)
                             Spacer(Modifier.width(8.dp))

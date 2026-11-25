@@ -122,6 +122,8 @@
         modalAudio: null,
         modalAudioUrl: '',
         modalPreviewId: 0,
+        modalPreviewButton: null,
+        modalPreviewVoiceId: '',
         previewRequestId: 0,
         testRequestId: 0,
         compareRequestId: 0,
@@ -352,12 +354,68 @@
         });
     }
 
+    function getCollapseShell(target) {
+        if (!target) return null;
+        if (target.classList && target.classList.contains('collapse-shell')) return target;
+        return typeof target.closest === 'function' ? target.closest('.collapse-shell') : null;
+    }
+
+    function isCollapseOpen(target) {
+        const shell = getCollapseShell(target);
+        if (shell) return shell.classList.contains('is-open');
+        return Boolean(target && !target.hidden);
+    }
+
+    function setCollapseOpen(target, open) {
+        if (!target) return;
+        const shell = getCollapseShell(target);
+        if (!shell) {
+            target.hidden = !open;
+            return;
+        }
+        if (open) {
+            target.hidden = false;
+            shell.removeAttribute('inert');
+            shell.setAttribute('aria-hidden', 'false');
+            if (!shell.classList.contains('is-open')) {
+                void shell.offsetHeight;
+                shell.classList.add('is-open');
+            }
+        } else {
+            shell.classList.remove('is-open');
+            shell.setAttribute('aria-hidden', 'true');
+            shell.setAttribute('inert', '');
+        }
+    }
+
     function setFeedback(idOrElement, message = '', type = 'info') {
         const element = typeof idOrElement === 'string' ? $(idOrElement) : idOrElement;
         if (!element) return;
-        element.className = `inline-feedback${message ? ` is-${type}` : ''}`;
-        element.textContent = message;
-        element.hidden = !message;
+        if (element._collapseClearTimer) {
+            window.clearTimeout(element._collapseClearTimer);
+            element._collapseClearTimer = null;
+        }
+        const shell = getCollapseShell(element);
+        if (!shell) {
+            element.className = `inline-feedback${message ? ` is-${type}` : ''}`;
+            element.textContent = message;
+            element.hidden = !message;
+            return;
+        }
+        if (message) {
+            element.className = `inline-feedback is-${type}`;
+            element.textContent = message;
+            setCollapseOpen(shell, true);
+        } else {
+            setCollapseOpen(shell, false);
+            element._collapseClearTimer = window.setTimeout(() => {
+                element._collapseClearTimer = null;
+                if (!shell.classList.contains('is-open')) {
+                    element.textContent = '';
+                    element.className = 'inline-feedback';
+                }
+            }, 300);
+        }
     }
 
     function setButtonBusy(button, busy, busyText) {
@@ -391,6 +449,10 @@
             const downloadLink = container.querySelector('[data-player-download]');
             if (downloadLink) downloadLink.href = url;
             syncPlayerUI(container, element);
+            setCollapseOpen(container, true);
+            container.classList.remove('is-fresh');
+            void container.offsetWidth;
+            container.classList.add('is-fresh');
         }
     }
 
@@ -404,8 +466,10 @@
         element.hidden = true;
         const container = typeof element.closest === 'function' ? element.closest('.studio-player') : null;
         if (container) {
-            container.classList.remove('is-playing');
-            container.hidden = true;
+            container.classList.remove('is-playing', 'is-fresh');
+            const shell = getCollapseShell(container);
+            if (shell) setCollapseOpen(shell, false);
+            else container.hidden = true;
             const fill = container.querySelector('[data-player-fill]');
             const seek = container.querySelector('.player-seek');
             const currentEl = container.querySelector('[data-player-current]');
@@ -1746,7 +1810,10 @@
             if (requestId !== state.testRequestId) return;
             setFeedback('test-feedback', `生成失败：${error.message}`, 'error');
         } finally {
-            if (requestId === state.testRequestId) setButtonBusy(button, false);
+            if (requestId === state.testRequestId) {
+                setButtonBusy(button, false);
+                button.disabled = state.voiceLoading || !hasUsableCurrentVoice();
+            }
         }
     }
 
@@ -1777,7 +1844,10 @@
             if (requestId !== state.compareRequestId) return;
             setFeedback('compare-feedback', `对比失败：${error.message}`, 'error');
         } finally {
-            if (requestId === state.compareRequestId) setButtonBusy(button, false);
+            if (requestId === state.compareRequestId) {
+                setButtonBusy(button, false);
+                button.disabled = !(state.voiceCatalogs[state.provider] || []).length;
+            }
         }
     }
 
@@ -2218,14 +2288,32 @@
         }
     }
 
+    function setLibraryPreviewButtonPlaying(button, playing) {
+        if (!button) return;
+        button.classList.toggle('is-previewing', playing);
+        const card = typeof button.closest === 'function' ? button.closest('.voice-card') : null;
+        if (card) card.classList.toggle('is-previewing', playing);
+        const use = button.querySelector('use');
+        if (use) use.setAttribute('href', playing ? '#icon-pause' : '#icon-play');
+        const label = button.querySelector('.btn-label');
+        if (label) label.textContent = playing ? '停止' : '试听';
+    }
+
     function clearModalAudio() {
-        if (state.modalAudio) {
-            state.modalAudio.pause();
-            state.modalAudio.removeAttribute('src');
+        if (state.modalPreviewButton) {
+            setLibraryPreviewButtonPlaying(state.modalPreviewButton, false);
+            state.modalPreviewButton = null;
         }
-        if (state.modalAudioUrl) URL.revokeObjectURL(state.modalAudioUrl);
+        state.modalPreviewVoiceId = '';
+        const audio = state.modalAudio;
+        const url = state.modalAudioUrl;
         state.modalAudio = null;
         state.modalAudioUrl = '';
+        if (audio) {
+            audio.pause();
+            audio.removeAttribute('src');
+        }
+        if (url) URL.revokeObjectURL(url);
     }
 
     function stopModalAudio() {
@@ -2246,25 +2334,40 @@
     }
 
     async function previewLibraryVoice(voice, button) {
+        if (state.modalAudio && state.modalPreviewVoiceId === voice.id) {
+            stopModalAudio();
+            return;
+        }
         const requestId = ++state.modalPreviewId;
+        clearModalAudio();
         setButtonBusy(button, true, '加载');
         try {
-            clearModalAudio();
             const result = await synthesize('你好，我是这个音色的朗读效果。', voice.id);
             if (requestId !== state.modalPreviewId || !$('voice-dialog').open) return;
             const url = URL.createObjectURL(result.blob);
             const audio = new Audio(url);
             state.modalAudio = audio;
             state.modalAudioUrl = url;
+            state.modalPreviewButton = button;
+            state.modalPreviewVoiceId = voice.id;
+            audio.addEventListener('ended', () => {
+                if (state.modalAudio === audio) clearModalAudio();
+            });
+            audio.addEventListener('pause', () => {
+                if (state.modalAudio === audio && !audio.ended) clearModalAudio();
+            });
             pauseOtherAudio(audio);
+            setButtonBusy(button, false);
+            setLibraryPreviewButtonPlaying(button, true);
             await audio.play();
             const fallback = result.response.headers.get('X-TTS-Fallback') === 'true';
             if (fallback) notify('试听已回退到 Edge，当前服务商可能未配置成功', 'warning', 5000);
         } catch (error) {
+            if (state.modalPreviewButton === button) clearModalAudio();
             if (requestId !== state.modalPreviewId || !$('voice-dialog').open) return;
             notify(`试听失败：${error.message}`, 'error');
         } finally {
-            setButtonBusy(button, false);
+            if (button.hasAttribute('aria-busy')) setButtonBusy(button, false);
         }
     }
 
@@ -2294,7 +2397,7 @@
             const actions = document.createElement('span');
             actions.className = 'voice-card-actions';
             const preview = document.createElement('button');
-            preview.className = 'btn btn-secondary btn-sm';
+            preview.className = 'btn btn-secondary btn-sm voice-card-preview';
             preview.type = 'button';
             preview.appendChild(createSvgIcon('icon-play'));
             const previewLabel = document.createElement('span');
@@ -2303,11 +2406,15 @@
             preview.appendChild(previewLabel);
             preview.addEventListener('click', () => previewLibraryVoice(voice, preview));
             const use = document.createElement('button');
-            use.className = 'btn btn-primary btn-sm';
+            use.className = 'btn btn-primary btn-sm voice-card-use';
             use.type = 'button';
             use.textContent = voice.id === currentVoiceId() ? '已选择' : '使用';
             use.disabled = voice.id === currentVoiceId();
             use.addEventListener('click', () => chooseVoiceFromLibrary(voice.id));
+            if (state.modalAudio && state.modalPreviewVoiceId === voice.id) {
+                state.modalPreviewButton = preview;
+                setLibraryPreviewButtonPlaying(preview, true);
+            }
             actions.append(preview, use);
             card.append(copy, actions);
             library.appendChild(card);
@@ -2372,10 +2479,10 @@
             $('toggle-json-btn').addEventListener('click', () => {
                 const pre = $('legado-config');
                 if (pre) {
-                    const isHidden = pre.hidden;
-                    pre.hidden = !isHidden;
-                    $('toggle-json-btn').textContent = isHidden ? '收起 JSON' : '查看 JSON';
-                    $('toggle-json-btn').setAttribute('aria-expanded', String(isHidden));
+                    const willOpen = !isCollapseOpen(pre);
+                    setCollapseOpen(pre, willOpen);
+                    $('toggle-json-btn').textContent = willOpen ? '收起 JSON' : '查看 JSON';
+                    $('toggle-json-btn').setAttribute('aria-expanded', String(willOpen));
                 }
             });
         }
@@ -2478,8 +2585,8 @@
         if ($('fallback-advanced-btn') && $('fallback-advanced-panel')) {
             $('fallback-advanced-btn').addEventListener('click', () => {
                 const panel = $('fallback-advanced-panel');
-                const willOpen = panel.hidden;
-                panel.hidden = !willOpen;
+                const willOpen = !isCollapseOpen(panel);
+                setCollapseOpen(panel, willOpen);
                 $('fallback-advanced-btn').setAttribute('aria-expanded', String(willOpen));
             });
         }

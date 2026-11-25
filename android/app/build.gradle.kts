@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.legadotts.client"
         minSdk = 28
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
         testInstrumentationRunner = "io.github.legadotts.client.ContractRunner"
     }
     signingConfigs {
@@ -35,9 +35,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            val requireReleaseSigning = project.findProperty("requireReleaseSigning")?.toString()?.toBoolean() == true
+            val releaseSigning = signingConfigs.findByName("release")
+            check(!requireReleaseSigning || releaseSigning != null) {
+                "Release signing keystore is required (RELEASE_STORE_FILE / RELEASE_* env vars missing)."
+            }
             // Use custom release keystore when provided, otherwise fall back to debug signing so
-            // the optimized release APK remains directly installable out of the box.
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            // local developer builds remain directly installable out of the box.
+            signingConfig = releaseSigning ?: signingConfigs.getByName("debug")
         }
     }
     buildFeatures { compose = true }

@@ -19,3 +19,4 @@ venv/
 .DS_Store
 .bitfun/
 /.bitfun/search/flashgrep-index/
+*.apk

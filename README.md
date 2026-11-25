@@ -13,6 +13,10 @@
 
 ---
 
+## Android 客户端
+
+[声读 · Legado TTS](android/README.md) 可直接连接本服务，按服务商浏览、试听和收藏音色，分段朗读长文本；也可作为系统文字转语音引擎使用。支持 Android 9 及以上。参见[安装、构建与真机测试](android/README.md)、[交付报告](docs/ANDROID_DELIVERY.md)。
+
 ## 特性
 
 **核心能力**

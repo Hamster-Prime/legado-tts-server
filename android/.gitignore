@@ -1,0 +1,9 @@
+.gradle/
+.kotlin/
+.build-env/
+.verify/
+build/
+local.properties
+*.iml
+*.jks
+*.keystore

@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">声读 · Legado TTS</string>
+    <style name="ReaderWindow" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#F7F7F7</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+</resources>

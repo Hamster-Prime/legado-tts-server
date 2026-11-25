@@ -1,0 +1,12 @@
+Third-party software notices
+
+The application includes libraries under Apache License 2.0 and MIT. Full
+license texts are in this directory. This file is a compact attribution index;
+the Gradle-resolved coordinates and versions are recorded in
+`docs/ANDROID_LICENSES.md`.
+
+MIUIX Compose (top.yukonga.miuix.kmp, 0.9.3): Apache License 2.0.
+MaterialKolor (com.materialkolor, 4.1.1): MIT License.
+AndroidX, Kotlin, Kotlin Coroutines, Kotlin Serialization, JetBrains
+Annotations, JSpecify, Poko annotations, and Guava ListenableFuture:
+Apache License 2.0 (or the project’s equivalent Apache-2.0 SPDX expression).

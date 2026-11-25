@@ -35,6 +35,7 @@ except ImportError:
     fcntl = None
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from itertools import chain
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode, urlsplit
 
@@ -48,7 +49,7 @@ import edge_tts
 import gzip
 import functools
 
-__version__ = '1.9.0'
+__version__ = '1.9.1'
 
 def gzipped(f):
     """Decorator to gzip responses for clients that support it."""
@@ -1775,7 +1776,7 @@ def _record_fallback(success=False):
 DOUBAO_TTS_URL = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional'
 
 
-_DOUBAO_RETRYABLE_EXCEPTIONS = (
+_RETRYABLE_TRANSPORT_ERRORS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
     requests.exceptions.ChunkedEncodingError,
@@ -1904,44 +1905,44 @@ def stream_doubao(text, voice, speech_rate=0, section_id=None, config=None):
         suffix = f" logid={logid}" if logid else ''
         raise ProviderStreamError(
             f"火山引擎请求失败: {e}{suffix}",
-            retryable=isinstance(e, _DOUBAO_RETRYABLE_EXCEPTIONS),
+            retryable=isinstance(e, _RETRYABLE_TRANSPORT_ERRORS),
         ) from e
     finally:
         if resp is not None:
             resp.close()
 
 
-def synthesize_doubao(text, voice, speech_rate=0, config=None):
-    """Collect the streaming Volcengine response for non-streaming callers."""
-    config = load_config() if config is None else config
+def _provider_attempts(provider, config, operation):
+    """Retry a buffered operation, or just opening a stream, never its live body."""
     policy = _fallback_policy(config)
     attempts = policy['retry_count'] + 1
-    last_error = None
     for attempt in range(attempts):
         try:
-            # A buffered caller has not sent bytes to its client yet, so a
-            # failed attempt can safely be synthesized from the beginning.
-            section_id = str(uuid.uuid4())
-            audio = b''.join(stream_doubao(
-                text, voice, speech_rate=speech_rate, section_id=section_id,
-                config=config,
-            ))
-            return audio, None
+            return operation()
         except ProviderStreamError as e:
-            last_error = e
             if (not e.retryable) or attempt >= attempts - 1:
-                break
-            _record_provider_retry('doubao')
+                raise
+            _record_provider_retry(provider)
             log.warning(
-                "Retrying buffered Doubao synthesis: attempt=%d/%d status=%s code=%s error=%s",
-                attempt + 2, attempts, e.status_code, e.provider_code, e,
+                "Retrying %s synthesis: attempt=%d/%d status=%s code=%s error=%s",
+                provider, attempt + 2, attempts, e.status_code, e.provider_code, e,
             )
             sleep_seconds = _retry_wait_seconds(
                 policy['retry_delay_ms'], attempt + 1,
                 retry_after=e.retry_after)
             if sleep_seconds:
                 time.sleep(sleep_seconds)
-    return None, str(last_error) if last_error else '火山引擎返回空音频'
+
+
+def synthesize_doubao(text, voice, speech_rate=0, config=None):
+    """Collect the streaming Volcengine response for non-streaming callers."""
+    config = load_config() if config is None else config
+    try:
+        return _provider_attempts('doubao', config, lambda: b''.join(stream_doubao(
+            text, voice, speech_rate=speech_rate, section_id=str(uuid.uuid4()),
+            config=config))), None
+    except ProviderStreamError as e:
+        return None, str(e)
 
 
 def _tencent_sign(secret_key, date, service, string_to_sign):
@@ -2080,6 +2081,7 @@ def _edge_stream_iter(text, voice, rate='+0%', style=None, volume='+0%', pitch='
     into a list first, so nothing was sent until synthesis had fully finished.
     """
     loop = asyncio.new_event_loop()
+    agen = None
     try:
         comm = _edge_communicate(text, voice, rate, style, volume, pitch)
         agen = comm.stream()
@@ -2093,27 +2095,29 @@ def _edge_stream_iter(text, voice, rate='+0%', style=None, volume='+0%', pitch='
                 yield chunk['data']
     finally:
         try:
+            if agen is not None:
+                loop.run_until_complete(agen.aclose())
             loop.run_until_complete(loop.shutdown_asyncgens())
-        except Exception:
-            pass
-        loop.close()
+        finally:
+            loop.close()
 
 
-def synthesize_fishaudio(text, voice, config=None):
+def stream_fishaudio(text, voice, config=None):
+    """The Fish /v1/tts response is a chunked binary MP3, not a JSON document."""
     config = load_config() if config is None else config
     api_key = config.get('fishaudio_api_key', '')
     if not api_key:
-        return None, "未配置Fish Audio API Key"
+        raise ProviderStreamError("未配置Fish Audio API Key")
     voice = LEGACY_FISH_AUDIO_VOICE_MAP.get(voice, voice)
     ref_id = None
     if voice == 'custom':
         raw_ref_id = config.get('fishaudio_reference_id', '')
         ref_id = raw_ref_id.strip() if isinstance(raw_ref_id, str) else ''
         if not ref_id:
-            return None, "自定义 Fish Audio 音色需要 Reference ID"
+            raise ProviderStreamError("自定义 Fish Audio 音色需要 Reference ID")
     elif voice != FISH_AUDIO_DEFAULT_VOICE:
         if not _is_valid_provider_voice('fishaudio', voice, config):
-            return None, f"不支持的 Fish Audio 音色: {voice}"
+            raise ProviderStreamError(f"不支持的 Fish Audio 音色: {voice}")
         ref_id = voice
     headers = {
         "Content-Type": "application/json",
@@ -2122,23 +2126,45 @@ def synthesize_fishaudio(text, voice, config=None):
     payload = {
         "text": text,
         "format": "mp3",
+        "latency": "balanced",
     }
     # The API selects its default voice only when reference_id is omitted.
     if ref_id:
         payload["reference_id"] = ref_id
-    def _do():
-        resp = _http_session.post(
-            "https://api.fish.audio/v1/tts",
-            headers=headers, json=payload, timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT))
-        if _is_retryable_http_status(resp.status_code):
-            raise requests.HTTPError(
-                f'Fish Audio HTTP {resp.status_code}', response=resp)
-        if resp.status_code != 200:
-            return None, f"Fish Audio API错误 ({resp.status_code}): {resp.text[:200]}"
-        return resp.content, None
     try:
-        return _retry(_do, provider='fishaudio', config=config)
-    except Exception as e:
+        with _http_session.post(
+            "https://api.fish.audio/v1/tts",
+            headers=headers, json=payload, stream=True,
+            timeout=(min(REQUEST_TIMEOUT, 10), REQUEST_TIMEOUT),
+        ) as resp:
+            if resp.status_code != 200:
+                detail = next(resp.iter_content(chunk_size=512), b'').decode('utf-8', 'replace')
+                raise ProviderStreamError(
+                    f"Fish Audio API错误 ({resp.status_code}): {detail[:200]}",
+                    status_code=resp.status_code,
+                    retryable=_is_retryable_http_status(resp.status_code),
+                    retry_after=_retry_after_seconds(resp))
+            content_type = resp.headers.get('Content-Type', '').lower()
+            if 'json' in content_type or content_type.startswith('text/'):
+                raise ProviderStreamError("Fish Audio 未返回 MP3 音频")
+            received_audio = False
+            for chunk in resp.iter_content(chunk_size=4096):
+                if chunk:
+                    received_audio = True
+                    yield chunk
+            if not received_audio:
+                raise ProviderStreamError("Fish Audio 返回空音频", retryable=True)
+    except requests.RequestException as e:
+        raise ProviderStreamError(f"Fish Audio 请求失败: {e}",
+                                  retryable=isinstance(e, _RETRYABLE_TRANSPORT_ERRORS)) from e
+
+
+def synthesize_fishaudio(text, voice, config=None):
+    config = load_config() if config is None else config
+    try:
+        return _provider_attempts('fishaudio', config, lambda: b''.join(
+            stream_fishaudio(text, voice, config=config))), None
+    except ProviderStreamError as e:
         return None, str(e)
 
 
@@ -2873,210 +2899,144 @@ def _dispatch_single(provider, text, voice, pct, style=None, volume='+0%',
     return audio, err
 
 
-def _iter_provider_stream(provider, text, voice, pct, style=None,
-                          volume='+0%', pitch='+0Hz', config=None):
-    """Yield provider audio while lazily processing long-text chunks."""
-    chunks = _split_text_chunks(text)
+def _use_streaming_mp3(provider, text):
+    # Even a buffered provider can deliver a long request segment by segment.
+    return provider in ('edge', 'doubao', 'fishaudio') or len(text) > CHUNK_SIZE
+
+
+def _iter_provider_stream(provider, text, voice, pct, style, volume, pitch, config):
+    """Yield MP3 in text order. Only the legacy JSON providers need a whole segment."""
+    if provider == 'edge':
+        # edge-tts already splits at its upstream message limit. Don't introduce
+        # a new WebSocket handshake every CHUNK_SIZE characters.
+        yield from _edge_stream_iter(
+            text, voice, rate=_pct_to_rate(pct), style=style, volume=volume, pitch=pitch)
+        return
+
     section_id = str(uuid.uuid4()) if provider == 'doubao' else None
-    for chunk in chunks:
+    for part in _split_text_chunks(text):
+        if not part.strip():
+            continue
         if provider == 'doubao':
-            yield from stream_doubao(
-                chunk,
-                voice,
-                speech_rate=max(-50, min(100, pct)),
-                section_id=section_id,
-                config=config,
-            )
-        elif provider == 'edge':
-            yield from _edge_stream_iter(
-                chunk, voice, rate=_pct_to_rate(pct), style=style,
-                volume=volume, pitch=pitch,
-            )
+            yield from stream_doubao(part, voice, speech_rate=max(-50, min(100, pct)),
+                                     section_id=section_id, config=config)
+        elif provider == 'fishaudio':
+            yield from stream_fishaudio(part, voice, config=config)
         else:
-            raise ProviderStreamError(f'Provider does not support streaming: {provider}')
+            audio, error = _dispatch_single(provider, part, voice, pct,
+                                           style=style, volume=volume, pitch=pitch)
+            if not audio:
+                raise ProviderStreamError(error or f'{provider} returned empty audio')
+            yield audio
 
 
-def _iter_doubao_stream_with_retry(text, voice, pct, style=None,
-                                   volume='+0%', pitch='+0Hz', config=None):
-    """Retry Doubao only until its first audio chunk has been yielded.
-
-    Once a chunk has crossed this generator boundary, retrying would duplicate
-    audio already sent to the client. Each retry creates a fresh provider
-    generator (and therefore a fresh request ID and response object).
-    """
-    config = load_config() if config is None else config
-    policy = _fallback_policy(config)
-    attempts = policy['retry_count'] + 1
-    for attempt in range(attempts):
-        source = _iter_provider_stream(
-            'doubao', text, voice, pct, style=style, volume=volume,
-            pitch=pitch, config=config)
-        yielded = False
-        try:
-            for chunk in source:
-                yielded = True
-                yield chunk
-            return
-        except Exception as e:
-            retryable = getattr(e, 'retryable', False)
-            if yielded or not retryable or attempt >= attempts - 1:
-                raise
-            close = getattr(source, 'close', None)
-            if close:
-                close()
-            _record_provider_retry('doubao')
-            log.warning(
-                "Retrying Doubao stream before first audio: attempt=%d/%d status=%s code=%s error=%s",
-                attempt + 2, attempts, getattr(e, 'status_code', None),
-                getattr(e, 'provider_code', None), e,
-            )
-            sleep_seconds = _retry_wait_seconds(
-                policy['retry_delay_ms'], attempt + 1,
-                retry_after=getattr(e, 'retry_after', None))
-            if sleep_seconds:
-                time.sleep(sleep_seconds)
-        finally:
-            close = getattr(source, 'close', None)
-            if close:
-                close()
-
-
-def _doubao_stream_response(text, voice, pct, style=None, volume='+0%',
-                            pitch='+0Hz', chars=None, config=None):
-    """Return a Flask response that forwards Volcengine audio incrementally.
-
-    The source is prefetched by one chunk so authentication/protocol failures can
-    still produce a normal error response. Once streaming starts, the upstream
-    generator is closed on completion, failure, or client disconnect. Audio is
-    cached only after the provider emits its normal terminal event.
-    """
-    chars = len(text) if chars is None else chars
-    config = load_config() if config is None else config
-    policy = _fallback_policy(config)
-    cache_key = _cache_key('doubao', text, voice, pct, style, volume, pitch)
-    cached = _cache_get(cache_key)
+def _open_audio_stream(provider, text, voice, pct, style, volume, pitch, config):
+    """Get just the first playable bytes before committing HTTP status and voice."""
+    key = _cache_key(provider, text, voice, pct, style, volume, pitch)
+    cached = _cache_get(key)
     with _metrics_lock:
         _metrics['cache_lookups_total'] += 1
         if cached is not None:
             _metrics['cache_hits_total'] += 1
-    should_cache = cached is None
-    source = (iter((cached,)) if cached is not None else
-              _iter_doubao_stream_with_retry(
-                  text, voice, pct, style=style, volume=volume,
-                  pitch=pitch, config=config))
-    try:
-        first_chunk = next(source)
-    except StopIteration:
-        error = 'provider returned empty audio'
-    except Exception as e:
-        error = str(e)
-    else:
-        error = None
-    if error is not None:
-        close_source = getattr(source, 'close', None)
-        if close_source:
-            close_source()
-        _send_webhook('error', {
-            'provider': 'doubao',
-            'voice': voice,
-            'error': error,
-            'text_length': chars,
-        })
-        if policy['enabled']:
-            fallback_voice = policy['voice']
-            log.warning(
-                "Fallback to Edge TTS after Doubao retries: voice=%s retry_count=%d error=%s",
-                fallback_voice,
-                getattr(request, '_tts_retry_count', 0) if has_request_context() else 0,
-                error,
-            )
-            fb_audio, fb_err = _dispatch_impl(
-                'edge', text, fallback_voice, pct, style=style,
-                volume=volume, pitch=pitch,
-            )
-            _record_fallback(success=bool(fb_audio))
-            if fb_audio:
-                log.info("Edge fallback succeeded after Doubao stream failure: voice=%s",
-                         fallback_voice)
-                update_stats(chars, 'edge', voice=fallback_voice)
-                return Response(
-                    fb_audio,
-                    mimetype='audio/mpeg',
-                    headers=_tts_headers(
-                        fb_audio, 'doubao', voice,
-                        'edge', fallback_voice, chars,
-                    ),
-                )
-            log.error("Edge fallback failed after Doubao stream failure: error=%s",
-                      fb_err)
-            error = f'Primary: {error}; Fallback(Edge): {fb_err}'
-        log.warning("TTS stream failed before first audio: provider=doubao voice=%s error=%s",
-                    voice, error)
-        return _error_response(
-            f'TTS failed: {error}', 500, 'synthesis_error',
-            headers=_tts_retry_headers())
+    if cached is not None:
+        # Bound individual writes (and base64 delta events) even on a whole-book cache hit.
+        blocks = (cached[i:i + 16384] for i in range(0, len(cached), 16384))
+        return next(blocks), blocks, None
 
-    stream_state = (getattr(request, '_tts_stream_state', None)
-                    if has_request_context() else None)
+    def start():
+        source = _iter_provider_stream(provider, text, voice, pct, style, volume, pitch, config)
+        try:
+            first = next(source, None)
+            if not first:
+                raise ProviderStreamError(f'{provider} returned empty audio')
+            return first, source, key
+        except BaseException:
+            source.close()
+            raise
+
+    # Crucially this does not wrap iteration of the returned body. A retry
+    # after a successful start could replay audio the client has already heard.
+    return _provider_attempts(provider, config, start)
+
+
+def _mp3_stream_response(provider, text, voice, pct, style=None, volume='+0%',
+                         pitch='+0Hz', openai_format=None):
+    chars = len(text)
+    clean = _clean_text(text)
+    if not clean:
+        return _error_response('Text is empty after cleaning', 400)
+    config = load_config()
+    actual_provider, actual_voice = provider, voice
+    try:
+        first, source, key = _open_audio_stream(
+            provider, clean, voice, pct, style, volume, pitch, config)
+    except Exception as primary:
+        log.warning("TTS failed before first audio: provider=%s voice=%s error=%s",
+                    provider, voice, primary)
+        _send_webhook('error', {'provider': provider, 'voice': voice,
+                                'error': str(primary), 'text_length': chars})
+        policy = _fallback_policy(config)
+        allow_fallback = getattr(request, '_tts_allow_fallback', True)
+        if provider == 'edge' or not (policy['enabled'] and allow_fallback):
+            return _error_response(f'TTS failed: {primary}', 500, 'synthesis_error',
+                                   headers=_tts_retry_headers())
+        actual_provider, actual_voice = 'edge', policy['voice']
+        log.warning("Fallback to Edge before first audio: provider=%s voice=%s error=%s",
+                    provider, voice, primary)
+        try:
+            first, source, key = _open_audio_stream(
+                actual_provider, clean, actual_voice, pct, style, volume, pitch, config)
+        except Exception as fallback:
+            _record_fallback(success=False)
+            return _error_response(f'TTS failed: Primary: {primary}; Fallback(Edge): {fallback}',
+                                   500, 'synthesis_error', headers=_tts_retry_headers())
+        _record_fallback(success=True)
+
+    stream_state = getattr(request, '_tts_stream_state', None)
+    sse = openai_format == 'sse'
 
     def generate():
-        audio = bytearray()
-        completed = False
+        # Tee to the cache without delaying delivery or retaining an oversized
+        # response. Never publish a partial clip, including on client disconnect.
+        budget = AUDIO_CACHE_MAX_MB * 1024 * 1024
+        buf = bytearray() if key is not None and AUDIO_CACHE_SIZE > 0 and budget > 0 else None
+        sent = 0
         try:
-            audio.extend(first_chunk)
-            yield first_chunk
-            for audio_chunk in source:
-                if not audio_chunk:
-                    continue
-                audio.extend(audio_chunk)
-                yield audio_chunk
-            completed = True
-            if should_cache and audio:
-                _cache_put(cache_key, bytes(audio))
-            update_stats(chars, 'doubao', voice=voice)
-            log.info(
-                "TTS stream OK: provider=doubao voice=%s style=%s chars=%d size=%d",
-                voice, style, chars, len(audio),
-            )
-        except GeneratorExit:
-            log.info(
-                "TTS stream closed by client: provider=doubao voice=%s chars=%d",
-                voice, chars,
-            )
-            raise
+            for chunk in chain((first,), source):
+                yield _openai_sse_delta(chunk) if sse else chunk
+                sent += len(chunk)
+                if buf is not None:
+                    if len(buf) + len(chunk) <= budget:
+                        buf.extend(chunk)
+                    else:
+                        buf = None
+            if buf:
+                _cache_put(key, bytes(buf))
+            update_stats(chars, actual_provider, voice=actual_voice)
+            log.info("TTS stream OK: provider=%s voice=%s chars=%d size=%d",
+                     actual_provider, actual_voice, chars, sent)
+            if sse:
+                yield _openai_sse_done()
         except Exception as e:
-            log.error(
-                "TTS stream interrupted: provider=doubao voice=%s error=%s",
-                voice, e,
-            )
+            log.error("TTS stream interrupted: provider=%s voice=%s error=%s",
+                      actual_provider, actual_voice, e)
             _mark_stream_failure(stream_state, e)
-            _send_webhook('error', {
-                'provider': 'doubao',
-                'voice': voice,
-                'error': str(e),
-                'text_length': chars,
-            })
+            _send_webhook('error', {'provider': actual_provider, 'voice': actual_voice,
+                                    'error': str(e), 'text_length': chars})
             raise
         finally:
-            close = getattr(source, 'close', None)
-            if close:
-                close()
-            if not completed:
-                audio.clear()
+            source.close()
 
-    response = Response(generate(), mimetype='audio/mpeg', headers={
-        'X-TTS-Provider': 'doubao',
-        'X-TTS-Voice': voice,
-        'X-TTS-Retry-Count': str(
-            getattr(request, '_tts_retry_count', 0)
-            if has_request_context() else 0),
-        'Cache-Control': 'no-store',
-        'X-TTS-Chars': str(chars),
-        'X-Accel-Buffering': 'no',
-    })
-    close_source = getattr(source, 'close', None)
-    if close_source:
-        response.call_on_close(close_source)
+    headers = {
+        **_tts_metadata_headers(provider, voice, actual_provider, actual_voice),
+        'X-TTS-Chars': str(chars), 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no',
+    }
+    if openai_format:
+        headers['X-TTS-Format'] = 'mp3'
+    response = Response(generate(), mimetype='text/event-stream' if sse else 'audio/mpeg',
+                        headers=headers)
+    # Closing an unstarted generator doesn't run its finally block.
+    response.call_on_close(source.close)
     return response
 
 
@@ -3224,6 +3184,7 @@ def metrics():
     return Response('\n'.join(out) + '\n', mimetype='text/plain')
 
 
+@app.route('/speech/stream/chunked', methods=['POST'])
 @app.route('/speech/stream', methods=['POST'])
 def speech_stream():
     try:
@@ -3260,14 +3221,9 @@ def speech_stream():
             return quota_err
 
         pct = parse_rate(data.get('rate', '0%'))
-        if provider == 'doubao':
-            stream_text = _clean_text(text)
-            if not stream_text:
-                return _error_response('Text is empty after cleaning', 400)
-            return _doubao_stream_response(
-                stream_text, voice, pct, style=style, volume=volume,
-                pitch=pitch, chars=len(text),
-            )
+        if _use_streaming_mp3(provider, text):
+            return _mp3_stream_response(provider, text, voice, pct, style=style,
+                                        volume=volume, pitch=pitch)
 
         audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct, style=style, volume=volume, pitch=pitch)
 
@@ -3284,102 +3240,13 @@ def speech_stream():
                                                  final_provider, final_voice, len(text)))
         log.warning("TTS failed: provider=%s voice=%s error=%s", provider, voice, error)
         return _error_response(
-            f'TTS failed: {error}', 500, 'synthesis_error',
+            f'TTS failed: {error}', 502 if request.path.endswith('/chunked') else 500, 'synthesis_error',
             headers=_tts_retry_headers())
     except Exception as e:
         log.error("speech_stream error: %s", e, exc_info=True)
         return _error_response(
             f'Error: {e}', 500, 'server_error',
             headers=_tts_retry_headers())
-
-
-@app.route('/speech/stream/chunked', methods=['POST'])
-def speech_stream_chunked():
-    """True streaming TTS for Edge and Volcengine; buffer other providers."""
-    try:
-        client_ip = request.remote_addr or 'unknown'
-        if _check_rate_limit(client_ip):
-            return Response('Rate limit exceeded', status=429, headers={'Retry-After': '60'})
-        key_err = _check_api_key()
-        if key_err:
-            return key_err
-        data = request.get_json(silent=True) or {}
-        text = str(data.get('text', '')).strip()
-        if not text:
-            return _error_response('Missing text', 400)
-        if len(text) > MAX_TEXT_LENGTH:
-            return _error_response(f'Text too long (max {MAX_TEXT_LENGTH})', 400)
-        voice, provider, target_error = _request_target(data)
-        if target_error:
-            return _error_response(target_error, 400)
-        request._tts_provider = provider
-        request._tts_voice = voice
-        request._tts_chars = len(text)
-        # This endpoint charges the daily quota like every other synthesis route
-        quota_err = _check_daily_quota(client_ip, len(text))
-        if quota_err:
-            return quota_err
-        pct = parse_rate(data.get('rate', '0%'))
-        if provider == 'doubao':
-            clean = _clean_text(text)
-            if not clean:
-                return _error_response('Text is empty after cleaning', 400)
-            return _doubao_stream_response(clean, voice, pct, chars=len(text))
-        if provider == 'edge':
-            rate = _pct_to_rate(pct)
-            clean = _clean_text(text)
-            if not clean:
-                return _error_response('Text is empty after cleaning', 400)
-            chars = len(clean)
-            stream_state = getattr(request, '_tts_stream_state', None)
-
-            def generate():
-                """Yield audio chunks as edge-tts produces them (real streaming).
-
-                Stats are recorded here rather than in after_request because the
-                generator body runs after the response has already been returned.
-                """
-                sent = 0
-                completed = False
-                try:
-                    for chunk_data in _edge_stream_iter(clean, voice, rate):
-                        sent += len(chunk_data)
-                        yield chunk_data
-                    if not sent:
-                        raise RuntimeError('Edge TTS returned empty audio')
-                    completed = True
-                except Exception as e:
-                    log.error('Chunked stream error: %s', e)
-                    _mark_stream_failure(stream_state, e)
-                    raise
-                finally:
-                    if completed:
-                        update_stats(chars, provider, voice=voice)
-            # Do not set Transfer-Encoding by hand: the WSGI server owns the
-            # framing and a manual header desynchronizes the response body.
-            return Response(generate(), mimetype='audio/mpeg', headers={
-                'X-TTS-Provider': provider,
-                'X-TTS-Voice': voice,
-                'X-TTS-Retry-Count': str(getattr(request, '_tts_retry_count', 0)),
-                'X-TTS-Chars': str(chars),
-                'Cache-Control': 'no-store',
-                'X-Accel-Buffering': 'no',
-            })
-        audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct)
-        if audio:
-            final_provider = actual_provider or provider
-            final_voice = actual_voice or voice
-            update_stats(len(text), final_provider, voice=final_voice)
-            return Response(audio, mimetype='audio/mpeg',
-                            headers=_tts_headers(audio, provider, voice,
-                                                 final_provider, final_voice, len(text)))
-        return _error_response(
-            f'TTS failed: {error}', 502, 'synthesis_error',
-            headers=_tts_retry_headers())
-    except Exception as e:
-        log.error('Chunked TTS error: %s', e)
-        return _error_response(
-            str(e), 500, 'server_error', headers=_tts_retry_headers())
 
 
 _CONFIG_TEXT_FIELDS = (
@@ -4794,59 +4661,9 @@ def openai_speech():
         # Convert speed (0.25-4.0) to percentage (-75% to +300%)
         pct = (speed - 1.0) * 100
 
-        # MP3 from Edge can be forwarded incrementally. Other providers and
-        # formats are synthesized first, then wrapped in the same SSE schema.
-        if stream_format == 'sse' and provider == 'edge' and resp_format == 'mp3':
-            clean_text = _clean_text(text)
-            if not clean_text:
-                return _error_response('Text is empty after cleaning', 400, 'invalid_request_error')
-
-            stream_state = getattr(request, '_tts_stream_state', None)
-            source = _edge_stream_iter(
-                clean_text, voice, rate=_pct_to_rate(pct), style=style)
-            try:
-                first_chunk = next(source)
-            except StopIteration:
-                error = 'Edge TTS returned empty audio'
-            except Exception as e:
-                error = str(e)
-            else:
-                error = None
-            if error is not None:
-                close_source = getattr(source, 'close', None)
-                if close_source:
-                    close_source()
-                return _error_response(
-                    f'TTS failed: {error}', 500, 'server_error',
-                    headers=_tts_retry_headers())
-
-            def _sse_generate():
-                completed = False
-                try:
-                    # Chunks arrive incrementally from upstream; each is forwarded as
-                    # soon as it lands rather than after the whole synthesis completes.
-                    yield _openai_sse_delta(first_chunk)
-                    for chunk in source:
-                        yield _openai_sse_delta(chunk)
-                    yield _openai_sse_done()
-                    completed = True
-                except Exception as e:
-                    log.error('SSE stream error: %s', e)
-                    _mark_stream_failure(stream_state, e)
-                    raise
-                finally:
-                    close_source = getattr(source, 'close', None)
-                    if close_source:
-                        close_source()
-                    if completed:
-                        update_stats(len(clean_text), provider, voice=voice)
-
-            return Response(_sse_generate(), mimetype='text/event-stream',
-                            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
-                                     'X-TTS-Provider': provider, 'X-TTS-Voice': voice,
-                                     'X-TTS-Retry-Count': '0',
-                                     'X-TTS-Chars': str(len(text)),
-                                     'X-TTS-Format': 'mp3'})
+        if resp_format == 'mp3' and _use_streaming_mp3(provider, text):
+            return _mp3_stream_response(provider, text, voice, pct, style=style,
+                                        openai_format=stream_format)
 
         audio, error, actual_provider, actual_voice = dispatch(provider, text, voice, pct, style=style)
 

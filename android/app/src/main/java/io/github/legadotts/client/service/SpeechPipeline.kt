@@ -9,122 +9,8 @@ import io.github.legadotts.client.data.ClientApi
 import io.github.legadotts.client.data.ClientException
 import io.github.legadotts.client.data.Voice
 import java.io.InputStream
-import java.util.ArrayDeque
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.thread
-import kotlin.concurrent.withLock
 
 internal data class PcmFormat(val rate: Int, val channels: Int)
-
-private sealed interface Event<out T> {
-    data class Data<T>(val item: T) : Event<T>
-    data class Failure(val error: Exception) : Event<Nothing>
-    object End : Event<Nothing>
-}
-
-private fun <T> ArrayBlockingQueue<Event<T>>.next(token: CancellationToken): T? {
-    while (true) {
-        token.check()
-        when (val event = poll(150, TimeUnit.MILLISECONDS)) {
-            is Event.Data -> return event.item
-            is Event.Failure -> throw event.error
-            Event.End -> return null
-            null -> continue
-        }
-    }
-}
-
-/**
- * Byte-bounded compressed-audio pipe for one segment.
- *
- * Unlike a small packet-count queue (which stalls on streaming providers that emit small TCP
- * chunks), a 2 MB byte budget holds several minutes of compressed MP3 so the network producer
- * finishes the current segment and prefetches the next well before playback reaches the boundary.
- */
-private class SegmentPipe(
-    private val token: CancellationToken,
-    val charCount: Int,
-) : InputStream() {
-    private val lock = ReentrantLock()
-    private val notEmpty = lock.newCondition()
-    private val notFull = lock.newCondition()
-    private val queue = ArrayDeque<ByteArray>()
-    private var queuedBytes = 0
-    private var ended = false
-    private var failure: Exception? = null
-
-    private var block = ByteArray(0)
-    private var index = 0
-    private var eof = false
-
-    fun offer(chunk: ByteArray) {
-        if (chunk.isEmpty()) return
-        lock.withLock {
-            while (queuedBytes >= MAX_BUFFERED_BYTES && failure == null && !ended) {
-                token.check()
-                notFull.await(150, TimeUnit.MILLISECONDS)
-            }
-            token.check()
-            if (failure != null || ended) return
-            queue.addLast(chunk)
-            queuedBytes += chunk.size
-            notEmpty.signal()
-        }
-    }
-
-    fun end() = lock.withLock {
-        ended = true
-        notEmpty.signalAll()
-        notFull.signalAll()
-    }
-
-    fun fail(error: Exception) = lock.withLock {
-        if (failure == null) failure = error
-        notEmpty.signalAll()
-        notFull.signalAll()
-    }
-
-    private fun nextBlock(): ByteArray? {
-        lock.withLock {
-            while (queue.isEmpty()) {
-                token.check()
-                failure?.let { throw it }
-                if (ended) return null
-                notEmpty.await(150, TimeUnit.MILLISECONDS)
-            }
-            val item = queue.removeFirst()
-            queuedBytes -= item.size
-            notFull.signal()
-            return item
-        }
-    }
-
-    override fun read(b: ByteArray, off: Int, len: Int): Int {
-        if (len == 0) return 0
-        if (eof) return -1
-        if (index == block.size) {
-            val next = nextBlock()
-            if (next == null) { eof = true; return -1 }
-            block = next
-            index = 0
-        }
-        val n = minOf(block.size - index, len)
-        block.copyInto(b, off, index, index + n)
-        index += n
-        return n
-    }
-
-    override fun read(): Int {
-        val one = ByteArray(1)
-        return if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 255
-    }
-
-    companion object {
-        const val MAX_BUFFERED_BYTES = 2 * 1024 * 1024
-    }
-}
 
 /** Called on the AudioTrack / framework synthesis worker, never the main or binder thread. */
 internal fun streamSpeech(
@@ -138,58 +24,17 @@ internal fun streamSpeech(
     onProgress: (spokenChars: Int, totalChars: Int, segmentIndex: Int) -> Unit = { _, _, _ -> },
     sink: (PcmFormat, ByteArray) -> Unit,
 ) {
-    // Up to 2 prefetched segments ahead of the segment currently being decoded.
-    val segments = ArrayBlockingQueue<Event<SegmentPipe>>(2)
-    val producer = thread(name = "speech-network", isDaemon = true) {
-        var current: SegmentPipe? = null
-        try {
-            val requests = if (preview) sequenceOf("")
-            else speechSegments(text, api.maxTextLength(token), provider = voice.provider, singleUtterance = singleUtterance)
-            for (part in requests) {
-                token.check()
-                val pipe = SegmentPipe(token, part.length)
-                segments.put(Event.Data(pipe))
-                current = pipe
-                api.synthesis(part, voice, speed, preview, token).use { stream ->
-                    val scratch = ByteArray(16384)
-                    while (true) {
-                        token.check()
-                        val length = stream.read(scratch)
-                        if (length == -1) break
-                        if (length > 0) pipe.offer(scratch.copyOf(length))
-                    }
-                }
-                pipe.end()
-                current = null
-            }
-            segments.put(Event.End)
-        } catch (e: Exception) {
-            if (!token.isCancelled() && e !is InterruptedException) {
-                try {
-                    current?.fail(e) ?: segments.put(Event.Failure(e))
-                } catch (_: InterruptedException) { /* stopped during delivery */ }
-            }
-        }
-    }
-    val hook = token.onCancel { producer.interrupt() }
-    try {
-        val totalChars = text.trim().length
-        var spokenChars = 0
-        var segmentIndex = 0
-        while (true) {
-            val pipe = segments.next(token) ?: break
-            segmentIndex++
-            if (!preview) onProgress(spokenChars, totalChars, segmentIndex)
-            // Pass decoded PCM verbatim to preserve natural vocoder onset, breath, and sibilants.
-            decodeMp3(pipe, token, sink)
-            spokenChars = minOf(totalChars, spokenChars + pipe.charCount)
-            if (!preview) onProgress(spokenChars, totalChars, segmentIndex)
-        }
-    } catch (e: Exception) {
-        producer.interrupt()
-        throw e
-    } finally {
-        hook.close()
+    val parts = if (preview) sequenceOf("")
+        else speechSegments(text, api.maxTextLength(token), voice.provider, singleUtterance)
+    val totalChars = text.trim().length
+    var spokenChars = 0
+    var segmentIndex = 0
+    streamSegments(parts, token, { part, transfer -> api.synthesis(part, voice, speed, preview, transfer) }) { part, pipe ->
+        segmentIndex++
+        if (!preview) onProgress(spokenChars, totalChars, segmentIndex)
+        decodeMp3(pipe, token, sink)
+        spokenChars = minOf(totalChars, spokenChars + part.length)
+        if (!preview) onProgress(spokenChars, totalChars, segmentIndex)
     }
 }
 

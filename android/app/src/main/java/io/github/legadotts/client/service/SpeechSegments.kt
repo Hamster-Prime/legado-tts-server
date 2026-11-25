@@ -10,7 +10,7 @@ private const val CLOSERS = "”’\"'）)】」』》〉］]｝}"
  *
  * - For buffered providers (default), the first request stays short (<= 48 code points) for fast
  *   first audio, then expands so there are fewer request boundaries in long text.
- * - For true-streaming providers (Edge, Volcengine), larger chunks stream continuously inside one
+ * - For true-streaming providers (Edge, Volcengine, Fish Audio), larger chunks stream inside one
  *   request without creating artificial paragraph boundaries.
  * - For single-utterance system TTS requests (e.g. Legado reading paragraph by paragraph), normal
  *   paragraphs stay whole instead of being split at 48 code points.
@@ -26,13 +26,9 @@ internal fun speechSegments(
     var emitted = 0
     while (start < text.length) {
         val targetLimit = when {
-            singleUtterance -> when (provider) {
-                "edge" -> 1200
-                "doubao" -> 480
-                else -> 280
-            }
             provider == "edge" -> 1200
-            provider == "doubao" -> 480
+            provider == "doubao" || provider == "fishaudio" -> 480
+            singleUtterance -> 280
             else -> when (emitted) { 0 -> 48; 1 -> 160; else -> 240 }
         }
         val limit = minOf(serverMax, targetLimit)

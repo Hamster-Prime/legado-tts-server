@@ -41,7 +41,7 @@ def test_trusted_proxy_limits_clients_separately(monkeypatch, limit_kind):
     monkeypatch.setattr(app, '_rate_limits', {})
     monkeypatch.setattr(app, '_daily_char_usage', {})
     monkeypatch.setattr(app, 'load_config', lambda: copy.deepcopy(app.DEFAULT_CONFIG))
-    monkeypatch.setattr(app, 'dispatch', lambda p, t, v, r, **kw: (b'audio', None, p, v))
+    monkeypatch.setattr(app, '_edge_stream_iter', lambda *a, **kw: iter((b'audio',)))
     monkeypatch.setattr(app, 'update_stats', lambda *a, **kw: None)
     with app.app.test_client() as client:
         def speak(ip):

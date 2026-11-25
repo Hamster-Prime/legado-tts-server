@@ -4,7 +4,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![Version](https://img.shields.io/badge/version-1.9.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.9.1-green.svg)
 ![Tests](https://img.shields.io/badge/tests-374%20passed-brightgreen.svg)
 
 **为开源阅读 (Legado) 量身打造的聚合语音合成服务**
@@ -299,8 +299,8 @@ curl -X POST http://localhost:8080/speech/stream \
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/speech/stream` | Legado TTS；火山引擎端到端流式输出 |
-| POST | `/speech/stream/chunked` | 兼容入口；火山引擎和 Edge 流式输出 |
+| POST | `/speech/stream` | Legado TTS；Edge、火山引擎、Fish Audio 的 MP3 边生成边返回 |
+| POST | `/speech/stream/chunked` | 同一流式接口，供声读等客户端使用 |
 | POST | `/v1/audio/speech` | OpenAI 兼容 TTS |
 | GET | `/v1/models` / `/v1/models/{id}` | OpenAI 兼容模型列表与查询 |
 | GET | `/v1/voices` | Provider 音色目录（OpenAI 扩展） |
@@ -362,8 +362,8 @@ Provider 专用模型请求失败时不会静默切换到 Edge，客户端会收
 但当前聚合服务商不支持自由文本风格提示，因此会忽略该字段；语速请使用标准
 `speed` 参数。使用 `stream_format=sse` 时，服务返回 OpenAI 标准的
 `speech.audio.delta` / `speech.audio.done` 事件；本地服务商不提供 OpenAI token
-计量，因此结束事件中的 `usage` 三项为 `0`。非 Edge 流式通常是合成完成后再包装为一个
-音频事件，不代表上游实时分片。
+计量，因此结束事件中的 `usage` 三项为 `0`。默认 MP3 对 Edge、火山引擎和 Fish Audio
+逐块返回；转码格式需要等完整音频，不会因为选择 SSE 就变成实时转码。
 
 ### 音色管理
 | 方法 | 路径 | 说明 |
@@ -452,7 +452,7 @@ WebUI 仅在日志面板可见时建立连接，离开后关闭；积压过多�
 | `X-TTS-Provider` | 实际合成的 Provider |
 | `X-TTS-Voice` | 实际使用的音色 |
 | `X-TTS-Chars` | 计费字符数 |
-| `X-TTS-Retry-Count` | 本次请求实际执行的上游重试次数 |
+| `X-TTS-Retry-Count` | 发出响应头前执行的上游重试次数 |
 | `X-TTS-Format` | 实际输出格式（转码失败时回退为 `mp3`） |
 | `X-TTS-Fallback` | 发生故障转移时为 `true` |
 | `X-TTS-Requested-Provider` | 故障转移时，原本请求的 Provider |
@@ -466,9 +466,9 @@ WebUI 仅在日志面板可见时建立连接，离开后关闭；积压过多�
 
 重试只针对连接失败、超时、响应解码中断，以及 HTTP `408`、`425`、`429`
 和 `5xx` 等瞬时故障。鉴权、参数和服务商业务错误不会盲目重试。服务端会采用
-有上限的指数退避；上游返回 `Retry-After` 时会取两者较长值（最多等待 60 秒）。对火山引擎流式
-响应，重试和 Edge 故障转移只允许发生在首个音频块发送给客户端之前；一旦开始
-播放，服务端不会在同一响应里混入另一种音色。关闭故障转移开关只禁止切换 Edge，
+有上限的指数退避；上游返回 `Retry-After` 时会取两者较长值（最多等待 60 秒）。对流式
+响应，只在首个音频块发出前允许从头重试或回退到 Edge；开始播放后，服务端不会
+重播已发出的音频，也不会混入另一种音色。关闭故障转移开关只禁止切换 Edge，
 原服务重试仍按配置执行。
 
 环境变量为旧配置文件提供初始默认值；在 Web 管理界面保存后，持久化设置立即生效
@@ -485,7 +485,7 @@ WebUI 仅在日志面板可见时建立连接，离开后关闭；积压过多�
 未配置可信代理时，转发头被忽略，所有代理后的用户会共享代理 IP 的限流/配额。
 应用端口应只允许这些代理连接，或直接在入口代理实施限流。
 
-- `/speech/stream` 对火山引擎执行真实的端到端流式传输：上游返回按行分隔的 JSON 事件，服务逐块 Base64 解码并以 `audio/mpeg` 立即转发给 Legado，不等待整段音频完成。
+- `/speech/stream`、`/speech/stream/chunked` 及 `/v1/audio/speech`（默认 MP3）收到 Edge 音频块、火山引擎音频事件或 Fish Audio 的 MP3 数据块就转发。Fish 使用上游的 `latency: balanced` 模式。腾讯云和小米当前使用的接口按段返回；长文本会先发已合成的段，不再等整篇拼接完成。
 - 流式响应不设置 `Content-Length`，并发送 `X-Accel-Buffering: no`。
 - 如前置 Nginx，请关闭该路径的响应缓冲和缓存，并把读取超时设置得足够覆盖长段落：
 
@@ -500,10 +500,18 @@ location /speech/stream {
 }
 ```
 
-若客户端使用兼容入口 `/speech/stream/chunked`，请对该路径应用相同配置；外层 CDN 或网关也必须关闭响应缓冲，否则会重新变成整段音频完成后才开始播放。
+对 `/v1/audio/speech` 也应用相同配置（上述前缀已覆盖 `/speech/stream/chunked`）；外层 CDN 或网关也须关闭响应缓冲。
 
-OpenAI 兼容接口默认的 `audio` 模式和批量接口会收集完整音频，以支持格式转换和
-Base64 批量返回；`stream_format=sse` 且使用 Edge 音色时会逐块返回音频事件。
+直接调用时要**增量读取并交给播放器**，不要等 `response.content` 或 `response.blob()` 返回后再播。可用下面的命令过一遍实际播放链路（需要 `ffplay`，示例使用已配置的 Fish Audio；启用鉴权时添加 Bearer 请求头）：
+
+```sh
+curl --fail --no-buffer -sS http://localhost:8080/speech/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"fishaudio","text":"第一段开始朗读。这里可以换成你实际听到停顿的多段长文本。"}' \
+  | ffplay -loglevel error -nodisp -autoexit -f mp3 -i pipe:0
+```
+
+若调用方每段单独请求，请在当前段播放时预取下一段，或在单次字数上限内合并段落。服务端无法预先合成客户端还未提交的文本。转码、批量和 Base64 试听仍收集完整音频；它们不适合验证首声延迟。
 
 ---
 

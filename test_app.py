@@ -25,6 +25,44 @@ from app import (
 )
 
 
+class FishResponse:
+    """Streaming HTTP fixture, deliberately without a .content attribute."""
+    status_code = 200
+    headers = {}
+
+    def __init__(self, *chunks):
+        self.chunks = chunks
+        self.closed = False
+
+    def iter_content(self, chunk_size):
+        yield from self.chunks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.closed = True
+
+
+@pytest.fixture
+def capture_targets(monkeypatch):
+    """Routing tests observe the resolved target on either synthesis path."""
+    import app as server
+    calls = []
+
+    def buffered(provider, text, voice, pct, **kwargs):
+        calls.append((provider, voice))
+        return b'audio', None, provider, voice
+
+    def streaming(provider, text, voice, *args):
+        calls.append((provider, voice))
+        yield b'audio'
+
+    monkeypatch.setattr(server, 'dispatch', buffered)
+    monkeypatch.setattr(server, '_iter_provider_stream', streaming)
+    return calls
+
+
 class TestResolveProvider:
     """Test voice-to-provider routing."""
 
@@ -531,14 +569,9 @@ class TestDispatch:
         import app as app_module
         captured = {}
 
-        class Response:
-            status_code = 200
-            content = b'fish-audio'
-            text = ''
-
         def fake_post(url, **kwargs):
             captured.update(kwargs)
-            return Response()
+            return FishResponse(b'fish-audio')
 
         monkeypatch.setattr(app_module._http_session, 'post', fake_post)
         audio, error = app_module.synthesize_fishaudio(
@@ -549,22 +582,18 @@ class TestDispatch:
 
         assert error is None
         assert audio == b'fish-audio'
-        assert captured['json'] == {'text': '测试', 'format': 'mp3'}
+        assert captured['json'] == {'text': '测试', 'format': 'mp3', 'latency': 'balanced'}
+        assert captured['stream'] is True
         assert captured['headers']['Authorization'] == 'Bearer key'
 
     def test_fishaudio_custom_voice_sends_trimmed_reference_id(self, monkeypatch):
         import app as app_module
         captured = {}
 
-        class Response:
-            status_code = 200
-            content = b'custom-fish-audio'
-            text = ''
-
         def fake_post(url, **kwargs):
             captured['url'] = url
             captured.update(kwargs)
-            return Response()
+            return FishResponse(b'custom-fish-audio')
 
         monkeypatch.setattr(app_module._http_session, 'post', fake_post)
         audio, error = app_module.synthesize_fishaudio(
@@ -579,6 +608,7 @@ class TestDispatch:
         assert captured['json'] == {
             'text': '测试',
             'format': 'mp3',
+            'latency': 'balanced',
             'reference_id': '9a9cf47702da476aa4629e2506d4a857',
         }
 
@@ -737,6 +767,8 @@ class TestAPIEndpoints:
             app_module, 'synthesize_edge',
             lambda *args, **kwargs: (b'edge-test-audio', None),
         )
+        monkeypatch.setattr(app_module, '_edge_stream_iter',
+                            lambda *args, **kwargs: iter((b'edge-test-audio',)))
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -840,14 +872,9 @@ class TestAPIEndpoints:
         import app as app_module
         captured = {}
 
-        class Response:
-            status_code = 200
-            content = b'fish-default-audio'
-            text = ''
-
         def fake_post(url, **kwargs):
             captured.update(kwargs)
-            return Response()
+            return FishResponse(b'fish-default-audio')
 
         config = app_module.DEFAULT_CONFIG.copy()
         config['fishaudio_api_key'] = 'key'
@@ -863,17 +890,18 @@ class TestAPIEndpoints:
         assert result.status_code == 200
         assert result.data == b'fish-default-audio'
         assert result.headers['X-TTS-Voice'] == 'fish-default'
-        assert captured['json'] == {'text': '旧版链接', 'format': 'mp3'}
+        assert captured['json'] == {'text': '旧版链接', 'format': 'mp3', 'latency': 'balanced'}
 
     def test_speech_stream_explicit_doubao_accepts_custom_voice(self, monkeypatch):
         import app as app_module
         captured = {}
 
-        def fake_stream_response(text, voice, pct, **kwargs):
+        def fake_stream_response(provider, text, voice, pct, **kwargs):
+            assert provider == 'doubao'
             captured.update({'text': text, 'voice': voice, 'pct': pct})
             return app_module.Response(b'custom-doubao-audio', mimetype='audio/mpeg')
 
-        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+        monkeypatch.setattr(app_module, '_mp3_stream_response', fake_stream_response)
 
         r = self.client.post('/speech/stream', json={
             'text': '自定义音色测试',
@@ -892,7 +920,8 @@ class TestAPIEndpoints:
         assert app_module.resolve_provider(custom_voice) is None
         captured = []
 
-        def fake_stream_response(text, voice, pct, **kwargs):
+        def fake_stream_response(provider, text, voice, pct, **kwargs):
+            assert provider == 'doubao'
             captured.append(('chunked', 'doubao', voice))
             return app_module.Response(b'custom-stream-audio', mimetype='audio/mpeg')
 
@@ -900,7 +929,7 @@ class TestAPIEndpoints:
             captured.append(('dispatch', provider, voice))
             return b'custom-buffered-audio', None, provider, voice
 
-        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+        monkeypatch.setattr(app_module, '_mp3_stream_response', fake_stream_response)
         monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
 
         requests = [
@@ -925,7 +954,7 @@ class TestAPIEndpoints:
         assert captured == [
             ('chunked', 'doubao', custom_voice),
             ('dispatch', 'doubao', custom_voice),
-            ('dispatch', 'doubao', custom_voice),
+            ('chunked', 'doubao', custom_voice),
             ('dispatch', 'doubao', custom_voice),
         ]
 
@@ -939,7 +968,7 @@ class TestAPIEndpoints:
         def unexpected_stream(*args, **kwargs):
             pytest.fail('invalid voice must not reach the Doubao provider')
 
-        monkeypatch.setattr(app_module, '_doubao_stream_response', unexpected_stream)
+        monkeypatch.setattr(app_module, '_mp3_stream_response', unexpected_stream)
 
         r = self.client.post('/speech/stream', json={
             'text': '无效音色测试',
@@ -953,11 +982,12 @@ class TestAPIEndpoints:
         import app as app_module
         captured = {}
 
-        def fake_stream_response(text, voice, pct, **kwargs):
+        def fake_stream_response(provider, text, voice, pct, **kwargs):
+            assert provider == 'doubao'
             captured.update({'text': text, 'voice': voice, 'pct': pct})
             return app_module.Response(b'alias-shaped-custom-audio', mimetype='audio/mpeg')
 
-        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+        monkeypatch.setattr(app_module, '_mp3_stream_response', fake_stream_response)
 
         r = self.client.post('/speech/stream', json={
             'text': '别名形态的自定义音色',
@@ -973,11 +1003,12 @@ class TestAPIEndpoints:
         import app as app_module
         captured = {}
 
-        def fake_stream_response(text, voice, pct, **kwargs):
+        def fake_stream_response(provider, text, voice, pct, **kwargs):
+            assert provider == 'doubao'
             captured['voice'] = voice
             return app_module.Response(b'migrated-doubao-audio', mimetype='audio/mpeg')
 
-        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+        monkeypatch.setattr(app_module, '_mp3_stream_response', fake_stream_response)
 
         r = self.client.post('/speech/stream', json={
             'text': '旧音色 ID 兼容测试',
@@ -992,11 +1023,12 @@ class TestAPIEndpoints:
         import app as app_module
         captured = {}
 
-        def fake_stream_response(text, voice, pct, **kwargs):
+        def fake_stream_response(provider, text, voice, pct, **kwargs):
+            assert provider == 'doubao'
             captured.update({'text': text, 'voice': voice, 'pct': pct})
             return app_module.Response(b'legacy-legado-custom-audio', mimetype='audio/mpeg')
 
-        monkeypatch.setattr(app_module, '_doubao_stream_response', fake_stream_response)
+        monkeypatch.setattr(app_module, '_mp3_stream_response', fake_stream_response)
         custom_voice = 'nova'
         saved = self.client.post('/api/config', json={
             'provider': 'doubao',
@@ -1226,14 +1258,9 @@ class TestAPIEndpoints:
         captured = {}
         reference_id = '9a9cf47702da476aa4629e2506d4a857'
 
-        class Response:
-            status_code = 200
-            content = b'custom-fish-audio'
-            text = ''
-
         def fake_post(url, **kwargs):
             captured.update(kwargs)
-            return Response()
+            return FishResponse(b'custom-fish-audio')
 
         monkeypatch.setattr(app_module._http_session, 'post', fake_post)
         assert self.client.post('/api/custom-voices', json={
@@ -1766,16 +1793,7 @@ class TestAPIEndpoints:
         ('mimo-v2-tts', 'default_zh', 'xiaomi'),
     ])
     def test_openai_provider_model_routes_without_extension_field(
-            self, monkeypatch, model, voice, expected_provider):
-        import app as app_module
-
-        captured = {}
-
-        def fake_dispatch(provider, text, requested_voice, pct, **kwargs):
-            captured.update(provider=provider, voice=requested_voice)
-            return b'provider-model-audio', None, provider, requested_voice
-
-        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
+            self, capture_targets, model, voice, expected_provider):
         response = self.client.post('/v1/audio/speech', json={
             'model': model,
             'input': '模型路由测试',
@@ -1783,10 +1801,10 @@ class TestAPIEndpoints:
         })
 
         assert response.status_code == 200
-        assert captured == {'provider': expected_provider, 'voice': voice}
+        assert capture_targets == [(expected_provider, voice)]
         assert response.headers['X-TTS-Provider'] == expected_provider
 
-    def test_openai_provider_model_uses_saved_voice_when_omitted(self, monkeypatch):
+    def test_openai_provider_model_uses_saved_voice_when_omitted(self, capture_targets):
         import app as app_module
 
         config = app_module.DEFAULT_CONFIG.copy()
@@ -1796,20 +1814,13 @@ class TestAPIEndpoints:
             'xiaomi_voice': 'default_eh',
         })
         app_module.save_config(config)
-        captured = {}
-
-        def fake_dispatch(provider, text, voice, pct, **kwargs):
-            captured.update(provider=provider, voice=voice)
-            return b'saved-provider-audio', None, provider, voice
-
-        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
         response = self.client.post('/v1/audio/speech', json={
             'model': 'legado-xiaomi-mimo-tts',
             'input': '使用已保存音色',
         })
 
         assert response.status_code == 200
-        assert captured == {'provider': 'xiaomi', 'voice': 'default_eh'}
+        assert capture_targets == [('xiaomi', 'default_eh')]
 
     @pytest.mark.parametrize(('model', 'expected_provider'), [
         ('e6882dded6cb4a96b36453914dc231db', 'fishaudio'),
@@ -1818,38 +1829,20 @@ class TestAPIEndpoints:
         ('zh-CN-XiaoxiaoNeural', 'edge'),
     ])
     def test_openai_model_value_can_be_provider_voice(
-            self, monkeypatch, model, expected_provider):
+            self, capture_targets, model, expected_provider):
         """Clients with only a model field can use it as the voice ID."""
-        import app as app_module
-
-        captured = {}
-
-        def fake_dispatch(provider, text, voice, pct, **kwargs):
-            captured.update(provider=provider, voice=voice)
-            return b'model-voice-audio', None, provider, voice
-
-        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
         response = self.client.post('/v1/audio/speech', json={
             'model': model,
             'input': 'Model 音色测试',
         })
 
         assert response.status_code == 200
-        assert captured == {'provider': expected_provider, 'voice': model}
+        assert capture_targets == [(expected_provider, model)]
         assert response.headers['X-TTS-Provider'] == expected_provider
         assert response.headers['X-TTS-Voice'] == model
 
-    def test_openai_fish_reference_id_also_works_in_voice_field(self, monkeypatch):
-        import app as app_module
-
+    def test_openai_fish_reference_id_also_works_in_voice_field(self, capture_targets):
         reference_id = 'e6882dded6cb4a96b36453914dc231db'
-        captured = {}
-
-        def fake_dispatch(provider, text, voice, pct, **kwargs):
-            captured.update(provider=provider, voice=voice)
-            return b'fish-reference-audio', None, provider, voice
-
-        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
         response = self.client.post('/v1/audio/speech', json={
             'model': 'tts-1',
             'input': 'Fish Reference 音色测试',
@@ -1857,10 +1850,10 @@ class TestAPIEndpoints:
         })
 
         assert response.status_code == 200
-        assert captured == {'provider': 'fishaudio', 'voice': reference_id}
+        assert capture_targets == [('fishaudio', reference_id)]
 
     def test_openai_provider_model_accepts_saved_fish_reference_id(
-            self, monkeypatch):
+            self, capture_targets):
         import app as app_module
 
         reference_id = 'reference_custom_01'
@@ -1875,13 +1868,6 @@ class TestAPIEndpoints:
             },
         })
         app_module.save_config(config)
-        captured = {}
-
-        def fake_dispatch(provider, text, voice, pct, **kwargs):
-            captured.update(provider=provider, voice=voice)
-            return b'fish-custom-audio', None, provider, voice
-
-        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
         response = self.client.post('/v1/audio/speech', json={
             'model': 'legado-fish-audio-tts',
             'input': '自定义鱼声',
@@ -1889,9 +1875,9 @@ class TestAPIEndpoints:
         })
 
         assert response.status_code == 200
-        assert captured == {'provider': 'fishaudio', 'voice': reference_id}
+        assert capture_targets == [('fishaudio', reference_id)]
 
-    def test_openai_voice_namespace_selects_provider(self, monkeypatch):
+    def test_openai_voice_namespace_selects_provider(self, capture_targets):
         import app as app_module
 
         reference_id = 'reference_namespace_01'
@@ -1901,13 +1887,6 @@ class TestAPIEndpoints:
             'fishaudio': [{'id': reference_id, 'name': '命名空间旁白'}],
         }
         app_module.save_config(config)
-        captured = {}
-
-        def fake_dispatch(provider, text, voice, pct, **kwargs):
-            captured.update(provider=provider, voice=voice)
-            return b'namespaced-audio', None, provider, voice
-
-        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
         response = self.client.post('/v1/audio/speech', json={
             'model': 'gpt-4o-mini-tts',
             'input': '命名空间测试',
@@ -1915,9 +1894,9 @@ class TestAPIEndpoints:
         })
 
         assert response.status_code == 200
-        assert captured == {'provider': 'fishaudio', 'voice': reference_id}
+        assert capture_targets == [('fishaudio', reference_id)]
 
-    def test_openai_custom_voice_object_selects_provider(self, monkeypatch):
+    def test_openai_custom_voice_object_selects_provider(self, capture_targets):
         import app as app_module
 
         reference_id = 'reference_object_01'
@@ -1927,13 +1906,6 @@ class TestAPIEndpoints:
             'fishaudio': [{'id': reference_id, 'name': '对象旁白'}],
         }
         app_module.save_config(config)
-        captured = {}
-
-        def fake_dispatch(provider, text, voice, pct, **kwargs):
-            captured.update(provider=provider, voice=voice)
-            return b'object-voice-audio', None, provider, voice
-
-        monkeypatch.setattr(app_module, 'dispatch', fake_dispatch)
         response = self.client.post('/v1/audio/speech', json={
             'model': 'legado-fish-audio-tts',
             'input': '对象音色测试',
@@ -1941,7 +1913,7 @@ class TestAPIEndpoints:
         })
 
         assert response.status_code == 200
-        assert captured == {'provider': 'fishaudio', 'voice': reference_id}
+        assert capture_targets == [('fishaudio', reference_id)]
 
     def test_openai_custom_voice_object_requires_id(self):
         response = self.client.post('/v1/audio/speech', json={
@@ -1969,11 +1941,12 @@ class TestAPIEndpoints:
 
         calls = []
 
-        def failed_dispatch_impl(provider, *args, **kwargs):
+        def failed_stream(provider, *args, **kwargs):
             calls.append(provider)
-            return None, 'provider unavailable'
+            raise app_module.ProviderStreamError('provider unavailable')
+            yield  # pragma: no cover
 
-        monkeypatch.setattr(app_module, '_dispatch_impl', failed_dispatch_impl)
+        monkeypatch.setattr(app_module, '_iter_provider_stream', failed_stream)
         response = self.client.post('/v1/audio/speech', json={
             'model': 'legado-volcengine-tts',
             'voice': 'zh_female_cancan_uranus_bigtts',
@@ -2074,7 +2047,7 @@ class TestAPIEndpoints:
         if r.status_code == 200:
             assert r.headers.get('X-TTS-Provider') == 'edge'
             assert r.headers.get('Content-Type') == 'audio/mpeg'
-            assert 'Content-Length' in r.headers
+            assert 'Content-Length' not in r.headers
 
     def test_voices_fishaudio(self):
         r = self.client.get('/api/voices?provider=fishaudio')
@@ -2167,6 +2140,8 @@ class TestAdminAuth:
             app_module, 'synthesize_edge',
             lambda *args, **kwargs: (b'edge-test-audio', None),
         )
+        monkeypatch.setattr(app_module, '_edge_stream_iter',
+                            lambda *args, **kwargs: iter((b'edge-test-audio',)))
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -2741,6 +2716,8 @@ class TestFallback:
             app_module, 'synthesize_edge',
             lambda *args, **kwargs: (b'edge-fallback-audio', None),
         )
+        monkeypatch.setattr(app_module, '_edge_stream_iter',
+                            lambda *args, **kwargs: iter((b'edge-fallback-audio',)))
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -3042,6 +3019,8 @@ class TestAuditLog:
             app_module, 'synthesize_edge',
             lambda *args, **kwargs: (b'edge-test-audio', None),
         )
+        monkeypatch.setattr(app_module, '_edge_stream_iter',
+                            lambda *args, **kwargs: iter((b'edge-test-audio',)))
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -3309,6 +3288,8 @@ class TestEdgeCases:
             app_module, 'synthesize_edge',
             lambda *args, **kwargs: (b'edge-test-audio', None),
         )
+        monkeypatch.setattr(app_module, '_edge_stream_iter',
+                            lambda *args, **kwargs: iter((b'edge-test-audio',)))
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
@@ -3626,8 +3607,8 @@ class TestDoubaoStreaming:
         monkeypatch.setattr(self.app_module._http_session, 'post', fake_post)
         monkeypatch.setattr(
             self.app_module,
-            'synthesize_edge',
-            lambda *args, **kwargs: (b'configured-edge-fallback', None),
+            '_edge_stream_iter',
+            lambda *args, **kwargs: iter((b'configured-edge-fallback',)),
         )
 
         result = self.client.post('/speech/stream', json={
@@ -3724,7 +3705,7 @@ class TestDoubaoStreaming:
         def unexpected_edge(*args, **kwargs):
             pytest.fail('a stream that already emitted audio must not fallback')
 
-        monkeypatch.setattr(self.app_module, 'synthesize_edge', unexpected_edge)
+        monkeypatch.setattr(self.app_module, '_edge_stream_iter', unexpected_edge)
 
         with self.app_module._metrics_lock:
             success_before = self.app_module._metrics['requests_success']
@@ -3919,14 +3900,125 @@ class TestDoubaoStreaming:
 
 
 class TestStreaming:
-    """Test the Edge-compatible chunked streaming endpoint."""
+    """Read from the real response iterator without buffering in the test client."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self, monkeypatch, tmp_path):
         import app as app_module
+        monkeypatch.setattr(app_module, 'CONFIG_FILE', str(tmp_path / 'config.json'))
+        monkeypatch.setattr(app_module, 'STATS_FILE', str(tmp_path / 'stats.json'))
+        monkeypatch.setattr(app_module, '_rate_limits', {})
+        app_module.save_config(dict(app_module.DEFAULT_CONFIG, fishaudio_api_key='test',
+                                    fallback_retry_delay_ms=0))
+        app_module._cache_clear()
         self.app = app_module.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
+
+    @pytest.mark.parametrize(('path', 'sse'), [
+        ('/speech/stream', False), ('/speech/stream/chunked', False),
+        ('/v1/audio/speech', False), ('/v1/audio/speech', True),
+    ])
+    def test_fish_first_block_does_not_wait_for_tail(self, monkeypatch, path, sse):
+        import app as server
+        allow_tail = False
+        attempts = []
+
+        class Upstream(FishResponse):
+            def iter_content(self, chunk_size):
+                yield b''
+                yield b'first'
+                assert allow_tail, 'upstream drained before client received the first bytes'
+                yield b'tail'
+
+        upstream = Upstream()
+
+        def post(url, **kwargs):
+            assert kwargs['stream'] is True
+            attempts.append(url)
+            return upstream
+
+        monkeypatch.setattr(server._http_session, 'post', post)
+        body = {'provider': 'fishaudio', 'voice': 'fish-default', 'text': '测试'}
+        if path.startswith('/v1/'):
+            body.update(input=body.pop('text'), model='gpt-4o-mini-tts',
+                        stream_format='sse' if sse else 'audio')
+        with self.client.post(path, json=body, buffered=False) as result:
+            assert result.status_code == 200
+            assert 'Content-Length' not in result.headers
+            assert 'Transfer-Encoding' not in result.headers  # owned by WSGI
+            assert result.headers['X-Accel-Buffering'] == 'no'
+            assert result.headers['X-TTS-Provider'] == 'fishaudio'
+            chunks = iter(result.response)
+            assert next(chunks) == (server._openai_sse_delta(b'first').encode() if sse else b'first')
+            assert not upstream.closed
+            assert not server._cache_info()['count']
+            allow_tail = True
+            assert list(chunks) == ([server._openai_sse_delta(b'tail').encode(),
+                                     server._openai_sse_done().encode()] if sse else [b'tail'])
+        assert upstream.closed
+        key = server._cache_key('fishaudio', '测试', 'fish-default', 0)
+        assert server._cache_get(key) == b'firsttail'
+        assert len(attempts) == 1
+
+    @pytest.mark.parametrize('read_first', [False, True])
+    def test_disconnect_closes_prefetched_upstream_without_caching(self, monkeypatch, read_first):
+        import app as server
+        upstream = FishResponse(b'first', b'never read')
+        monkeypatch.setattr(server._http_session, 'post', lambda *a, **kw: upstream)
+        with self.app.test_request_context('/speech/stream', method='POST',
+                                           json={'provider': 'fishaudio', 'text': '测试'}):
+            response = self.app.full_dispatch_request()
+        if read_first:
+            assert next(iter(response.response)) == b'first'
+        response.close()
+        assert upstream.closed
+        assert server._cache_info()['count'] == 0
+
+    def test_fish_retries_only_before_audio(self, monkeypatch):
+        import app as server
+
+        class Interrupted(FishResponse):
+            def iter_content(self, chunk_size):
+                yield b'audio'
+                raise server.requests.ConnectionError('lost upstream')
+
+        before = FishResponse(b'busy')
+        before.status_code = 503
+        during = Interrupted()
+        attempts = iter([before, during])
+        monkeypatch.setattr(server._http_session, 'post', lambda *a, **kw: next(attempts))
+        monkeypatch.setattr(server, '_edge_stream_iter',
+                            lambda *a, **kw: pytest.fail('cannot switch voices mid-stream'))
+        with self.client.post('/speech/stream', json={'provider': 'fishaudio', 'text': '测试'},
+                              buffered=False) as result:
+            assert result.headers['X-TTS-Retry-Count'] == '1'
+            chunks = iter(result.response)
+            assert next(chunks) == b'audio'
+            with pytest.raises(server.ProviderStreamError, match='lost upstream'):
+                next(chunks)
+        assert before.closed and during.closed
+        assert server._cache_info()['count'] == 0
+
+    @pytest.mark.parametrize('provider', ['tencent', 'xiaomi'])
+    def test_buffered_long_request_delivers_first_segment_before_synthesizing_next(
+            self, monkeypatch, provider):
+        import app as server
+        calls = []
+
+        def synth(text, *args):
+            calls.append(text)
+            return text.encode(), None
+
+        monkeypatch.setattr(server, 'CHUNK_SIZE', 2)
+        monkeypatch.setattr(server, 'synthesize_' + provider, synth)
+        with self.client.post('/speech/stream', json={'text': '天地玄黄', 'provider': provider},
+                              buffered=False) as result:
+            chunks = iter(result.response)
+            assert next(chunks) == '天地'.encode()
+            assert calls == ['天地']
+            assert list(chunks) == ['玄黄'.encode()]
+            assert calls == ['天地', '玄黄']
 
     def test_chunked_missing_text(self):
         r = self.client.post('/speech/stream/chunked', json={'voice': 'zh-CN-XiaoxiaoNeural'})

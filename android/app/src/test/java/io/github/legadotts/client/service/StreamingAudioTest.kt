@@ -24,6 +24,7 @@ class StreamingAudioTest {
         assertEquals(listOf(paragraph), speechSegments(paragraph, 5000, provider = "tencent", singleUtterance = true).toList())
         assertEquals(listOf(paragraph), speechSegments(paragraph, 5000, provider = "edge", singleUtterance = false).toList())
         assertEquals(listOf(paragraph), speechSegments(paragraph, 5000, provider = "doubao", singleUtterance = false).toList())
+        assertEquals(listOf(paragraph), speechSegments(paragraph, 5000, provider = "fishaudio").toList())
     }
 
     @Test fun closingQuotesStayWithSentence() {
@@ -79,6 +80,14 @@ class StreamingAudioTest {
         val reader = Mp3Frames(ByteArrayInputStream(mp3Frame() + mp3Frame()))
         assertNotNull(reader.next())
         assertNotNull(reader.next())
+        assertNull(reader.next())
+    }
+
+    @Test fun keepsReadingAfterAnIntermediateMp3Trailer() {
+        val trailer = "TAG".toByteArray() + ByteArray(125)
+        val reader = Mp3Frames(ByteArrayInputStream(mp3Frame() + trailer + mp3Frame() + trailer))
+        assertArrayEquals(mp3Frame(), reader.next()!!.bytes)
+        assertArrayEquals(mp3Frame(), reader.next()!!.bytes)
         assertNull(reader.next())
     }
 }

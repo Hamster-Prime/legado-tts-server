@@ -48,10 +48,10 @@ internal class Mp3Frames(stream: InputStream) {
                 }
                 continue
             }
-            // ID3v1 is a 128-byte trailer, never an audio frame.
+            // A server response can concatenate multiple independently tagged MP3 segments.
             if (frames > 0 && header[0] == 84.toByte() && header[1] == 65.toByte() && header[2] == 71.toByte()) {
                 input.readFully(ByteArray(124))
-                return null
+                continue
             }
             val b1 = header[1].toInt() and 255
             val b2 = header[2].toInt() and 255

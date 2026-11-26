@@ -46,6 +46,10 @@ from flask import (
 from flask_cors import CORS
 import requests
 import edge_tts
+try:
+    import aiohttp
+except ImportError:  # pragma: no cover - edge-tts installs aiohttp
+    aiohttp = None
 import gzip
 import functools
 
@@ -897,9 +901,32 @@ LEGACY_FISH_AUDIO_VOICE_MAP = {
 }
 
 
+# These Azure-only voices were previously listed in EDGE_VOICES, but Microsoft's
+# free Edge Read Aloud endpoint rejects them with NoAudioReceived. Map saved
+# configs, favorites, and old client URLs to active Edge voices of matching
+# language and gender.
+LEGACY_EDGE_VOICE_MAP = {
+    'zh-CN-XiaochenNeural': 'zh-CN-XiaoxiaoNeural',
+    'zh-CN-XiaohanNeural': 'zh-CN-XiaoxiaoNeural',
+    'zh-CN-XiaomengNeural': 'zh-CN-XiaoxiaoNeural',
+    'zh-CN-XiaomoNeural': 'zh-CN-XiaoxiaoNeural',
+    'zh-CN-XiaoqiuNeural': 'zh-CN-XiaoxiaoNeural',
+    'zh-CN-XiaoruiNeural': 'zh-CN-XiaoxiaoNeural',
+    'zh-CN-XiaoshuangNeural': 'zh-CN-XiaoyiNeural',
+    'zh-CN-XiaoyanNeural': 'zh-CN-XiaoxiaoNeural',
+    'zh-CN-XiaoyouNeural': 'zh-CN-XiaoyiNeural',
+    'zh-CN-YunfengNeural': 'zh-CN-YunxiNeural',
+    'zh-CN-YunhaoNeural': 'zh-CN-YunxiNeural',
+    'zh-CN-YunyeNeural': 'zh-CN-YunxiNeural',
+    'zh-CN-YunzeNeural': 'zh-CN-YunxiNeural',
+    'en-US-DavisNeural': 'en-US-GuyNeural',
+}
+
+
 def _migrate_legacy_voice_id(voice):
     voice = LEGACY_DOUBAO_VOICE_MAP.get(voice, voice)
-    return LEGACY_FISH_AUDIO_VOICE_MAP.get(voice, voice)
+    voice = LEGACY_FISH_AUDIO_VOICE_MAP.get(voice, voice)
+    return LEGACY_EDGE_VOICE_MAP.get(voice, voice)
 
 TENCENT_VOICES = [
     {"id": "501002", "name": "智菊 - 阅读女声"},
@@ -918,21 +945,9 @@ EDGE_VOICES = [
     {"id": "zh-CN-YunjianNeural", "name": "云健 - 男声"},
     {"id": "zh-CN-XiaoyiNeural", "name": "晓伊 - 女声"},
     {"id": "zh-CN-YunyangNeural", "name": "云扬 - 新闻"},
-    {"id": "zh-CN-XiaochenNeural", "name": "晓辰 - 女声"},
-    {"id": "zh-CN-XiaohanNeural", "name": "晓涵 - 女声"},
-    {"id": "zh-CN-XiaomengNeural", "name": "晓梦 - 女声"},
-    {"id": "zh-CN-XiaomoNeural", "name": "晓墨 - 女声"},
-    {"id": "zh-CN-XiaoqiuNeural", "name": "晓秋 - 女声"},
-    {"id": "zh-CN-XiaoruiNeural", "name": "晓睿 - 女声"},
-    {"id": "zh-CN-XiaoshuangNeural", "name": "晓双 - 童声"},
-    {"id": "zh-CN-XiaoxuanNeural", "name": "晓萱 - 女声"},
-    {"id": "zh-CN-XiaoyanNeural", "name": "晓颜 - 女声"},
-    {"id": "zh-CN-XiaoyouNeural", "name": "晓悠 - 童声"},
-    {"id": "zh-CN-YunfengNeural", "name": "云枫 - 男声"},
-    {"id": "zh-CN-YunhaoNeural", "name": "云皓 - 男声"},
     {"id": "zh-CN-YunxiaNeural", "name": "云夏 - 男声"},
-    {"id": "zh-CN-YunyeNeural", "name": "云野 - 男声"},
-    {"id": "zh-CN-YunzeNeural", "name": "云泽 - 男声"},
+    {"id": "zh-CN-liaoning-XiaobeiNeural", "name": "晓北 - 东北女声"},
+    {"id": "zh-CN-shaanxi-XiaoniNeural", "name": "晓妮 - 陕西女声"},
     # Chinese Taiwan
     {"id": "zh-TW-HsiaoChenNeural", "name": "曉臻 - 台湾女声"},
     {"id": "zh-TW-YunJheNeural", "name": "雲哲 - 台湾男声"},
@@ -945,7 +960,10 @@ EDGE_VOICES = [
     {"id": "en-US-JennyNeural", "name": "Jenny - English F"},
     {"id": "en-US-GuyNeural", "name": "Guy - English M"},
     {"id": "en-US-AriaNeural", "name": "Aria - English F"},
-    {"id": "en-US-DavisNeural", "name": "Davis - English M"},
+    {"id": "en-US-AndrewNeural", "name": "Andrew - English M"},
+    {"id": "en-US-AvaNeural", "name": "Ava - English F"},
+    {"id": "en-US-EmmaNeural", "name": "Emma - English F"},
+    {"id": "en-US-BrianNeural", "name": "Brian - English M"},
     {"id": "en-GB-SoniaNeural", "name": "Sonia - British F"},
     {"id": "en-GB-RyanNeural", "name": "Ryan - British M"},
     # Japanese
@@ -1060,8 +1078,12 @@ _VOICE_ALIASES = {
     '云希': 'zh-CN-YunxiNeural',
     '晓伊': 'zh-CN-XiaoyiNeural',
     '云健': 'zh-CN-YunjianNeural',
-    '晓辰': 'zh-CN-XiaochenNeural',
-    '晓涵': 'zh-CN-XiaohanNeural',
+    '云扬': 'zh-CN-YunyangNeural',
+    '云夏': 'zh-CN-YunxiaNeural',
+    '晓北': 'zh-CN-liaoning-XiaobeiNeural',
+    '晓妮': 'zh-CN-shaanxi-XiaoniNeural',
+    '晓辰': 'zh-CN-XiaoxiaoNeural',
+    '晓涵': 'zh-CN-XiaoxiaoNeural',
     # Doubao shorthand
     '灿灿': 'zh_female_cancan_uranus_bigtts',
     '思思': 'zh_female_shuangkuaisisi_uranus_bigtts',
@@ -1083,6 +1105,7 @@ _VOICE_ALIASES = {
 }
 _VOICE_ALIASES.update(LEGACY_DOUBAO_VOICE_MAP)
 _VOICE_ALIASES.update(LEGACY_FISH_AUDIO_VOICE_MAP)
+_VOICE_ALIASES.update(LEGACY_EDGE_VOICE_MAP)
 # Aliases must resolve to a real voice ID, otherwise resolve_provider() sends the
 # request to a provider that will reject it.
 _VOICE_ALIASES = {k: v for k, v in _VOICE_ALIASES.items() if v in _ALL_VOICE_IDS}
@@ -1482,6 +1505,11 @@ def load_config():
     if old_fish_voice in LEGACY_FISH_AUDIO_VOICE_MAP:
         cfg['fishaudio_voice'] = LEGACY_FISH_AUDIO_VOICE_MAP[old_fish_voice]
         changed = True
+    for edge_field in ('edge_voice', 'fallback_voice'):
+        old_edge_voice = cfg.get(edge_field)
+        if old_edge_voice in LEGACY_EDGE_VOICE_MAP:
+            cfg[edge_field] = LEGACY_EDGE_VOICE_MAP[old_edge_voice]
+            changed = True
     favorites = cfg.get('voice_favorites')
     if isinstance(favorites, list):
         migrated = [_migrate_legacy_voice_id(voice) for voice in favorites]
@@ -1518,6 +1546,10 @@ def save_config(config):
     old_fish_voice = clean.get('fishaudio_voice')
     if old_fish_voice in LEGACY_FISH_AUDIO_VOICE_MAP:
         clean['fishaudio_voice'] = LEGACY_FISH_AUDIO_VOICE_MAP[old_fish_voice]
+    for edge_field in ('edge_voice', 'fallback_voice'):
+        old_edge_voice = clean.get(edge_field)
+        if old_edge_voice in LEGACY_EDGE_VOICE_MAP:
+            clean[edge_field] = LEGACY_EDGE_VOICE_MAP[old_edge_voice]
     favorites = clean.get('voice_favorites')
     if isinstance(favorites, list):
         clean['voice_favorites'] = [
@@ -1686,8 +1718,8 @@ def _retry_delay_seconds(base_delay_ms, retry_number):
 
 def _retry_after_seconds(response):
     """Parse an HTTP Retry-After value, capped to avoid tying up a worker."""
-    raw = (getattr(response, 'headers', {}).get('Retry-After')
-           if response is not None else None)
+    headers = getattr(response, 'headers', None) if response is not None else None
+    raw = headers.get('Retry-After') if headers else None
     if raw is None:
         return None
     try:
@@ -1998,8 +2030,117 @@ def synthesize_tencent(text, voice, speed=0, config=None):
         return None, str(e)
 
 
+_EDGE_MIN_VERSION = '7.3.1'
+_EDGE_PCT_RE = re.compile(r'^([+-]?)(\d+)%$')
+_EDGE_HZ_RE = re.compile(r'^([+-]?)(\d+)hz$', re.IGNORECASE)
+
+
+def _edge_supports_v2_gec():
+    """Return whether the installed edge-tts supports Microsoft's Sec-MS-GEC v2."""
+    constants = getattr(edge_tts, 'constants', None)
+    gec_version = getattr(constants, 'SEC_MS_GEC_VERSION', '')
+    return isinstance(gec_version, str) and gec_version.startswith('2-')
+
+
+def _edge_package_version():
+    return getattr(edge_tts, '__version__', 'unknown')
+
+
+if not _edge_supports_v2_gec():
+    log.warning(
+        "Installed edge-tts (%s) does not support Sec-MS-GEC v2; Edge TTS "
+        "synthesis will fail with HTTP 403 until upgraded to edge-tts>=%s",
+        _edge_package_version(),
+        _EDGE_MIN_VERSION,
+    )
+
+
+def _normalize_edge_volume(volume):
+    """Normalize volume into edge-tts's strict '[+-]N%' format."""
+    if volume is None:
+        return '+0%'
+    raw = str(volume).strip()
+    if not raw:
+        return '+0%'
+    m = _EDGE_PCT_RE.fullmatch(raw)
+    if m:
+        sign, digits = m.groups()
+        return f'{sign or "+"}{digits}%'
+    return raw
+
+
+def _normalize_edge_pitch(pitch):
+    """Normalize pitch into edge-tts's strict '[+-]NHz' format."""
+    if pitch is None:
+        return '+0Hz'
+    raw = str(pitch).strip()
+    if not raw:
+        return '+0Hz'
+    m = _EDGE_HZ_RE.fullmatch(raw)
+    if m:
+        sign, digits = m.groups()
+        return f'{sign or "+"}{digits}Hz'
+    return raw
+
+
+def _edge_error_to_stream_error(exc):
+    """Classify an Edge TTS failure for retry and user-facing diagnostics."""
+    if isinstance(exc, ProviderStreamError):
+        return exc
+    if isinstance(exc, TimeoutError):
+        return ProviderStreamError(
+            f'Edge TTS timed out after {REQUEST_TIMEOUT}s',
+            retryable=False,
+        )
+
+    edge_exc = getattr(edge_tts, 'exceptions', None)
+    retryable_edge_types = tuple(
+        cls for cls in (
+            getattr(edge_exc, 'NoAudioReceived', None),
+            getattr(edge_exc, 'WebSocketError', None),
+            getattr(edge_exc, 'UnexpectedResponse', None),
+            getattr(edge_exc, 'UnknownResponse', None),
+        )
+        if isinstance(cls, type)
+    )
+    if retryable_edge_types and isinstance(exc, retryable_edge_types):
+        return ProviderStreamError(str(exc) or exc.__class__.__name__, retryable=True)
+
+    status_code = getattr(exc, 'status', None)
+    if not isinstance(status_code, int):
+        status_code = None
+    retry_after = _retry_after_seconds(exc)
+
+    if status_code == 403 and not _edge_supports_v2_gec():
+        return ProviderStreamError(
+            f'Edge TTS 握手被拒绝 (403)：当前 edge-tts 版本过旧 ({_edge_package_version()})，'
+            f'请升级到 edge-tts>={_EDGE_MIN_VERSION}',
+            retryable=False,
+            status_code=403,
+        )
+
+    if aiohttp is not None and isinstance(exc, aiohttp.ClientResponseError):
+        return ProviderStreamError(
+            str(exc) or f'Edge TTS HTTP {status_code}',
+            retryable=status_code is not None and _is_retryable_http_status(status_code),
+            status_code=status_code,
+            retry_after=retry_after,
+        )
+
+    if (aiohttp is not None and isinstance(exc, aiohttp.ClientError)) or isinstance(exc, OSError):
+        return ProviderStreamError(str(exc) or exc.__class__.__name__, retryable=True)
+
+    return ProviderStreamError(
+        str(exc) or exc.__class__.__name__,
+        retryable=False,
+        status_code=status_code,
+        retry_after=retry_after,
+    )
+
+
 def _edge_communicate(text, voice, rate='+0%', style=None, volume='+0%', pitch='+0Hz'):
     """Build an edge_tts.Communicate for the given prosody settings."""
+    voice = LEGACY_EDGE_VOICE_MAP.get(voice, voice)
     if ALLOW_SSML and text.strip().startswith('<speak'):
         # SSML carries its own prosody; passing rate/volume/pitch too is rejected
         return edge_tts.Communicate(text, voice)
@@ -2007,44 +2148,60 @@ def _edge_communicate(text, voice, rate='+0%', style=None, volume='+0%', pitch='
     # edge-tts exposes numeric prosody controls but no free-form ``style``
     # argument. Keep style in our internal call signature for compatibility
     # with existing clients, but never forward an unsupported keyword.
-    if volume != '+0%':
-        kwargs['volume'] = volume
-    if pitch != '+0Hz':
-        kwargs['pitch'] = pitch
+    norm_volume = _normalize_edge_volume(volume)
+    norm_pitch = _normalize_edge_pitch(pitch)
+    if norm_volume != '+0%':
+        kwargs['volume'] = norm_volume
+    if norm_pitch != '+0Hz':
+        kwargs['pitch'] = norm_pitch
     return edge_tts.Communicate(text, voice, **kwargs)
 
 
-def synthesize_edge(text, voice, rate='+0%', style=None, volume='+0%', pitch='+0Hz'):
-    async def _synth():
-        comm = _edge_communicate(text, voice, rate, style, volume, pitch)
-        buf = io.BytesIO()
-        async for chunk in comm.stream():
-            if chunk["type"] == "audio":
-                buf.write(chunk["data"])
-        return buf.getvalue()
-    async def _timed_synth():
-        return await asyncio.wait_for(_synth(), timeout=REQUEST_TIMEOUT)
-    try:
+def synthesize_edge(text, voice, rate='+0%', style=None, volume='+0%', pitch='+0Hz', config=None):
+    config = load_config() if config is None else config
+
+    def _once():
+        async def _synth():
+            comm = _edge_communicate(text, voice, rate, style, volume, pitch)
+            buf = io.BytesIO()
+            async for chunk in comm.stream():
+                if chunk["type"] == "audio":
+                    buf.write(chunk["data"])
+            return buf.getvalue()
+
+        async def _timed_synth():
+            return await asyncio.wait_for(_synth(), timeout=REQUEST_TIMEOUT)
+
         try:
-            asyncio.get_running_loop()
-            loop_running = True
-        except RuntimeError:
-            loop_running = False
-        if loop_running:
-            executor = _edge_executor
-            if executor is None:
-                return None, 'Edge TTS executor is shut down'
-            # The coroutine is created inside the branch that consumes it, so it
-            # is never left un-awaited (which would emit a RuntimeWarning).
-            fut = executor.submit(lambda: asyncio.run(_timed_synth()))
             try:
-                return fut.result(timeout=REQUEST_TIMEOUT + 1), None
-            except TimeoutError:
-                fut.cancel()
-                raise
-        return asyncio.run(_timed_synth()), None
-    except TimeoutError:
-        return None, f'Edge TTS timed out after {REQUEST_TIMEOUT}s'
+                asyncio.get_running_loop()
+                loop_running = True
+            except RuntimeError:
+                loop_running = False
+            if loop_running:
+                executor = _edge_executor
+                if executor is None:
+                    raise ProviderStreamError('Edge TTS executor is shut down', retryable=False)
+                # The coroutine is created inside the branch that consumes it, so it
+                # is never left un-awaited (which would emit a RuntimeWarning).
+                fut = executor.submit(lambda: asyncio.run(_timed_synth()))
+                try:
+                    data = fut.result(timeout=REQUEST_TIMEOUT + 1)
+                except TimeoutError:
+                    fut.cancel()
+                    raise
+            else:
+                data = asyncio.run(_timed_synth())
+        except Exception as e:
+            raise _edge_error_to_stream_error(e) from e
+        if not data:
+            raise ProviderStreamError('Edge TTS returned empty audio', retryable=True)
+        return data
+
+    try:
+        return _provider_attempts('edge', config, _once), None
+    except ProviderStreamError as e:
+        return None, str(e)
     except Exception as e:
         return None, str(e)
 
@@ -2065,7 +2222,23 @@ def _edge_live_voices():
         if (_edge_live_cache['voices'] is not None
                 and now - _edge_live_cache['ts'] < _EDGE_VOICES_TTL):
             return _edge_live_cache['voices']
-    voices = asyncio.run(edge_tts.list_voices())
+
+    async def _fetch():
+        return await asyncio.wait_for(edge_tts.list_voices(), timeout=REQUEST_TIMEOUT)
+
+    try:
+        asyncio.get_running_loop()
+        loop_running = True
+    except RuntimeError:
+        loop_running = False
+    if loop_running:
+        executor = _edge_executor
+        if executor is None:
+            raise RuntimeError('Edge TTS executor is shut down')
+        fut = executor.submit(lambda: asyncio.run(_fetch()))
+        voices = fut.result(timeout=REQUEST_TIMEOUT + 1)
+    else:
+        voices = asyncio.run(_fetch())
     with _edge_live_lock:
         _edge_live_cache['voices'] = voices
         _edge_live_cache['ts'] = now
@@ -2093,11 +2266,19 @@ def _edge_stream_iter(text, voice, rate='+0%', style=None, volume='+0%', pitch='
                 break
             if chunk.get('type') == 'audio' and chunk.get('data'):
                 yield chunk['data']
+    except Exception as e:
+        raise _edge_error_to_stream_error(e) from e
     finally:
         try:
             if agen is not None:
-                loop.run_until_complete(agen.aclose())
-            loop.run_until_complete(loop.shutdown_asyncgens())
+                try:
+                    loop.run_until_complete(asyncio.wait_for(agen.aclose(), timeout=5))
+                except Exception:
+                    pass
+            try:
+                loop.run_until_complete(asyncio.wait_for(loop.shutdown_asyncgens(), timeout=5))
+            except Exception:
+                pass
         finally:
             loop.close()
 
@@ -3318,6 +3499,7 @@ def _fallback_policy(config=None):
     voice = config.get('fallback_voice', _FALLBACK_ENV_VOICE)
     if FALLBACK_VOICE != _FALLBACK_ENV_VOICE:
         voice = FALLBACK_VOICE
+    voice = LEGACY_EDGE_VOICE_MAP.get(voice, voice)
     if not _is_valid_provider_voice('edge', voice):
         voice = 'zh-CN-XiaoxiaoNeural'
 
@@ -3638,6 +3820,12 @@ def _normalize_legacy_config_payload(data):
         stripped_voice = fish_voice.strip()
         normalized['fishaudio_voice'] = LEGACY_FISH_AUDIO_VOICE_MAP.get(
             stripped_voice, fish_voice)
+    for edge_field in ('edge_voice', 'fallback_voice'):
+        edge_voice = normalized.get(edge_field)
+        if isinstance(edge_voice, str):
+            stripped_edge = edge_voice.strip()
+            normalized[edge_field] = LEGACY_EDGE_VOICE_MAP.get(
+                stripped_edge, edge_voice)
     return normalized
 
 
@@ -3772,7 +3960,7 @@ def api_config_test():
     # prevents an old successful cache entry from hiding a newly-invalid key.
     sample = _clean_text('你好，配置测试。')
     if provider == 'edge':
-        audio, error = synthesize_edge(sample, voice, '+0%')
+        audio, error = synthesize_edge(sample, voice, '+0%', config=config)
     elif provider == 'doubao':
         audio, error = synthesize_doubao(sample, voice, 0, config=config)
     elif provider == 'tencent':

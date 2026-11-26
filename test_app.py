@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for legado-tts-server"""
 
+import copy
 import json
 import logging
 import os
@@ -4248,3 +4249,174 @@ class TestStreaming:
         r = self.client.get('/health')
         assert 'X-RateLimit-Limit' in r.headers
         assert 'X-RateLimit-Remaining' in r.headers
+
+
+class TestEdgeTTSReliability:
+    """Verify Edge TTS Sec-MS-GEC v2 readiness, catalog hygiene, and retries."""
+
+    @pytest.fixture(autouse=True)
+    def setup_isolated_config(self, tmp_path, monkeypatch):
+        import app as app_module
+
+        self.app_module = app_module
+        config_path = tmp_path / 'config.json'
+        stats_path = tmp_path / 'stats.json'
+        monkeypatch.setattr(app_module, 'CONFIG_FILE', str(config_path))
+        monkeypatch.setattr(app_module, 'STATS_FILE', str(stats_path))
+        monkeypatch.setattr(app_module, '_stats_readonly', False)
+        monkeypatch.setattr(app_module, 'ADMIN_TOKEN', '')
+        monkeypatch.setattr(app_module, 'API_KEYS_REQUIRED', False)
+        monkeypatch.setattr(app_module, 'RATE_LIMIT_RPM', 0)
+        with app_module._config_cache_lock:
+            app_module._config_cache['data'] = None
+            app_module._config_cache['mtime'] = None
+        app_module._cache_clear()
+        cfg = copy.deepcopy(app_module.DEFAULT_CONFIG)
+        cfg.update({'fallback_retry_count': 1, 'fallback_retry_delay_ms': 0})
+        app_module.save_config(cfg)
+        self.client = app_module.app.test_client()
+
+    def test_installed_edge_tts_supports_sec_ms_gec_v2(self):
+        assert self.app_module._edge_supports_v2_gec() is True
+
+    def test_edge_catalog_excludes_retired_voices_and_maps_to_active_voices(self):
+        active_ids = {v['id'] for v in EDGE_VOICES}
+        assert 'zh-CN-liaoning-XiaobeiNeural' in active_ids
+        assert 'zh-CN-shaanxi-XiaoniNeural' in active_ids
+        for legacy_id, replacement in self.app_module.LEGACY_EDGE_VOICE_MAP.items():
+            assert legacy_id not in active_ids
+            assert replacement in active_ids
+
+    def test_legacy_edge_voices_migrate_in_config_and_requests(self, monkeypatch):
+        import app as app_module
+
+        raw = copy.deepcopy(app_module.DEFAULT_CONFIG)
+        raw.update({
+            'edge_voice': 'zh-CN-XiaochenNeural',
+            'fallback_voice': 'zh-CN-YunyeNeural',
+            'voice_favorites': ['en-US-DavisNeural', 'zh-CN-XiaoxiaoNeural'],
+        })
+        app_module._write_json(app_module.CONFIG_FILE, raw)
+        with app_module._config_cache_lock:
+            app_module._config_cache['data'] = None
+            app_module._config_cache['mtime'] = None
+
+        loaded = app_module.load_config()
+        assert loaded['edge_voice'] == 'zh-CN-XiaoxiaoNeural'
+        assert loaded['fallback_voice'] == 'zh-CN-YunxiNeural'
+        assert loaded['voice_favorites'] == ['en-US-GuyNeural', 'zh-CN-XiaoxiaoNeural']
+
+        seen = []
+
+        class FakeCommunicate:
+            def __init__(self, text, voice, **kwargs):
+                seen.append((text, voice, kwargs))
+
+            async def stream(self):
+                yield {'type': 'audio', 'data': b'edge-migrated'}
+
+        monkeypatch.setattr(app_module.edge_tts, 'Communicate', FakeCommunicate)
+        monkeypatch.setattr(app_module, 'update_stats', lambda *a, **kw: None)
+
+        r = self.client.post('/speech/stream', json={
+            'text': '迁移测试',
+            'voice': 'zh-CN-XiaochenNeural',
+        })
+        assert r.status_code == 200
+        assert r.data == b'edge-migrated'
+        assert r.headers['X-TTS-Voice'] == 'zh-CN-XiaoxiaoNeural'
+        assert seen[-1][1] == 'zh-CN-XiaoxiaoNeural'
+
+    def test_edge_communicate_normalizes_volume_and_pitch(self, monkeypatch):
+        captured = []
+
+        class FakeCommunicate:
+            def __init__(self, text, voice, **kwargs):
+                captured.append((text, voice, kwargs))
+
+        monkeypatch.setattr(self.app_module.edge_tts, 'Communicate', FakeCommunicate)
+
+        self.app_module._edge_communicate(
+            '测试', 'zh-CN-XiaochenNeural', rate='+10%', volume='0%', pitch='0hz')
+        assert captured[-1] == ('测试', 'zh-CN-XiaoxiaoNeural', {'rate': '+10%'})
+
+        self.app_module._edge_communicate(
+            '测试', 'zh-CN-XiaoxiaoNeural', rate='+0%', volume='', pitch='')
+        assert captured[-1] == ('测试', 'zh-CN-XiaoxiaoNeural', {'rate': '+0%'})
+
+        self.app_module._edge_communicate(
+            '测试', 'zh-CN-XiaoxiaoNeural', rate='+0%', volume='15%', pitch='5hz')
+        assert captured[-1] == (
+            '测试', 'zh-CN-XiaoxiaoNeural',
+            {'rate': '+0%', 'volume': '+15%', 'pitch': '+5Hz'},
+        )
+
+    def test_synthesize_edge_retries_transient_no_audio_received(self, monkeypatch):
+        app_module = self.app_module
+        attempts = []
+
+        class FlakyCommunicate:
+            def __init__(self, text, voice, **kwargs):
+                attempts.append(voice)
+
+            async def stream(self):
+                if len(attempts) == 1:
+                    raise app_module.edge_tts.exceptions.NoAudioReceived('transient 1006')
+                yield {'type': 'audio', 'data': b'edge-recovered'}
+
+        monkeypatch.setattr(app_module.edge_tts, 'Communicate', FlakyCommunicate)
+        audio, err = app_module.synthesize_edge('测试', 'zh-CN-XiaoxiaoNeural')
+        assert err is None
+        assert audio == b'edge-recovered'
+        assert len(attempts) == 2
+
+    def test_streaming_edge_retries_transient_no_audio_before_first_chunk(self, monkeypatch):
+        app_module = self.app_module
+        attempts = []
+
+        class FlakyCommunicate:
+            def __init__(self, text, voice, **kwargs):
+                attempts.append(voice)
+
+            async def stream(self):
+                if len(attempts) == 1:
+                    raise app_module.edge_tts.exceptions.NoAudioReceived('transient 1006')
+                yield {'type': 'audio', 'data': b'edge-stream-ok'}
+
+        monkeypatch.setattr(app_module.edge_tts, 'Communicate', FlakyCommunicate)
+        monkeypatch.setattr(app_module, 'update_stats', lambda *a, **kw: None)
+
+        r = self.client.post('/speech/stream', json={
+            'text': '重试测试',
+            'voice': 'zh-CN-XiaoxiaoNeural',
+        })
+        assert r.status_code == 200
+        assert r.data == b'edge-stream-ok'
+        assert r.headers['X-TTS-Retry-Count'] == '1'
+        assert len(attempts) == 2
+
+    def test_edge_403_with_outdated_package_reports_upgrade_guidance(self, monkeypatch):
+        app_module = self.app_module
+        attempts = []
+
+        class Fake403Error(Exception):
+            status = 403
+            headers = None
+
+        class BrokenCommunicate:
+            def __init__(self, *args, **kwargs):
+                attempts.append(1)
+
+            async def stream(self):
+                raise Fake403Error('403 Invalid response status')
+                yield  # pragma: no cover
+
+        monkeypatch.setattr(app_module, '_edge_supports_v2_gec', lambda: False)
+        monkeypatch.setattr(app_module, '_edge_package_version', lambda: '7.2.8')
+        monkeypatch.setattr(app_module.edge_tts, 'Communicate', BrokenCommunicate)
+
+        audio, err = app_module.synthesize_edge('测试', 'zh-CN-XiaoxiaoNeural')
+        assert audio is None
+        assert '7.2.8' in err
+        assert 'edge-tts>=7.3.1' in err
+        assert len(attempts) == 1

@@ -813,6 +813,40 @@
         const mainPage = document.querySelector('[data-console-page="main"]');
         const onMain = !mainPage || !mainPage.hidden;
         bar.hidden = !(state.dirty && onMain);
+        document.body.classList.toggle('has-floating-save', !bar.hidden);
+    }
+
+    function updateBackToTopVisibility() {
+        const btn = $('back-to-top-btn');
+        if (!btn) return;
+        const scroller = $('content-scroll');
+        const y = Math.max(scroller ? scroller.scrollTop : 0, window.scrollY || document.documentElement.scrollTop || 0);
+        const visible = y >= 140;
+        btn.classList.toggle('is-visible', visible);
+        btn.setAttribute('aria-hidden', String(!visible));
+        btn.tabIndex = visible ? 0 : -1;
+    }
+
+    function initBackToTop() {
+        const btn = $('back-to-top-btn');
+        if (!btn) return;
+        const scroller = $('content-scroll');
+        const onScroll = () => updateBackToTopVisibility();
+        if (scroller) scroller.addEventListener('scroll', onScroll, {passive: true});
+        window.addEventListener('scroll', onScroll, {passive: true});
+        window.addEventListener('resize', onScroll, {passive: true});
+        btn.addEventListener('click', () => {
+            const reduced = typeof window.matchMedia === 'function'
+                && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            const behavior = reduced ? 'auto' : 'smooth';
+            if (scroller && typeof scroller.scrollTo === 'function') {
+                scroller.scrollTo({top: 0, behavior});
+            }
+            if (typeof window.scrollTo === 'function') {
+                window.scrollTo({top: 0, behavior});
+            }
+        });
+        updateBackToTopVisibility();
     }
 
     function setMobileSidebarOpen(open) {
@@ -995,6 +1029,7 @@
         }
         setMobileSidebarOpen(false);
         syncFloatingSaveBar();
+        updateBackToTopVisibility();
         requestAnimationFrame(syncAllTabIndicators);
         requestAnimationFrame(syncContentCenterX);
     }
@@ -2973,6 +3008,7 @@
         updateTextCount();
         initCollapsibles();
         initSidebarController();
+        initBackToTop();
         initConsoleNavigation();
         let loadedConfig = null;
         let configLoadError = '';

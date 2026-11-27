@@ -40,6 +40,7 @@
     <symbol id="icon-chevron-left" viewBox="0 0 24 24"><path d="m14 18-6-6 6-6"/></symbol>
     <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
     <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
     <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
     <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></symbol>
     <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 16V4m-5 5 5-5 5 5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></symbol>
@@ -333,7 +334,7 @@
               <div class="hero-grid-wash"></div>
             </div>
 
-            <section class="hero">
+            <section class="hero reveal-card" style="--stagger: 0">
               <div class="hero-copy">
                 <span class="eyebrow">LEGADO TTS · v{{ version }}</span>
                 <h1 class="hero-title">语音工作台<span class="hero-period hero-period-live" aria-hidden="true">.</span></h1>
@@ -386,7 +387,7 @@
             </section>
 
             <!-- Top Runtime Overview KPIs -->
-            <section class="stats-row" aria-labelledby="runtime-title">
+            <section class="stats-row reveal-card" style="--stagger: 1" aria-labelledby="runtime-title">
               <h2 class="sr-only" id="runtime-title">运行概览</h2>
               <article class="stat-tile accent-success">
                 <div class="stat-label-row">
@@ -423,25 +424,21 @@
               </article>
             </section>
 
-            <!-- Section 01: Provider & Voice Configuration -->
-            <section class="section-block" id="section-settings" aria-labelledby="settings-title">
-              <div class="section-head">
-                <span class="eyebrow">01 · ENGINE &amp; VOICE</span>
-                <h2 class="section-title" id="settings-title">服务与音色</h2>
-              </div>
-
-              <div class="section-card">
+            <!-- Two-Column Workspace Grid -->
+            <div class="workspace-grid">
+              <!-- Section 01: Provider & Voice Configuration (Left Column) -->
+              <section class="section-card settings-panel reveal-card" id="section-settings" style="--stagger: 2" aria-labelledby="settings-title">
                 <header class="section-card-header">
                   <div class="section-card-badges">
                     <span class="index-badge">01</span>
                   </div>
                   <div class="section-card-heading">
                     <div class="section-card-title-row">
-                      <h3>语音引擎与默认音色</h3>
+                      <h2 id="settings-title">服务与音色</h2>
                       <span class="credential-badge" id="credential-badge">免凭证即用</span>
                       <span id="credential-title" class="sr-only">服务凭证</span>
                     </div>
-                    <p>选择语音引擎、维护密钥与自定义音色，并配置智能故障转移策略。</p>
+                    <p>选择语音引擎、维护密钥与自定义音色，并配置智能故障转移。</p>
                   </div>
                 </header>
 
@@ -449,28 +446,23 @@
                   <div class="provider-tabs-bar">
                     <div class="provider-tabs" role="radiogroup" aria-label="语音服务商">
                       <button class="provider-tab provider-item active is-active" data-provider="edge" type="button" role="radio" aria-checked="true">
-                        <span class="p-badge" aria-hidden="true">Ed</span>
-                        <span class="p-title">Edge</span>
+                        <span class="p-top"><span class="p-badge" aria-hidden="true">Ed</span><span class="p-title">Edge</span></span>
                         <span class="p-sub" id="edge-status">免费</span>
                       </button>
                       <button class="provider-tab provider-item" data-provider="doubao" type="button" role="radio" aria-checked="false" tabindex="-1">
-                        <span class="p-badge" aria-hidden="true">火</span>
-                        <span class="p-title">火山引擎</span>
+                        <span class="p-top"><span class="p-badge" aria-hidden="true">火</span><span class="p-title">火山引擎</span></span>
                         <span class="p-sub" id="doubao-status">待配置</span>
                       </button>
                       <button class="provider-tab provider-item" data-provider="tencent" type="button" role="radio" aria-checked="false" tabindex="-1">
-                        <span class="p-badge" aria-hidden="true">腾</span>
-                        <span class="p-title">腾讯云</span>
+                        <span class="p-top"><span class="p-badge" aria-hidden="true">腾</span><span class="p-title">腾讯云</span></span>
                         <span class="p-sub" id="tencent-status">待配置</span>
                       </button>
                       <button class="provider-tab provider-item" data-provider="xiaomi" type="button" role="radio" aria-checked="false" tabindex="-1">
-                        <span class="p-badge" aria-hidden="true">Mi</span>
-                        <span class="p-title">小米 MiMo</span>
+                        <span class="p-top"><span class="p-badge" aria-hidden="true">Mi</span><span class="p-title">MiMo</span></span>
                         <span class="p-sub" id="xiaomi-status">待配置</span>
                       </button>
                       <button class="provider-tab provider-item" data-provider="fishaudio" type="button" role="radio" aria-checked="false" tabindex="-1">
-                        <span class="p-badge" aria-hidden="true">Fi</span>
-                        <span class="p-title">Fish Audio</span>
+                        <span class="p-top"><span class="p-badge" aria-hidden="true">Fi</span><span class="p-title">Fish</span></span>
                         <span class="p-sub" id="fishaudio-status">待配置</span>
                       </button>
                     </div>
@@ -720,30 +712,23 @@
                     </button>
                   </div>
                 </footer>
-              </div>
-            </section>
+              </section>
 
-            <!-- Section 02: Audition Studio & Live Activity -->
-            <section class="section-block" id="section-studio" aria-labelledby="studio-title">
-              <div class="section-head">
-                <span class="eyebrow">02 · STUDIO &amp; TELEMETRY</span>
-                <h2 class="section-title" id="studio-title">试听工作室</h2>
-              </div>
-
-              <div class="section-card">
+              <!-- Section 02: Audition Studio & Live Activity (Right Column) -->
+              <section class="section-card studio-panel reveal-card" id="section-studio" style="--stagger: 3" aria-labelledby="studio-title">
                 <header class="section-card-header studio-card-header">
                   <div class="section-card-badges">
                     <span class="index-badge">02</span>
                   </div>
                   <div class="section-card-heading">
                     <div class="section-card-title-row">
-                      <h3>即时合成、A/B 盲测与实时请求日志</h3>
+                      <h2 id="studio-title">试听工作室</h2>
                       <span class="live-state is-live" id="live-state">
                         <span class="status-dot" aria-hidden="true"></span>
                         <span>就绪</span>
                       </span>
                     </div>
-                    <p>使用当前工作台草稿快速试听对比，或查看实时合成请求的审计流水。</p>
+                    <p>即时合成试听、双音色 A/B 对比与实时请求流水。</p>
                   </div>
 
                   <div class="sub-tabs" id="studio-sub-tabs" role="tablist" aria-label="试听与监控">
@@ -776,7 +761,7 @@
                         </div>
                       </div>
                       <div class="textarea-wrap">
-                        <textarea class="textarea-control" id="test-text" rows="5" maxlength="5000" placeholder="在这里输入或粘贴一段文字，体验朗读效果…">阳光透过层叠的树叶洒在林间小径上，微风拂过带来初夏的泥土清香。这是一个宁静而美好的午后。</textarea>
+                        <textarea class="textarea-control" id="test-text" rows="4" maxlength="5000" placeholder="在这里输入或粘贴一段文字，体验朗读效果…">阳光透过层叠的树叶洒在林间小径上，微风拂过带来初夏的泥土清香。这是一个宁静而美好的午后。</textarea>
                         <div class="textarea-footer">
                           <span class="textarea-hint">支持快捷键 Ctrl + Enter 快速生成</span>
                           <span class="character-count"><span id="test-text-count">0</span> / 5,000</span>
@@ -816,7 +801,7 @@
                         </button>
                         <p class="studio-hint">
                           <span id="play-voice-label">当前草稿 · Edge TTS</span>
-                          <span>满意后请点击上方「保存并应用」同步至客户端</span>
+                          <span>满意后点击左侧或底部「保存并应用」同步至客户端</span>
                         </p>
                       </div>
 
@@ -990,36 +975,30 @@
                     </div>
                   </div>
                 </div>
-              </div>
-            </section>
+              </section>
+            </div>
 
             <!-- Section 03: Legado Integration -->
-            <section class="section-block" id="section-integration" aria-labelledby="integration-title">
-              <div class="section-head">
-                <span class="eyebrow">03 · LEGADO EXPORT</span>
-                <h2 class="section-title" id="integration-title">接入开源阅读</h2>
-              </div>
-
-              <div class="section-card">
-                <header class="section-card-header">
-                  <div class="section-card-badges">
-                    <span class="index-badge">03</span>
+            <section class="section-card integration-card reveal-card" id="section-integration" style="--stagger: 4" aria-labelledby="integration-title">
+              <header class="section-card-header integration-card-header">
+                <div class="section-card-badges">
+                  <span class="index-badge">03</span>
+                </div>
+                <div class="section-card-heading">
+                  <div class="section-card-title-row">
+                    <h2 id="integration-title">接入开源阅读</h2>
+                    <span class="recommended-tag">推荐本地 JSON 导入</span>
                   </div>
-                  <div class="section-card-heading">
-                    <div class="section-card-title-row">
-                      <h3>导出语音引擎配置</h3>
-                      <span class="recommended-tag">推荐本地 JSON 导入</span>
-                    </div>
-                    <p>保存上方配置后，复制 JSON 配置或订阅链接导入 Legado，即可开始高质量听书。</p>
-                    <ol class="integration-steps">
-                      <li><span>01</span>保存配置</li>
-                      <li><span>02</span>复制引擎</li>
-                      <li><span>03</span>导入 Legado</li>
-                    </ol>
-                  </div>
-                </header>
+                  <p>保存上方配置后，复制 JSON 配置或订阅链接导入 Legado，即可开始高质量听书。</p>
+                </div>
+                <ol class="integration-steps">
+                  <li><span>01</span>保存配置</li>
+                  <li><span>02</span>复制引擎</li>
+                  <li><span>03</span>导入 Legado</li>
+                </ol>
+              </header>
 
-                <div class="section-card-content integration-actions">
+              <div class="section-card-content integration-actions">
                   <div class="setting-list">
                     <div class="setting-row setting-row-block legado-client-auth">
                       <div class="field-label">
@@ -1084,7 +1063,6 @@
                     </div>
                   </div>
                 </div>
-              </div>
             </section>
           </div>
 
@@ -1256,6 +1234,19 @@
       </div>
     </div>
   </div>
+
+  <!-- Floating Back-to-Top Button -->
+  <button
+    type="button"
+    class="back-to-top-btn"
+    id="back-to-top-btn"
+    aria-label="返回顶部"
+    title="返回顶部"
+    aria-hidden="true"
+    tabindex="-1"
+  >
+    <svg class="icon" aria-hidden="true"><use href="#icon-arrow-up"/></svg>
+  </button>
 
   <!-- Voice Library Dialog -->
   <dialog class="app-dialog voice-dialog" id="voice-dialog" aria-labelledby="voice-dialog-title">

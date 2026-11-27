@@ -532,29 +532,84 @@
         if (!copied) throw new Error('浏览器不允许复制，请手动选择内容');
     }
 
+    const THEME_MODES = new Set(['auto', 'white', 'light', 'dark']);
+    const THEME_LABELS = {auto: '自动', white: '纯白', light: '暖浅', dark: '深炭'};
+    const THEME_ICONS = {
+        auto: '#icon-theme-auto',
+        white: '#icon-theme-white',
+        light: '#icon-sun',
+        dark: '#icon-moon',
+    };
+
+    function getThemeMode() {
+        try {
+            const saved = localStorage.getItem('tts-theme') || 'auto';
+            if (THEME_MODES.has(saved)) return saved;
+        } catch (_) {}
+        const fromDom = document.documentElement.dataset.themeMode;
+        return THEME_MODES.has(fromDom) ? fromDom : 'auto';
+    }
+
+    function resolveTheme(mode) {
+        if (mode === 'auto') {
+            const prefersDark = typeof window.matchMedia === 'function'
+                && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            return prefersDark ? 'dark' : 'light';
+        }
+        return THEME_MODES.has(mode) ? mode : 'light';
+    }
+
+    function applyThemeMode(mode, persist = true) {
+        const validMode = THEME_MODES.has(mode) ? mode : 'auto';
+        const resolved = resolveTheme(validMode);
+        document.documentElement.dataset.themeMode = validMode;
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.setAttribute('data-theme', resolved);
+        if (persist) {
+            try { localStorage.setItem('tts-theme', validMode); } catch (_) {}
+        }
+        updateThemeButton();
+    }
+
     function updateThemeButton() {
-        const dark = document.documentElement.getAttribute('data-theme') === 'dark'
-            || document.documentElement.dataset.theme === 'dark';
-        if ($('theme-icon-use')) $('theme-icon-use').setAttribute('href', dark ? '#icon-sun' : '#icon-moon');
-        if ($('theme-label')) $('theme-label').textContent = dark ? '亮色' : '暗色';
-        if ($('theme-button')) $('theme-button').setAttribute('aria-label', dark ? '切换到亮色主题' : '切换到暗色主题');
+        const mode = getThemeMode();
+        const resolved = document.documentElement.dataset.theme || resolveTheme(mode);
+        if ($('theme-icon-use')) {
+            $('theme-icon-use').setAttribute('href', THEME_ICONS[mode] || THEME_ICONS.auto);
+        }
+        if ($('theme-label')) {
+            $('theme-label').textContent = THEME_LABELS[mode] || '自动';
+        }
+        if ($('theme-button')) {
+            $('theme-button').setAttribute('aria-label', `切换外观主题（当前：${THEME_LABELS[mode] || resolved}）`);
+        }
+        $$('[data-theme-option]').forEach(card => {
+            const active = card.dataset.themeOption === mode;
+            card.classList.toggle('active', active);
+            card.setAttribute('aria-checked', String(active));
+        });
+    }
+
+    function setThemeMenuOpen(open) {
+        const menu = $('theme-menu');
+        const popover = $('theme-menu-popover');
+        const button = $('theme-button');
+        if (!menu || !popover || !button) return;
+        const willOpen = Boolean(open);
+        menu.classList.toggle('open', willOpen);
+        popover.hidden = !willOpen;
+        button.setAttribute('aria-expanded', String(willOpen));
     }
 
     function toggleTheme() {
+        const popover = $('theme-menu-popover');
+        if (popover) {
+            setThemeMenuOpen(popover.hidden);
+            return;
+        }
         const dark = document.documentElement.getAttribute('data-theme') === 'dark'
             || document.documentElement.dataset.theme === 'dark';
-        const next = dark ? 'light' : 'dark';
-        document.documentElement.dataset.theme = next;
-        document.documentElement.setAttribute('data-theme', next);
-        try { localStorage.setItem('tts-theme', next); } catch (_) {}
-        updateThemeButton();
-        const btn = $('theme-button');
-        if (btn) {
-            btn.classList.remove('is-spinning');
-            void btn.offsetWidth;
-            btn.classList.add('is-spinning');
-            window.setTimeout(() => btn.classList.remove('is-spinning'), 460);
-        }
+        applyThemeMode(dark ? 'light' : 'dark');
     }
 
     function openDialogElement(dialog) {
@@ -752,6 +807,166 @@
         });
     }
 
+    function syncFloatingSaveBar() {
+        const bar = $('floating-save-bar');
+        if (!bar) return;
+        const mainPage = document.querySelector('[data-console-page="main"]');
+        const onMain = !mainPage || !mainPage.hidden;
+        bar.hidden = !(state.dirty && onMain);
+    }
+
+    function setMobileSidebarOpen(open) {
+        const sidebar = $('app-sidebar');
+        const backdrop = $('sidebar-backdrop');
+        const btn = $('mobile-menu-btn');
+        const iconUse = $('mobile-menu-icon-use');
+        if (!sidebar) return;
+        const willOpen = Boolean(open);
+        sidebar.classList.toggle('open', willOpen);
+        if (backdrop) {
+            backdrop.classList.toggle('visible', willOpen);
+            backdrop.setAttribute('aria-hidden', String(!willOpen));
+            backdrop.tabIndex = willOpen ? 0 : -1;
+        }
+        if (btn) {
+            btn.setAttribute('aria-expanded', String(willOpen));
+            btn.setAttribute('aria-label', willOpen ? '关闭导航菜单' : '打开导航菜单');
+        }
+        if (iconUse) iconUse.setAttribute('href', willOpen ? '#icon-close' : '#icon-menu');
+    }
+
+    function applySidebarCollapsed(collapsed, persist = true) {
+        const shell = $('app-shell');
+        const sidebar = $('app-sidebar');
+        const toggleBtn = $('sidebar-toggle-btn');
+        const toggleUse = $('sidebar-toggle-icon-use');
+        const isCollapsed = Boolean(collapsed);
+        document.documentElement.classList.remove('sidebar-collapsed-init');
+        if (shell) shell.classList.toggle('sidebar-is-collapsed', isCollapsed);
+        if (sidebar) sidebar.classList.toggle('collapsed', isCollapsed);
+        if (toggleBtn) {
+            const label = isCollapsed ? '展开侧边栏' : '折叠侧边栏';
+            toggleBtn.setAttribute('aria-label', `${label} (Ctrl+B)`);
+            toggleBtn.dataset.tooltipLabel = label;
+        }
+        if (toggleUse) {
+            toggleUse.setAttribute('href', isCollapsed ? '#icon-chevron' : '#icon-chevron-left');
+        }
+        if (persist) {
+            try { localStorage.setItem('tts-sidebar-collapsed', isCollapsed ? '1' : '0'); } catch (_) {}
+        }
+        hideSidebarTooltip();
+        requestAnimationFrame(syncContentCenterX);
+    }
+
+    function syncContentCenterX() {
+        const scroller = $('content-scroll');
+        if (!scroller) return;
+        const rect = scroller.getBoundingClientRect();
+        if (!rect.width) return;
+        document.documentElement.style.setProperty('--content-center-x', `${rect.left + rect.width / 2}px`);
+    }
+
+    function showSidebarTooltip(target) {
+        const tip = $('sidebar-nav-tooltip');
+        const shell = $('app-shell');
+        if (!tip || !target) return;
+        const isToggle = target.id === 'sidebar-toggle-btn';
+        const isCollapsed = Boolean(shell && shell.classList.contains('sidebar-is-collapsed'));
+        if (!isToggle && !isCollapsed) {
+            tip.hidden = true;
+            return;
+        }
+        const label = target.dataset.tooltipLabel || '';
+        const meta = target.dataset.tooltipMeta || '';
+        if (!label) return;
+        if ($('sidebar-tooltip-label')) $('sidebar-tooltip-label').textContent = label;
+        if ($('sidebar-tooltip-meta')) {
+            $('sidebar-tooltip-meta').textContent = meta;
+            $('sidebar-tooltip-meta').hidden = !meta;
+        }
+        const rect = target.getBoundingClientRect();
+        const top = Math.max(24, Math.min(window.innerHeight - 24, rect.top + rect.height / 2));
+        tip.style.top = `${top}px`;
+        tip.hidden = false;
+    }
+
+    function hideSidebarTooltip() {
+        const tip = $('sidebar-nav-tooltip');
+        if (tip) tip.hidden = true;
+    }
+
+    function initSidebarController() {
+        let initialCollapsed = false;
+        try {
+            initialCollapsed = localStorage.getItem('tts-sidebar-collapsed') === '1';
+        } catch (_) {}
+        applySidebarCollapsed(initialCollapsed, false);
+
+        const toggleBtn = $('sidebar-toggle-btn');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => {
+                const shell = $('app-shell');
+                const next = !(shell && shell.classList.contains('sidebar-is-collapsed'));
+                applySidebarCollapsed(next);
+            });
+        }
+        const mobileBtn = $('mobile-menu-btn');
+        if (mobileBtn) {
+            mobileBtn.addEventListener('click', () => {
+                const sidebar = $('app-sidebar');
+                setMobileSidebarOpen(!(sidebar && sidebar.classList.contains('open')));
+            });
+        }
+        const backdrop = $('sidebar-backdrop');
+        if (backdrop) {
+            backdrop.addEventListener('click', () => setMobileSidebarOpen(false));
+        }
+
+        $$('[data-tooltip-label]').forEach(el => {
+            el.addEventListener('mouseenter', () => showSidebarTooltip(el));
+            el.addEventListener('mouseleave', hideSidebarTooltip);
+            el.addEventListener('focus', () => showSidebarTooltip(el));
+            el.addEventListener('blur', hideSidebarTooltip);
+        });
+
+        $$('[data-nav-jump]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const targetId = btn.dataset.navJump;
+                const subtab = btn.dataset.navSubtab;
+                setConsolePage('main');
+                if (subtab) switchSubTab(subtab);
+                setMobileSidebarOpen(false);
+                hideSidebarTooltip();
+                const targetEl = targetId ? $(targetId) : null;
+                if (targetEl && typeof targetEl.scrollIntoView === 'function') {
+                    requestAnimationFrame(() => {
+                        targetEl.scrollIntoView({behavior: 'smooth', block: 'start'});
+                    });
+                }
+            });
+        });
+
+        window.addEventListener('keydown', event => {
+            if ((event.metaKey || event.ctrlKey) && (event.key === 'b' || event.key === 'B')) {
+                const tag = event.target && event.target.tagName;
+                if (tag === 'INPUT' || tag === 'TEXTAREA' || (event.target && event.target.isContentEditable)) return;
+                event.preventDefault();
+                const shell = $('app-shell');
+                applySidebarCollapsed(!(shell && shell.classList.contains('sidebar-is-collapsed')));
+            } else if (event.key === 'Escape') {
+                setMobileSidebarOpen(false);
+                setThemeMenuOpen(false);
+            }
+        });
+
+        syncContentCenterX();
+        window.addEventListener('resize', syncContentCenterX);
+        if (typeof ResizeObserver !== 'undefined' && $('content-scroll')) {
+            new ResizeObserver(syncContentCenterX).observe($('content-scroll'));
+        }
+    }
+
     function setConsolePage(name) {
         const pageName = name === 'maintenance' ? 'maintenance' : 'main';
         $$('[data-console-page]').forEach(page => {
@@ -778,7 +993,10 @@
         else if (state.initialized && isMonitoringVisible()) {
             startMonitoring();
         }
+        setMobileSidebarOpen(false);
+        syncFloatingSaveBar();
         requestAnimationFrame(syncAllTabIndicators);
+        requestAnimationFrame(syncContentCenterX);
     }
 
     function initConsoleNavigation() {
@@ -1085,8 +1303,19 @@
         const saveButton = $('save-button');
         if (!saveButton.hasAttribute('aria-busy')) saveButton.disabled = !state.dirty || waitingForVoiceCatalog;
         saveButton.classList.toggle('is-dirty-pulse', state.dirty && !waitingForVoiceCatalog);
+        const floatingSaveBtn = $('floating-save-btn');
+        if (floatingSaveBtn) floatingSaveBtn.disabled = !state.dirty || waitingForVoiceCatalog;
+        const floatingSaveStatus = $('floating-save-status');
+        if (floatingSaveStatus) {
+            floatingSaveStatus.textContent = state.dirty
+                ? `草稿已修改 · ${providerMeta().short}`
+                : '所有更改均已保存';
+        }
+        syncFloatingSaveBar();
         const testButton = $('test-config-button');
         if (!testButton.hasAttribute('aria-busy')) testButton.disabled = waitingForVoiceCatalog;
+        const floatingTestBtn = $('floating-test-btn');
+        if (floatingTestBtn) floatingTestBtn.disabled = waitingForVoiceCatalog;
         const testTtsButton = $('test-tts-button');
         if (!testTtsButton.hasAttribute('aria-busy')) {
             testTtsButton.disabled = waitingForVoiceCatalog || !hasUsableCurrentVoice();
@@ -1109,15 +1338,27 @@
     }
 
     function renderProviderStatuses() {
+        let readyCount = 0;
         Object.keys(PROVIDERS).forEach(provider => {
             const element = $(`${provider}-status`);
-            if (!element) return;
             const status = state.providerStatus[provider] || {};
             const ready = provider === 'edge' || Boolean(status.ready);
-            element.textContent = provider === 'edge' ? '免费' : (ready ? '已配置' : '待配置');
-            element.classList.toggle('is-ready', ready);
-            element.classList.toggle('is-missing', !ready);
+            if (ready) readyCount += 1;
+            if (element) {
+                element.textContent = provider === 'edge' ? '免费' : (ready ? '已配置' : '待配置');
+                element.classList.toggle('is-ready', ready);
+                element.classList.toggle('is-missing', !ready);
+            }
+            const heroPill = document.querySelector(`[data-hero-provider="${provider}"]`);
+            if (heroPill) {
+                heroPill.classList.toggle('is-ready', ready);
+                heroPill.classList.toggle('is-missing', !ready);
+                heroPill.classList.toggle('is-active', provider === state.provider);
+            }
         });
+        if ($('sidebar-voice-badge')) {
+            $('sidebar-voice-badge').textContent = String(readyCount);
+        }
         renderCurrentCredentialState();
     }
 
@@ -1142,8 +1383,13 @@
     }
 
     function updateSetupSummary() {
-        const voice = voiceName(currentVoiceId());
+        const voiceId = currentVoiceId();
+        const voice = voiceName(voiceId);
         if ($('setup-summary')) $('setup-summary').textContent = `${providerMeta().short} · ${voice || '未选择音色'}`;
+        if ($('hero-voice-id')) $('hero-voice-id').textContent = voiceId || '未选择音色 ID';
+        $$('[data-hero-provider]').forEach(pill => {
+            pill.classList.toggle('is-active', pill.dataset.heroProvider === state.provider);
+        });
         $('active-provider-name').textContent = `${providerMeta().name} · ${voice || '未选择音色'}`;
         if ($('play-voice-label')) $('play-voice-label').textContent = `当前草稿 · ${providerMeta().name}`;
         $('stats-provider-title').textContent = `${providerMeta().name} 使用量`;
@@ -1989,9 +2235,13 @@
         adminEl.style.background = health.admin_protected ? 'var(--green-soft)' : 'var(--bg-subtle)';
         adminEl.style.borderColor = health.admin_protected ? 'transparent' : 'var(--border)';
         if (metrics) {
+            const hitPct = Number(metrics.cacheHitRate || 0) * 100;
             $('total-chars-all').textContent = Number(metrics.totalChars || 0).toLocaleString();
             $('total-requests-all').textContent = Number(metrics.totalRequests || 0).toLocaleString();
-            $('cache-hit-rate').textContent = `${(Number(metrics.cacheHitRate || 0) * 100).toFixed(1)}%`;
+            $('cache-hit-rate').textContent = `${hitPct.toFixed(1)}%`;
+            if ($('cache-hit-bar')) {
+                $('cache-hit-bar').style.width = `${Math.min(100, Math.max(0, hitPct)).toFixed(1)}%`;
+            }
             $('response-time-p95').textContent = `${Math.round(Number(metrics.p95 || 0))} ms`;
         }
         setServiceStatus('online', `服务正常 · v${health.version || INITIAL.version || ''}`);
@@ -2454,6 +2704,55 @@
 
     function bindEvents() {
         $('theme-button').addEventListener('click', toggleTheme);
+        $$('[data-theme-option]').forEach(option => {
+            option.addEventListener('click', () => {
+                applyThemeMode(option.dataset.themeOption);
+                setThemeMenuOpen(false);
+            });
+        });
+        document.addEventListener('mousedown', event => {
+            const menu = $('theme-menu');
+            if (menu && !menu.contains(event.target)) setThemeMenuOpen(false);
+        });
+        if (typeof window.matchMedia === 'function') {
+            const mq = window.matchMedia('(prefers-color-scheme: dark)');
+            const onSchemeChange = () => {
+                if (getThemeMode() === 'auto') applyThemeMode('auto', false);
+            };
+            if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onSchemeChange);
+            else if (typeof mq.addListener === 'function') mq.addListener(onSchemeChange);
+        }
+        if ($('header-refresh-button')) {
+            $('header-refresh-button').addEventListener('click', async () => {
+                const btn = $('header-refresh-button');
+                btn.classList.remove('is-spinning');
+                void btn.offsetWidth;
+                btn.classList.add('is-spinning');
+                window.setTimeout(() => btn.classList.remove('is-spinning'), 560);
+                try {
+                    await Promise.allSettled([loadSystemStatus(), loadStats()]);
+                    notify('运行状态已刷新', 'success', 2200);
+                } catch (_) {}
+            });
+        }
+        if ($('floating-save-btn')) $('floating-save-btn').addEventListener('click', saveConfig);
+        if ($('floating-test-btn')) $('floating-test-btn').addEventListener('click', testConfig);
+        $$('[data-hero-action="studio"]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                setConsolePage('main');
+                switchSubTab('test');
+                const el = $('section-studio');
+                if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'});
+                window.setTimeout(() => { if ($('test-text')) $('test-text').focus(); }, 180);
+            });
+        });
+        $$('[data-hero-action="integration"]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                setConsolePage('main');
+                const el = $('section-integration');
+                if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'});
+            });
+        });
         if ($('token-button')) $('token-button').addEventListener('click', setAdminToken);
         if ($('maintenance-token-button')) $('maintenance-token-button').addEventListener('click', setAdminToken);
         $$(PROVIDER_BUTTON_SELECTOR).forEach(button => {
@@ -2673,6 +2972,7 @@
         updateThemeButton();
         updateTextCount();
         initCollapsibles();
+        initSidebarController();
         initConsoleNavigation();
         let loadedConfig = null;
         let configLoadError = '';
